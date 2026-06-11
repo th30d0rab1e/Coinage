@@ -153,7 +153,7 @@ async function processSellOrders () {
 
 async function processRemakeOrders () {
     try {
-        const orders = await db.executeQuery(`SELECT * from vw_edit_orders;`)
+        const orders = await db.executeQuery(`SELECT * FROM vw_edit_orders ORDER BY estimated_profit DESC LIMIT 1;`)
         for(let i = 0; i < orders.length; i++){
             let element = orders[i];
             const previewOk = await ca.previewStopLimitOrder(element.order_type, element.order_price, element.shares, element.name, element.new_stop_price)
@@ -167,11 +167,11 @@ async function processRemakeOrders () {
                 let reMakeResponse = await ca.createStopLimitOrder(element.order_type, element.order_price, element.shares, element.name, element.new_stop_price, newOrderId)
                 if(reMakeResponse?.success == true) {
                     if(element.order_type === 'buy') {
-                        await db.executeQuery(`UPDATE position SET buy_order_id = '${newOrderId}', buy_coinbase_order_id = '${reMakeResponse.success_response.order_id}', buy_stop_price = ${element.new_stop_price} WHERE buy_order_id = '${element.buy_order_id}'`)
+                        await db.executeQuery(`UPDATE position SET buy_order_id = '${newOrderId}', buy_coinbase_order_id = '${reMakeResponse.success_response.order_id}', buy_stop_price = ${element.new_stop_price}, buy_price = ${element.order_price} WHERE buy_order_id = '${element.buy_order_id}'`)
                     } else {
-                        await db.executeQuery(`UPDATE position SET sell_order_id = '${newOrderId}', sell_coinbase_order_id = '${reMakeResponse.success_response.order_id}', sell_stop_price = ${element.new_stop_price} WHERE buy_order_id = '${element.buy_order_id}'`)
+                        await db.executeQuery(`UPDATE position SET sell_order_id = '${newOrderId}', sell_coinbase_order_id = '${reMakeResponse.success_response.order_id}', sell_stop_price = ${element.new_stop_price}, sell_price = ${element.order_price} WHERE buy_order_id = '${element.buy_order_id}'`)
                     }
-                    console.log(`Remake OK: ${element.name} ${element.order_type} | shares: ${element.shares} | new stop: ${element.new_stop_price}`)
+                    console.log(`Remake OK: ${element.name} ${element.order_type} | shares: ${element.shares} | new stop: ${element.new_stop_price} | est profit: ${element.estimated_profit}`)
                 } else {
                     await db.executeQuery(`UPDATE position SET error_message = '${reMakeResponse.error_response.message}' WHERE buy_order_id = '${element.buy_order_id}'`)
                     console.log(`Remake Create FAILED: ${element.name} ${element.order_type}`, reMakeResponse)
