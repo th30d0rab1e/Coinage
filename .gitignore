@@ -1,0 +1,4 @@
+node_modules/
+outputLog.txt
+modules/config.js
+.claude/

@@ -1,0 +1,102 @@
+const axios = require('axios')
+const db = require('/Users/theodorecross/Coinbase tedTosterone/modules/database.js')
+let cp = {}
+
+cp.fetchProducts = async function () {
+    try {
+       let data = await getApiCall("https://api.coinbase.com/api/v3/brokerage/products");
+       //https://api.exchange.coinbase.com/products
+       console.log(data);
+
+       let array = [];
+
+       data.forEach(element => {
+        if (element.quote_currency == "USD") {
+            let active = false;
+                if (element.trading_disabled) {
+                    active = true;
+                }
+            array.push({
+                id: element.id
+                , base_min_size: element.base_min_size
+                , base_max_size: element.base_max_size
+                , quote_increment: element.quote_increment
+                , base_increment: element.base_increment
+                , min_market_funds: element.min_market_funds
+                , max_market_funds: element.max_market_funds
+                , trading_disabled: active
+                , status: element.status_message
+                , display_name: element.display_name
+                , post_only: element.post_only
+                , cancel_only: element.cancel_only
+                , System: 'Coinbase'
+            })
+        }
+    });
+    return array;
+
+    } catch (error) {
+        console.log("fetchProducts", error);
+    }
+}
+
+cp.getPriceData = async function (coins) {
+    try {
+        let array = [];
+        for (let i = 0; i < coins.length; i++) {
+            //await sleep(1000);
+            const element = coins[i];
+            let price = await fetchPriceData(element.Name);
+            console.log(element.Name, price);
+            let dt = new Date();
+
+            array.push({
+                StockID: element.StockID
+                , Open: price.open
+                , Close: price.last
+                , High: price.high
+                , Low: price.low
+                , Last: price.last
+                , Volume: price.volume
+                , DateCreated: fixDate(dt.toISOString())
+                //, Volume30Day: element.volume_30day
+            })
+        }
+
+        await db.downloadPrice(array);
+    } catch (error) {
+        console.log("getPriceData()", error);
+    }
+}
+
+cp.fetchPriceData = async function (client, name) {
+    try {
+       
+        let results = await client.get(name)
+     
+        return JSON.parse(results);
+    } catch (error) {
+        console.log("fetchPriceData", error);
+        return {
+            open: 0
+            , high: 0
+            , low: 0
+            , last: 0
+            , volume: 0
+            , volume_30day: 0
+        }
+    }
+}
+
+async function getApiCall(address) {
+    try {
+        const response = await axios.get(address);
+        let data = await response.data;
+        return data;
+    } catch(error) {
+        console.log("apiCall()", error)
+    }
+}
+
+
+module.exports = cp;
