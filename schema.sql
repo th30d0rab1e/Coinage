@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict Ktdi71nv438ifydLCfYgrwCOPolqgpkZTXTfD5B1wTdzZ6E420mvG3tMveDfLzg
+\restrict zK92gNKSBzGv41y1ZxfsjH8aM5FBLctzG1r5qkOTRmCsjWEuOumrTnpMv49ar1v
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -1299,5 +1299,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict Ktdi71nv438ifydLCfYgrwCOPolqgpkZTXTfD5B1wTdzZ6E420mvG3tMveDfLzg
+\unrestrict zK92gNKSBzGv41y1ZxfsjH8aM5FBLctzG1r5qkOTRmCsjWEuOumrTnpMv49ar1v
 
