@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict B0GFVaMlzLrnR8FXs7fBboDu9sDSxcth6bJ2gjHJyEBlYBj6PbUPtivwBt1ZnyO
+\restrict Ktdi71nv438ifydLCfYgrwCOPolqgpkZTXTfD5B1wTdzZ6E420mvG3tMveDfLzg
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -400,9 +400,18 @@ WHERE buy_order_id IN (
     AND p.profit IS NOT NULL
 );
 
+-- Set sell details on filled buys — tiered stop distances based on analysis
 UPDATE position
-SET sell_stop_price = TRUNC(stock.price::numeric * 0.99, stock.price_rounding::int),
-    sell_price = TRUNC(stock.price::numeric * 0.98, stock.price_rounding::int)
+SET sell_stop_price = CASE position.period_type
+        WHEN 'day'   THEN TRUNC(stock.price::numeric * 0.97, stock.price_rounding::int)
+        WHEN 'month' THEN TRUNC(stock.price::numeric * 0.90, stock.price_rounding::int)
+        WHEN 'year'  THEN TRUNC(stock.price::numeric * 0.75, stock.price_rounding::int)
+    END,
+    sell_price = CASE position.period_type
+        WHEN 'day'   THEN TRUNC(stock.price::numeric * 0.96, stock.price_rounding::int)
+        WHEN 'month' THEN TRUNC(stock.price::numeric * 0.89, stock.price_rounding::int)
+        WHEN 'year'  THEN TRUNC(stock.price::numeric * 0.74, stock.price_rounding::int)
+    END
 FROM stock
 WHERE position.stock_id = stock.stock_id
 AND position.buy_filled_price IS NOT NULL
@@ -956,17 +965,17 @@ CREATE VIEW public.vw_edit_orders AS
 UNION ALL
  SELECT p.name,
     p.period_type,
-    trunc((((s.price)::numeric * 0.98) * 0.99), s.price_rounding) AS order_price,
+    trunc((((s.price)::numeric * 0.97) * 0.99), s.price_rounding) AS order_price,
     s.price AS price_now,
     p.buy_order_id,
     p.sell_coinbase_order_id AS coinbase_order_id,
     p.shares,
-    trunc(((s.price)::numeric * 0.98), s.price_rounding) AS new_stop_price,
+    trunc(((s.price)::numeric * 0.97), s.price_rounding) AS new_stop_price,
     'sell'::text AS order_type,
-    trunc(((((s.price)::numeric * 0.98) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
+    trunc(((((s.price)::numeric * 0.97) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
    FROM (public."position" p
      JOIN public.stock s ON ((p.stock_id = s.stock_id)))
-  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.sell_stop_price < (trunc(((s.price)::numeric * 0.98), s.price_rounding))::double precision) AND (p.period_type = 'day'::text))
+  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.period_type = 'day'::text) AND (p.sell_stop_price < (trunc(((s.price)::numeric * 0.97), s.price_rounding))::double precision))
 UNION ALL
  SELECT p.name,
     p.period_type,
@@ -980,21 +989,63 @@ UNION ALL
     trunc(((((s.price)::numeric * 0.97) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
    FROM (public."position" p
      JOIN public.stock s ON ((p.stock_id = s.stock_id)))
-  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.sell_stop_price < (trunc(((s.price)::numeric * 0.97), s.price_rounding))::double precision) AND (p.period_type = 'month'::text))
+  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.period_type = 'day'::text) AND (p.sell_stop_price > (trunc(((s.price)::numeric * 0.98), s.price_rounding))::double precision))
 UNION ALL
  SELECT p.name,
     p.period_type,
-    trunc((((s.price)::numeric * 0.96) * 0.99), s.price_rounding) AS order_price,
+    trunc((((s.price)::numeric * 0.90) * 0.99), s.price_rounding) AS order_price,
     s.price AS price_now,
     p.buy_order_id,
     p.sell_coinbase_order_id AS coinbase_order_id,
     p.shares,
-    trunc(((s.price)::numeric * 0.96), s.price_rounding) AS new_stop_price,
+    trunc(((s.price)::numeric * 0.90), s.price_rounding) AS new_stop_price,
     'sell'::text AS order_type,
-    trunc(((((s.price)::numeric * 0.96) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
+    trunc(((((s.price)::numeric * 0.90) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
    FROM (public."position" p
      JOIN public.stock s ON ((p.stock_id = s.stock_id)))
-  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.sell_stop_price < (trunc(((s.price)::numeric * 0.96), s.price_rounding))::double precision) AND (p.period_type = 'year'::text))
+  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.period_type = 'month'::text) AND (p.sell_stop_price < (trunc(((s.price)::numeric * 0.90), s.price_rounding))::double precision))
+UNION ALL
+ SELECT p.name,
+    p.period_type,
+    trunc((((s.price)::numeric * 0.90) * 0.99), s.price_rounding) AS order_price,
+    s.price AS price_now,
+    p.buy_order_id,
+    p.sell_coinbase_order_id AS coinbase_order_id,
+    p.shares,
+    trunc(((s.price)::numeric * 0.90), s.price_rounding) AS new_stop_price,
+    'sell'::text AS order_type,
+    trunc(((((s.price)::numeric * 0.90) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
+   FROM (public."position" p
+     JOIN public.stock s ON ((p.stock_id = s.stock_id)))
+  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.period_type = 'month'::text) AND (p.sell_stop_price > (trunc(((s.price)::numeric * 0.91), s.price_rounding))::double precision))
+UNION ALL
+ SELECT p.name,
+    p.period_type,
+    trunc((((s.price)::numeric * 0.75) * 0.99), s.price_rounding) AS order_price,
+    s.price AS price_now,
+    p.buy_order_id,
+    p.sell_coinbase_order_id AS coinbase_order_id,
+    p.shares,
+    trunc(((s.price)::numeric * 0.75), s.price_rounding) AS new_stop_price,
+    'sell'::text AS order_type,
+    trunc(((((s.price)::numeric * 0.75) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
+   FROM (public."position" p
+     JOIN public.stock s ON ((p.stock_id = s.stock_id)))
+  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.period_type = 'year'::text) AND (p.sell_stop_price < (trunc(((s.price)::numeric * 0.75), s.price_rounding))::double precision))
+UNION ALL
+ SELECT p.name,
+    p.period_type,
+    trunc((((s.price)::numeric * 0.75) * 0.99), s.price_rounding) AS order_price,
+    s.price AS price_now,
+    p.buy_order_id,
+    p.sell_coinbase_order_id AS coinbase_order_id,
+    p.shares,
+    trunc(((s.price)::numeric * 0.75), s.price_rounding) AS new_stop_price,
+    'sell'::text AS order_type,
+    trunc(((((s.price)::numeric * 0.75) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
+   FROM (public."position" p
+     JOIN public.stock s ON ((p.stock_id = s.stock_id)))
+  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.period_type = 'year'::text) AND (p.sell_stop_price > (trunc(((s.price)::numeric * 0.76), s.price_rounding))::double precision))
   ORDER BY 10 DESC;
 
 
@@ -1248,5 +1299,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict B0GFVaMlzLrnR8FXs7fBboDu9sDSxcth6bJ2gjHJyEBlYBj6PbUPtivwBt1ZnyO
+\unrestrict Ktdi71nv438ifydLCfYgrwCOPolqgpkZTXTfD5B1wTdzZ6E420mvG3tMveDfLzg
 
