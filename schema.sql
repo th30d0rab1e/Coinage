@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict fkEac9PVqZOJN8mAbVt3ku94ZQba876biLyz1Cp99rnRxREuV6CWQXJhjQ2rum0
+\restrict YiWPZlGobfc3yHjfhoODIafKbase4kO86J8kcaib3wTEXyqangUp0CLSoLnq0Q2
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -1122,12 +1122,16 @@ CREATE VIEW public.vw_profit_summary AS
  SELECT period_type,
     count(*) AS total_trades,
     round((sum(profit))::numeric, 2) AS all_time_profit,
+    round((avg(profit))::numeric, 2) AS all_time_avg,
     count(*) FILTER (WHERE ((date_created)::date = CURRENT_DATE)) AS today_trades,
     round((COALESCE(sum(profit) FILTER (WHERE ((date_created)::date = CURRENT_DATE)), (0)::double precision))::numeric, 2) AS today_profit,
+    round((avg(profit) FILTER (WHERE ((date_created)::date = CURRENT_DATE)))::numeric, 2) AS today_avg,
     count(*) FILTER (WHERE (date_trunc('month'::text, date_created) = date_trunc('month'::text, now()))) AS month_trades,
     round((COALESCE(sum(profit) FILTER (WHERE (date_trunc('month'::text, date_created) = date_trunc('month'::text, now()))), (0)::double precision))::numeric, 2) AS month_profit,
+    round((avg(profit) FILTER (WHERE (date_trunc('month'::text, date_created) = date_trunc('month'::text, now()))))::numeric, 2) AS month_avg,
     count(*) FILTER (WHERE (date_trunc('year'::text, date_created) = date_trunc('year'::text, now()))) AS year_trades,
-    round((COALESCE(sum(profit) FILTER (WHERE (date_trunc('year'::text, date_created) = date_trunc('year'::text, now()))), (0)::double precision))::numeric, 2) AS year_profit
+    round((COALESCE(sum(profit) FILTER (WHERE (date_trunc('year'::text, date_created) = date_trunc('year'::text, now()))), (0)::double precision))::numeric, 2) AS year_profit,
+    round((avg(profit) FILTER (WHERE (date_trunc('year'::text, date_created) = date_trunc('year'::text, now()))))::numeric, 2) AS year_avg
    FROM public.profit_history
   GROUP BY period_type
   ORDER BY period_type;
@@ -1318,5 +1322,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict fkEac9PVqZOJN8mAbVt3ku94ZQba876biLyz1Cp99rnRxREuV6CWQXJhjQ2rum0
+\unrestrict YiWPZlGobfc3yHjfhoODIafKbase4kO86J8kcaib3wTEXyqangUp0CLSoLnq0Q2
 
