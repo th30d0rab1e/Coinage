@@ -44,8 +44,8 @@ async function main () {
         //Remake Orders
         await processRemakeOrders();
 
-        //Transfer Profit
-        //await transferProfit (pnbR.everything, pnfR)
+        //Transfer 20% profit to USDC for taxes
+        await processTransfers();
         
     } catch (error) {
         console.log("main", error)
@@ -300,6 +300,44 @@ async function processHistoricalPrices () {
         await db.executeQuery('CALL insert_aggregate();')
        // await db.executeQuery(`UPDATE stock set historical_finished = 1 WHERE stock_id = ${stockID}`
         
+    }
+}
+
+async function processTransfers () {
+    try {
+        const pending = await db.executeQuery(`
+            SELECT buy_order_id, name, transfer_amount
+            FROM position
+            WHERE sell_filled_price IS NOT NULL
+            AND transfer_amount > 0
+            AND transfer_complete = false
+        `)
+        if (pending.length === 0) return
+
+        const accounts = await ca.gatherBalance()
+        let usdId, usdcId
+        for (const account of accounts) {
+            if (account.currency === 'USD')  usdId  = account.uuid
+            if (account.currency === 'USDC') usdcId = account.uuid
+            if (usdId && usdcId) break
+        }
+
+        if (!usdId || !usdcId) {
+            console.log('processTransfers() ERROR: could not find USD or USDC account')
+            return
+        }
+
+        for (const pos of pending) {
+            const result = await ca.createTransfer('USD', 'USDC', pos.transfer_amount, usdId, usdcId)
+            if (result !== false) {
+                await db.executeQuery(`UPDATE position SET transfer_complete = true WHERE buy_order_id = '${pos.buy_order_id}'`)
+                console.log(`Transfer OK: ${pos.name} $${pos.transfer_amount} USD → USDC`)
+            } else {
+                console.log(`Transfer FAILED: ${pos.name} $${pos.transfer_amount}`)
+            }
+        }
+    } catch (error) {
+        console.log('processTransfers() ERROR', error)
     }
 }
 
