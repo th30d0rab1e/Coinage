@@ -392,20 +392,29 @@ ca.yoinkTransfers = async function (coin) {
     }
 }
 
-ca.createTransfer = async function (fromCurrency, toCurrency, amount, fromAccountId, toAccountId) {
+ca.createTransfer = async function (amount, fromAccountId, toAccountId) {
     try {
-        let data = JSON.stringify({
+        const quoteData = JSON.stringify({
             'from_account': fromAccountId,
             'to_account': toAccountId,
-            'from_currency': fromCurrency,
-            'to_currency': toCurrency,
             'amount': amount.toString()
         })
-        const result = await getApiCall('POST', '/api/v3/brokerage/conversions', '', data)
-        console.log('createTransfer()', result.data)
-        return result.data;
+        const quote = await getApiCall('POST', '/api/v3/brokerage/convert/quote', '', quoteData)
+        const tradeId = quote.data?.trade?.id
+        if (!tradeId) {
+            console.log('createTransfer() no trade_id in quote response', JSON.stringify(quote.data))
+            return false;
+        }
+
+        const commitData = JSON.stringify({
+            'from_account': fromAccountId,
+            'to_account': toAccountId
+        })
+        const commit = await getApiCall('POST', `/api/v3/brokerage/convert/trade/${tradeId}`, '', commitData)
+        console.log('createTransfer()', JSON.stringify(commit.data))
+        return commit.data;
     } catch (error) {
-        console.log('createTransfer()', error?.response?.data || error)
+        console.log('createTransfer()', error?.response?.status, JSON.stringify(error?.response?.data) || error)
         return false;
     }
 }

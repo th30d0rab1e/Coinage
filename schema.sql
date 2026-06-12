@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict tL21KDtPgH613pb1qjRfSn22jAygbG4ZyEjPKO36FXwcHlWEJpkNsFdPidF3kpX
+\restrict h7bV5wE2uQLKl9HoLPoHCYd5a3XZ3U250Bu0nXLmLc0JGuiTcaZLbdnVNZhveTe
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -375,8 +375,7 @@ WITH sell_fills AS (
     UPDATE position
     SET sell_filled_price = bf.price,
         sell_fee = bf.fee,
-        profit = TRUNC(((bf.price * position.shares - bf.fee) - (position.buy_filled_price * position.shares + position.buy_fee))::numeric, 2),
-        transfer_amount = GREATEST(0, TRUNC((TRUNC(((bf.price * position.shares - bf.fee) - (position.buy_filled_price * position.shares + position.buy_fee))::numeric, 2) * 0.30)::numeric, 2))
+        profit = TRUNC(((bf.price * position.shares - bf.fee) - (position.buy_filled_price * position.shares + position.buy_fee))::numeric, 2)
     FROM bulk_fills bf
     WHERE position.sell_coinbase_order_id = bf.order_id
     AND position.sell_filled_price IS NULL
@@ -398,7 +397,6 @@ WHERE buy_order_id IN (
     JOIN bulk_fills bf ON p.sell_coinbase_order_id = bf.order_id
     WHERE p.sell_filled_price IS NOT NULL
     AND p.profit IS NOT NULL
-    AND (p.transfer_complete = TRUE OR COALESCE(p.transfer_amount, 0) <= 0)
 );
 
 UPDATE position
@@ -756,9 +754,7 @@ CREATE TABLE public."position" (
     sell_filled_price double precision,
     buy_fee double precision,
     sell_fee double precision,
-    profit double precision,
-    transfer_amount numeric,
-    transfer_complete boolean DEFAULT false
+    profit double precision
 );
 
 
@@ -1346,5 +1342,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict tL21KDtPgH613pb1qjRfSn22jAygbG4ZyEjPKO36FXwcHlWEJpkNsFdPidF3kpX
+\unrestrict h7bV5wE2uQLKl9HoLPoHCYd5a3XZ3U250Bu0nXLmLc0JGuiTcaZLbdnVNZhveTe
 

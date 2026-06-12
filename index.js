@@ -44,9 +44,6 @@ async function main () {
         //Remake Orders
         await processRemakeOrders();
 
-        //Transfer 20% profit to USDC for taxes
-        await processTransfers();
-        
     } catch (error) {
         console.log("main", error)
     } finally {
@@ -328,7 +325,7 @@ async function processTransfers () {
         }
 
         for (const pos of pending) {
-            const result = await ca.createTransfer('USD', 'USDC', pos.transfer_amount, usdId, usdcId)
+            const result = await ca.createTransfer(pos.transfer_amount, usdId, usdcId)
             if (result !== false) {
                 await db.executeQuery(`UPDATE position SET transfer_complete = true WHERE buy_order_id = '${pos.buy_order_id}'`)
                 console.log(`Transfer OK: ${pos.name} $${pos.transfer_amount} USD → USDC`)
