@@ -65,6 +65,7 @@ CROSS JOIN LATERAL (
 ) bal
 LEFT JOIN vw_position p ON s.stock_id = p.stock_id AND s.period_type = p.period_type
 WHERE b.name = 'USD'
+AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
 AND (
     (b.available > 1.00  AND s.period_type = 'day')
     OR (b.available > 10.00 AND s.period_type = 'month')

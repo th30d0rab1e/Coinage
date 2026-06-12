@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict YiWPZlGobfc3yHjfhoODIafKbase4kO86J8kcaib3wTEXyqangUp0CLSoLnq0Q2
+\restrict NzLhT6RgsixDWjwlXlK5EFfz5lsDOkUZdkdSSlwiURbufFdvmxIh5vYsoVQWUa7
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -290,7 +290,7 @@ CREATE PROCEDURE public.thee_procedure()
     LANGUAGE sql
     AS $$
 
-INSERT INTO stock (name, date_created) 
+INSERT INTO stock (name, date_created)
 SELECT bs.id, NOW()
 FROM bulk_stock bs
 LEFT JOIN stock s ON bs.id = s.name
@@ -299,13 +299,13 @@ AND bs.id LIKE '%-USD';
 
 UPDATE stock
 SET price = bs.price::DOUBLE PRECISION,
-    share_rounding = CASE 
-        WHEN (bs.json->>'base_increment') LIKE '%.%' 
+    share_rounding = CASE
+        WHEN (bs.json->>'base_increment') LIKE '%.%'
         THEN length(bs.json->>'base_increment') - position('.' IN bs.json->>'base_increment')
         ELSE 0
     END,
-    price_rounding = CASE 
-        WHEN (bs.json->>'quote_increment') LIKE '%.%' 
+    price_rounding = CASE
+        WHEN (bs.json->>'quote_increment') LIKE '%.%'
         THEN length(bs.json->>'quote_increment') - position('.' IN bs.json->>'quote_increment')
         ELSE 0
     END,
@@ -322,13 +322,13 @@ INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_cr
 SELECT s.stock_id, s.name,
     TRUNC((s.close::numeric * bal.stop_mult * 1.01), stock.price_rounding::integer) AS buy_price,
     TRUNC((s.close::numeric * bal.stop_mult),        stock.price_rounding::integer) AS buy_stop_price,
-    CASE 
+    CASE
         WHEN s.period_type = 'day'   THEN TRUNC((1.00   / s.close)::numeric, stock.share_rounding::integer)
         WHEN s.period_type = 'month' THEN TRUNC((10.00  / s.close)::numeric, stock.share_rounding::integer)
         WHEN s.period_type = 'year'  THEN TRUNC((100.00 / s.close)::numeric, stock.share_rounding::integer)
-        ELSE 0 
+        ELSE 0
     END AS shares,
-    NOW() AS date_created, 
+    NOW() AS date_created,
     gen_random_uuid(),
     s.period_type
 FROM vw_signal s
@@ -352,6 +352,7 @@ CROSS JOIN LATERAL (
 ) bal
 LEFT JOIN vw_position p ON s.stock_id = p.stock_id AND s.period_type = p.period_type
 WHERE b.name = 'USD'
+AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
 AND (
     (b.available > 1.00  AND s.period_type = 'day')
     OR (b.available > 10.00 AND s.period_type = 'month')
@@ -400,7 +401,6 @@ WHERE buy_order_id IN (
     AND p.profit IS NOT NULL
 );
 
--- Set sell details on filled buys — tiered stop distances based on analysis
 UPDATE position
 SET sell_stop_price = CASE position.period_type
         WHEN 'day'   THEN TRUNC(stock.price::numeric * 0.97, stock.price_rounding::int)
@@ -694,6 +694,16 @@ CREATE SEQUENCE public.bulk_stock_bulk_stock_id_seq
 --
 
 ALTER SEQUENCE public.bulk_stock_bulk_stock_id_seq OWNED BY public.bulk_stock.bulk_stock_id;
+
+
+--
+-- Name: config; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.config (
+    key text NOT NULL,
+    value text NOT NULL
+);
 
 
 --
@@ -1271,6 +1281,14 @@ ALTER TABLE ONLY public.bulk_stock
 
 
 --
+-- Name: config config_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.config
+    ADD CONSTRAINT config_pkey PRIMARY KEY (key);
+
+
+--
 -- Name: portfolio portfolio_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1322,5 +1340,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict YiWPZlGobfc3yHjfhoODIafKbase4kO86J8kcaib3wTEXyqangUp0CLSoLnq0Q2
+\unrestrict NzLhT6RgsixDWjwlXlK5EFfz5lsDOkUZdkdSSlwiURbufFdvmxIh5vYsoVQWUa7
 
