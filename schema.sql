@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict a5wA2ifP4iGmbca5tR5zqRgTeUSPt0DqasFpDfsMDBgyAq8PU1OEAZYI8rdcdvF
+\restrict DcrmdybquXJVGwEmap7b7beGpvYp2qeHgCp8FTDizJh7eKl8kqxMowKOIzQDdVM
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -378,7 +378,7 @@ WITH sell_fills AS (
     SET sell_filled_price = bf.price,
         sell_fee = bf.fee,
         profit = TRUNC(((bf.price * position.shares - bf.fee) - (position.buy_filled_price * position.shares + position.buy_fee))::numeric, 2),
-        transfer_amount = GREATEST(0, TRUNC((TRUNC(((bf.price * position.shares - bf.fee) - (position.buy_filled_price * position.shares + position.buy_fee))::numeric, 2) * 0.20)::numeric, 2))
+        transfer_amount = GREATEST(0, TRUNC((TRUNC(((bf.price * position.shares - bf.fee) - (position.buy_filled_price * position.shares + position.buy_fee))::numeric, 2) * 0.30)::numeric, 2))
     FROM bulk_fills bf
     WHERE position.sell_coinbase_order_id = bf.order_id
     AND position.sell_filled_price IS NULL
@@ -1344,5 +1344,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict a5wA2ifP4iGmbca5tR5zqRgTeUSPt0DqasFpDfsMDBgyAq8PU1OEAZYI8rdcdvF
+\unrestrict DcrmdybquXJVGwEmap7b7beGpvYp2qeHgCp8FTDizJh7eKl8kqxMowKOIzQDdVM
 

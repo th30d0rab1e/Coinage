@@ -91,7 +91,7 @@ WITH sell_fills AS (
     SET sell_filled_price = bf.price,
         sell_fee = bf.fee,
         profit = TRUNC(((bf.price * position.shares - bf.fee) - (position.buy_filled_price * position.shares + position.buy_fee))::numeric, 2),
-        transfer_amount = GREATEST(0, TRUNC((TRUNC(((bf.price * position.shares - bf.fee) - (position.buy_filled_price * position.shares + position.buy_fee))::numeric, 2) * 0.20)::numeric, 2))
+        transfer_amount = GREATEST(0, TRUNC((TRUNC(((bf.price * position.shares - bf.fee) - (position.buy_filled_price * position.shares + position.buy_fee))::numeric, 2) * 0.30)::numeric, 2))
     FROM bulk_fills bf
     WHERE position.sell_coinbase_order_id = bf.order_id
     AND position.sell_filled_price IS NULL
