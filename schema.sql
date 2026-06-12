@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict DcrmdybquXJVGwEmap7b7beGpvYp2qeHgCp8FTDizJh7eKl8kqxMowKOIzQDdVM
+\restrict ZVQVdC195hQdmN6RhKqGynMYRAm4KvyZgSCT9np0iYcs0bBuWQ4An6CBF1qhmPD
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -289,7 +289,6 @@ $$;
 CREATE PROCEDURE public.thee_procedure()
     LANGUAGE sql
     AS $$
-
 INSERT INTO stock (name, date_created)
 SELECT bs.id, NOW()
 FROM bulk_stock bs
@@ -367,8 +366,7 @@ LIMIT 1;
 
 UPDATE position
 SET buy_filled_price = bf.price,
-    buy_fee = bf.fee,
-    buy_fills_id = bf.order_id
+    buy_fee = bf.fee
 FROM bulk_fills bf
 WHERE position.buy_coinbase_order_id = bf.order_id
 AND position.buy_filled_price IS NULL;
@@ -383,14 +381,14 @@ WITH sell_fills AS (
     WHERE position.sell_coinbase_order_id = bf.order_id
     AND position.sell_filled_price IS NULL
     RETURNING position.stock_id, position.name, position.period_type,
-              position.buy_fills_id, bf.order_id AS sell_fills_id,
+              position.buy_coinbase_order_id, bf.order_id AS sell_fills_id,
               TRUNC(position.buy_fee::numeric, 2) AS buy_fee,
               TRUNC(bf.fee::numeric, 2) AS sell_fee,
               TRUNC(((bf.price * position.shares - bf.fee) - (position.buy_filled_price * position.shares + position.buy_fee))::numeric, 2) AS profit
 ),
 insert_history AS (
-    INSERT INTO profit_history (stock_id, name, period_type, buy_fills_id, sell_fills_id, buy_fee, sell_fee, profit)
-    SELECT stock_id, name, period_type, buy_fills_id, sell_fills_id, buy_fee, sell_fee, profit
+    INSERT INTO profit_history (stock_id, name, period_type, buy_coinbase_order_id, sell_fills_id, buy_fee, sell_fee, profit)
+    SELECT stock_id, name, period_type, buy_coinbase_order_id, sell_fills_id, buy_fee, sell_fee, profit
     FROM sell_fills
 )
 DELETE FROM position
@@ -419,11 +417,13 @@ WHERE position.stock_id = stock.stock_id
 AND position.buy_filled_price IS NOT NULL
 AND position.sell_price IS NULL;
 
+--Delete bad records
+DELETE FROM position WHERE error_message IS NOT NULL AND buy_coinbase_order_id IS NULL;
+
 TRUNCATE TABLE bulk_stock;
 TRUNCATE TABLE bulk_fills;
 TRUNCATE TABLE bulk_currency;
 TRUNCATE TABLE bulk_open_orders;
-
 $$;
 
 
@@ -757,7 +757,6 @@ CREATE TABLE public."position" (
     buy_fee double precision,
     sell_fee double precision,
     profit double precision,
-    buy_fills_id text,
     transfer_amount numeric,
     transfer_complete boolean DEFAULT false
 );
@@ -890,7 +889,7 @@ CREATE TABLE public.profit_history (
     stock_id integer,
     name text,
     period_type text,
-    buy_fills_id text,
+    buy_coinbase_order_id text,
     sell_fills_id text,
     buy_fee double precision,
     sell_fee double precision,
@@ -1344,5 +1343,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict DcrmdybquXJVGwEmap7b7beGpvYp2qeHgCp8FTDizJh7eKl8kqxMowKOIzQDdVM
+\unrestrict ZVQVdC195hQdmN6RhKqGynMYRAm4KvyZgSCT9np0iYcs0bBuWQ4An6CBF1qhmPD
 
