@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict zK92gNKSBzGv41y1ZxfsjH8aM5FBLctzG1r5qkOTRmCsjWEuOumrTnpMv49ar1v
+\restrict fkEac9PVqZOJN8mAbVt3ku94ZQba876biLyz1Cp99rnRxREuV6CWQXJhjQ2rum0
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -1115,6 +1115,25 @@ CREATE VIEW public.vw_position AS
 
 
 --
+-- Name: vw_profit_summary; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.vw_profit_summary AS
+ SELECT period_type,
+    count(*) AS total_trades,
+    round((sum(profit))::numeric, 2) AS all_time_profit,
+    count(*) FILTER (WHERE ((date_created)::date = CURRENT_DATE)) AS today_trades,
+    round((COALESCE(sum(profit) FILTER (WHERE ((date_created)::date = CURRENT_DATE)), (0)::double precision))::numeric, 2) AS today_profit,
+    count(*) FILTER (WHERE (date_trunc('month'::text, date_created) = date_trunc('month'::text, now()))) AS month_trades,
+    round((COALESCE(sum(profit) FILTER (WHERE (date_trunc('month'::text, date_created) = date_trunc('month'::text, now()))), (0)::double precision))::numeric, 2) AS month_profit,
+    count(*) FILTER (WHERE (date_trunc('year'::text, date_created) = date_trunc('year'::text, now()))) AS year_trades,
+    round((COALESCE(sum(profit) FILTER (WHERE (date_trunc('year'::text, date_created) = date_trunc('year'::text, now()))), (0)::double precision))::numeric, 2) AS year_profit
+   FROM public.profit_history
+  GROUP BY period_type
+  ORDER BY period_type;
+
+
+--
 -- Name: vw_signal; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -1299,5 +1318,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict zK92gNKSBzGv41y1ZxfsjH8aM5FBLctzG1r5qkOTRmCsjWEuOumrTnpMv49ar1v
+\unrestrict fkEac9PVqZOJN8mAbVt3ku94ZQba876biLyz1Cp99rnRxREuV6CWQXJhjQ2rum0
 
