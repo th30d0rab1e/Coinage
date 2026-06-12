@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict ZVQVdC195hQdmN6RhKqGynMYRAm4KvyZgSCT9np0iYcs0bBuWQ4An6CBF1qhmPD
+\restrict tL21KDtPgH613pb1qjRfSn22jAygbG4ZyEjPKO36FXwcHlWEJpkNsFdPidF3kpX
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -1118,7 +1118,10 @@ CREATE VIEW public.vw_position AS
     max(buy_coinbase_order_id) AS max_buy_coinbase_order_id,
     min(buy_coinbase_order_id) AS min_buy_coinbase_order_id,
     max(buy_filled_price) AS max_buy_filled_price,
-    min(buy_filled_price) AS min_buy_filled_price,
+        CASE
+            WHEN bool_or((buy_filled_price IS NULL)) THEN NULL::double precision
+            ELSE min(buy_filled_price)
+        END AS min_buy_filled_price,
     min(buy_stop_price) AS min_buy_stop_price,
     max(buy_stop_price) AS max_buy_stop_price,
     min(date_created) AS min_date_created,
@@ -1343,5 +1346,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict ZVQVdC195hQdmN6RhKqGynMYRAm4KvyZgSCT9np0iYcs0bBuWQ4An6CBF1qhmPD
+\unrestrict tL21KDtPgH613pb1qjRfSn22jAygbG4ZyEjPKO36FXwcHlWEJpkNsFdPidF3kpX
 
