@@ -380,13 +380,14 @@ async function processDailyProfit () {
         // Best open position by estimated profit at current price
         const best = await db.executeQuery(`
             SELECT p.*, s.price AS current_price, s.price_rounding,
-                ROUND(((s.price - p.buy_filled_price) * p.shares - COALESCE(p.buy_fee, 0))::numeric, 4) AS est_profit_now
+                ROUND(((s.price - p.buy_filled_price) * p.shares - COALESCE(p.buy_fee, 0))::numeric, 4) AS est_profit_now,
+                ROUND(((s.price - p.buy_filled_price) / NULLIF(p.buy_filled_price, 0) * 100)::numeric, 4) AS pct_gain
             FROM position p
             JOIN stock s ON p.stock_id = s.stock_id
             WHERE p.buy_filled_price IS NOT NULL
               AND p.sell_filled_price IS NULL
               AND p.daily_sell = false
-            ORDER BY est_profit_now DESC
+            ORDER BY pct_gain DESC
             LIMIT 1
         `)
         if (!best.length) return
@@ -395,7 +396,7 @@ async function processDailyProfit () {
         const estProfit = parseFloat(pos.est_profit_now)
 
         if (estProfit <= avgProfit) {
-            console.log(`processDailyProfit() skipped: ${pos.name} est profit $${estProfit.toFixed(4)} <= avg $${avgProfit.toFixed(4)}`)
+            console.log(`processDailyProfit() skipped: ${pos.name} est profit $${estProfit.toFixed(4)} (${parseFloat(pos.pct_gain).toFixed(2)}%) <= avg $${avgProfit.toFixed(4)}`)
             return
         }
 
