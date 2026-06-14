@@ -44,6 +44,9 @@ async function main () {
         //Remake Orders
         await processRemakeOrders();
 
+        //Daily profit-taking: sell best position if no profit made today
+        await processDailyProfit();
+
     } catch (error) {
         console.log("main", error)
     } finally {
@@ -98,8 +101,16 @@ async function processOpenOrders () {
 async function processNewBalance () {
     try {
         let results = await ca.gatherBalance();
-        console.log(`Balance: ${results.length} accounts`)
         await db.insertCurrency(results);
+        const balResult = await db.executeQuery(`
+            SELECT
+                MAX(CASE WHEN name = 'USD' THEN available ELSE 0 END) AS usd,
+                ROUND(SUM(CASE WHEN name NOT IN ('USD', 'USDC') THEN value ELSE 0 END)::numeric, 2) AS equity
+            FROM vw_balance
+        `)
+        const usd = parseFloat(balResult[0]?.usd ?? 0).toFixed(2);
+        const equity = balResult[0]?.equity ?? 0;
+        console.log(`Balance: ${results.length} accounts | USD: $${usd} | Position Equity: $${equity}`)
     } catch (error) {
         console.log("processNewBalance() ERROR", error);
     }
@@ -210,7 +221,6 @@ async function processPriceData () {
         }
         const spread = ((highest - lowest) / lowest) * 100
         //console.log(spread, highest, lowest, priceData)
-        console.log(`spread:  ${spread} ${highest} ${lowest} ${priceData}`)
         return spread;
     } catch (error) {
         console.log('processPriceData()', error)
@@ -255,7 +265,10 @@ async function processHistoricalPrices () {
         let unixStartDate = Math.floor(new Date(start_date).getTime() / 1000)
         let unixEndDate = Math.floor(new Date(end_date).getTime() / 1000)
 
-       
+        // Coinbase candle API limit is 350 per request; cap to 349 days per call
+        const maxUnixEnd = unixStartDate + 349 * 86400
+        if (unixEndDate > maxUnixEnd) unixEndDate = maxUnixEnd
+
         //fetch from api
         let prices;
         console.log(`Next historical is`, stockID, coin, start_date, unixStartDate, end_date, unixEndDate);
@@ -335,6 +348,88 @@ async function processTransfers () {
         }
     } catch (error) {
         console.log('processTransfers() ERROR', error)
+    }
+}
+
+async function processDailyProfit () {
+    try {
+        // Skip if we already booked profit today
+        const todayCheck = await db.executeQuery(`
+            SELECT COALESCE(SUM(profit), 0) AS today_profit
+            FROM profit_history
+            WHERE DATE(date_created) = CURRENT_DATE
+        `)
+        if (parseFloat(todayCheck[0].today_profit) > 0) {
+            console.log(`processDailyProfit() skipped: already $${parseFloat(todayCheck[0].today_profit).toFixed(2)} profit today`)
+            return
+        }
+
+        // Skip if a daily sell is already in progress (not yet filled)
+        const inProgress = await db.executeQuery(`
+            SELECT 1 FROM position WHERE daily_sell = true AND sell_filled_price IS NULL LIMIT 1
+        `)
+        if (inProgress.length > 0) {
+            console.log('processDailyProfit() skipped: daily sell already in progress')
+            return
+        }
+
+        // Average profit per closed trade
+        const avgRow = await db.executeQuery(`SELECT COALESCE(AVG(profit), 0) AS avg_profit FROM profit_history`)
+        const avgProfit = parseFloat(avgRow[0].avg_profit)
+
+        // Best open position by estimated profit at current price
+        const best = await db.executeQuery(`
+            SELECT p.*, s.price AS current_price, s.price_rounding,
+                ROUND(((s.price - p.buy_filled_price) * p.shares - COALESCE(p.buy_fee, 0))::numeric, 4) AS est_profit_now
+            FROM position p
+            JOIN stock s ON p.stock_id = s.stock_id
+            WHERE p.buy_filled_price IS NOT NULL
+              AND p.sell_filled_price IS NULL
+              AND p.error_message IS NULL
+              AND p.daily_sell = false
+            ORDER BY est_profit_now DESC
+            LIMIT 1
+        `)
+        if (!best.length) return
+
+        const pos = best[0]
+        const estProfit = parseFloat(pos.est_profit_now)
+
+        if (estProfit <= avgProfit) {
+            console.log(`processDailyProfit() skipped: ${pos.name} est profit $${estProfit.toFixed(4)} <= avg $${avgProfit.toFixed(4)}`)
+            return
+        }
+
+        // Cancel existing sell order
+        if (pos.sell_coinbase_order_id) {
+            await ca.cancelOrder(pos.sell_coinbase_order_id)
+        }
+
+        // Tight stop: 1% below current price, limit 1% below stop
+        const pr = parseInt(pos.price_rounding)
+        const factor = Math.pow(10, pr)
+        const currentPrice = parseFloat(pos.current_price)
+        const stopPrice = Math.trunc(currentPrice * 0.99 * factor) / factor
+        const limitPrice = Math.trunc(stopPrice * 0.99 * factor) / factor
+        const newOrderId = crypto.randomUUID()
+
+        const response = await ca.createStopLimitOrder('sell', limitPrice, pos.shares, pos.name, stopPrice, newOrderId)
+        if (response?.success === true) {
+            await db.executeQuery(`
+                UPDATE position
+                SET sell_order_id = '${newOrderId}',
+                    sell_coinbase_order_id = '${response.success_response.order_id}',
+                    sell_stop_price = ${stopPrice},
+                    sell_price = ${limitPrice},
+                    daily_sell = true
+                WHERE buy_order_id = '${pos.buy_order_id}'
+            `)
+            console.log(`processDailyProfit() OK: ${pos.name} | est profit: $${estProfit.toFixed(4)} > avg $${avgProfit.toFixed(4)} | stop: ${stopPrice}`)
+        } else {
+            console.log(`processDailyProfit() FAILED: ${pos.name}`, response)
+        }
+    } catch (error) {
+        console.log('processDailyProfit() ERROR', error)
     }
 }
 
