@@ -385,7 +385,6 @@ async function processDailyProfit () {
             JOIN stock s ON p.stock_id = s.stock_id
             WHERE p.buy_filled_price IS NOT NULL
               AND p.sell_filled_price IS NULL
-              AND p.error_message IS NULL
               AND p.daily_sell = false
             ORDER BY est_profit_now DESC
             LIMIT 1
