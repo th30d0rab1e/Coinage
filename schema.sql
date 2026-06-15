@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict ZA2l0bLzksctbUfZ7cHJvYrK0F6dFK5da6ymvdcsIXzaIGr9bjsoUpo94D2uV9m
+\restrict UJYGkGG5UpvM4d1yo4CkFcRnTdG2iFRUvaChcfRiD2ZoX6CyPwKuA3aggUrVC8q
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -975,6 +975,20 @@ CREATE VIEW public.vw_edit_orders AS
 UNION ALL
  SELECT p.name,
     p.period_type,
+    trunc((((s.price)::numeric * 0.99) * 0.99), s.price_rounding) AS order_price,
+    s.price AS price_now,
+    p.buy_order_id,
+    p.sell_coinbase_order_id AS coinbase_order_id,
+    p.shares,
+    trunc(((s.price)::numeric * 0.99), s.price_rounding) AS new_stop_price,
+    'sell'::text AS order_type,
+    trunc(((((s.price)::numeric * 0.99) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
+   FROM (public."position" p
+     JOIN public.stock s ON ((p.stock_id = s.stock_id)))
+  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.daily_sell = true) AND (p.sell_stop_price < (trunc(((s.price)::numeric * 0.99), s.price_rounding))::double precision))
+UNION ALL
+ SELECT p.name,
+    p.period_type,
     trunc((((s.price)::numeric * 0.97) * 0.99), s.price_rounding) AS order_price,
     s.price AS price_now,
     p.buy_order_id,
@@ -1383,5 +1397,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict ZA2l0bLzksctbUfZ7cHJvYrK0F6dFK5da6ymvdcsIXzaIGr9bjsoUpo94D2uV9m
+\unrestrict UJYGkGG5UpvM4d1yo4CkFcRnTdG2iFRUvaChcfRiD2ZoX6CyPwKuA3aggUrVC8q
 
