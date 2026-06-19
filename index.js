@@ -140,15 +140,24 @@ async function processBuyOrders () {
 
 async function processSellOrders () {
     try {
-        const orders = await db.executeQuery(`SELECT * FROM position WHERE buy_filled_price IS NOT NULL AND sell_coinbase_order_id IS NULL AND sell_price IS NOT NULL;`)
+        const orders = await db.executeQuery(`SELECT p.*, s.price AS current_price, s.price_rounding FROM position p JOIN stock s ON p.stock_id = s.stock_id WHERE p.buy_filled_price IS NOT NULL AND p.sell_coinbase_order_id IS NULL AND p.sell_price IS NOT NULL;`)
         console.log(`Sell Orders to Process: ${orders.length}`);
         for(let i = 0; i < orders.length; i++) {
             let element = orders[i];
             const newSellOrderId = crypto.randomUUID()
             let response = await ca.createStopLimitOrder('sell', element.sell_price, element.shares, element.name, element.sell_stop_price, newSellOrderId)
             if(response?.success == true) {
-                await db.executeQuery(`UPDATE position SET sell_coinbase_order_id = '${response.success_response.order_id}', sell_order_id = '${newSellOrderId}' WHERE buy_order_id = '${element.buy_order_id}'`)
+                await db.executeQuery(`UPDATE position SET sell_coinbase_order_id = '${response.success_response.order_id}', sell_order_id = '${newSellOrderId}', error_message = NULL WHERE buy_order_id = '${element.buy_order_id}'`)
                 console.log(`Sell Order Created: ${element.name} | shares: ${element.shares} | price: ${element.sell_price}`)
+            } else if(response?.error_response?.preview_failure_reason === 'PREVIEW_STOP_PRICE_ABOVE_LAST_TRADE_PRICE') {
+                const ratios = { day: 0.97, month: 0.90, year: 0.75 }
+                const ratio = ratios[element.period_type] ?? 0.97
+                const currentPrice = parseFloat(element.current_price)
+                const rounding = parseInt(element.price_rounding)
+                const newStop = parseFloat((currentPrice * ratio).toFixed(rounding))
+                const newPrice = parseFloat((currentPrice * ratio * 0.99).toFixed(rounding))
+                await db.executeQuery(`UPDATE position SET sell_stop_price = ${newStop}, sell_price = ${newPrice}, error_message = NULL WHERE buy_order_id = '${element.buy_order_id}'`)
+                console.log(`Sell Order stop reset (was above market): ${element.name} | current: ${currentPrice} | new stop: ${newStop}`)
             } else {
                 await db.executeQuery(`UPDATE position SET error_message = '${response.error_response.message}' WHERE buy_order_id = '${element.buy_order_id}'`)
                 console.log(`Sell Order FAILED: ${element.name}`, response)
