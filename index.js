@@ -188,7 +188,7 @@ async function processRemakeOrders () {
                     } else {
                         await db.executeQuery(`UPDATE position SET sell_order_id = '${newOrderId}', sell_coinbase_order_id = '${reMakeResponse.success_response.order_id}', sell_stop_price = ${element.new_stop_price}, sell_price = ${element.order_price}, sell_counter = sell_counter + 1, error_message = NULL WHERE buy_order_id = '${element.buy_order_id}'`)
                     }
-                    console.log(`Remake OK: ${element.name} ${element.order_type} | shares: ${element.shares} | new stop: ${element.new_stop_price} | est profit: ${element.estimated_profit}`)
+                    console.log(`Remake OK: ${element.name} ${element.order_type} | shares: ${element.shares} | new stop: ${element.new_stop_price} | est profit: ${element.estimated_profit} | counter: ${element.counter + 1}`)
                 } else {
                     await db.executeQuery(`UPDATE position SET error_message = '${reMakeResponse.error_response.message}' WHERE buy_order_id = '${element.buy_order_id}'`)
                     console.log(`Remake Create FAILED: ${element.name} ${element.order_type}`, reMakeResponse)
