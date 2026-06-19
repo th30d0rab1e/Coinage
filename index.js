@@ -140,7 +140,7 @@ async function processBuyOrders () {
 
 async function processSellOrders () {
     try {
-        const orders = await db.executeQuery(`SELECT * FROM position WHERE buy_filled_price IS NOT NULL AND sell_coinbase_order_id IS NULL AND sell_price IS NOT NULL AND error_message IS NULL;`)
+        const orders = await db.executeQuery(`SELECT * FROM position WHERE buy_filled_price IS NOT NULL AND sell_coinbase_order_id IS NULL AND sell_price IS NOT NULL;`)
         console.log(`Sell Orders to Process: ${orders.length}`);
         for(let i = 0; i < orders.length; i++) {
             let element = orders[i];
