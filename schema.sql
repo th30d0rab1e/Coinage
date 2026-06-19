@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict UJYGkGG5UpvM4d1yo4CkFcRnTdG2iFRUvaChcfRiD2ZoX6CyPwKuA3aggUrVC8q
+\restrict TIoVyH5KvyJVWTbozaACM95D8l4tuAURbVNh270Pxae3WQDZfZ3AFsiSbkeWkHX
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -755,7 +755,9 @@ CREATE TABLE public."position" (
     buy_fee double precision,
     sell_fee double precision,
     profit double precision,
-    daily_sell boolean DEFAULT false NOT NULL
+    daily_sell boolean DEFAULT false NOT NULL,
+    sell_counter integer DEFAULT 0 NOT NULL,
+    buy_counter integer DEFAULT 0 NOT NULL
 );
 
 
@@ -964,112 +966,112 @@ CREATE VIEW public.vw_edit_orders AS
           WHERE ((pa.stock_id = p.stock_id) AND (pa.period_type = p.period_type))), (0)::numeric))), 4) AS estimated_profit
    FROM ((public."position" p
      JOIN public.stock s ON ((p.stock_id = s.stock_id)))
-     CROSS JOIN LATERAL ( SELECT GREATEST(1.01, LEAST(1.05, (1.01 + (0.04 * (1.0 - (COALESCE(( SELECT (b.available)::numeric AS available
+     CROSS JOIN LATERAL ( SELECT GREATEST(1.001, LEAST(1.05, ((1.01 + (0.04 * (1.0 - (COALESCE(( SELECT (b.available)::numeric AS available
                    FROM public.vw_balance b
                   WHERE (b.name = 'USD'::text)), (0)::numeric) / NULLIF((COALESCE(( SELECT (b.available)::numeric AS available
                    FROM public.vw_balance b
                   WHERE (b.name = 'USD'::text)), (0)::numeric) + COALESCE(( SELECT (sum((p2.buy_price * p2.shares)))::numeric AS sum
                    FROM public."position" p2
-                  WHERE ((p2.buy_coinbase_order_id IS NOT NULL) AND (p2.buy_filled_price IS NULL))), (0)::numeric)), (0)::numeric))))))) AS stop_mult) bal)
+                  WHERE ((p2.buy_coinbase_order_id IS NOT NULL) AND (p2.buy_filled_price IS NULL))), (0)::numeric)), (0)::numeric))))) - ((p.buy_counter)::numeric * 0.001)))) AS stop_mult) bal)
   WHERE ((p.buy_coinbase_order_id IS NOT NULL) AND (p.buy_filled_price IS NULL) AND (p.buy_stop_price > (trunc(((s.price)::numeric * bal.stop_mult), s.price_rounding))::double precision))
 UNION ALL
  SELECT p.name,
     p.period_type,
-    trunc((((s.price)::numeric * 0.99) * 0.99), s.price_rounding) AS order_price,
+    trunc((((s.price)::numeric * (0.99 + ((p.sell_counter)::numeric * 0.001))) * 0.99), s.price_rounding) AS order_price,
     s.price AS price_now,
     p.buy_order_id,
     p.sell_coinbase_order_id AS coinbase_order_id,
     p.shares,
-    trunc(((s.price)::numeric * 0.99), s.price_rounding) AS new_stop_price,
+    trunc(((s.price)::numeric * (0.99 + ((p.sell_counter)::numeric * 0.001))), s.price_rounding) AS new_stop_price,
     'sell'::text AS order_type,
-    trunc(((((s.price)::numeric * 0.99) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
+    trunc(((((s.price)::numeric * (0.99 + ((p.sell_counter)::numeric * 0.001))) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
    FROM (public."position" p
      JOIN public.stock s ON ((p.stock_id = s.stock_id)))
-  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.daily_sell = true) AND (p.sell_stop_price < (trunc(((s.price)::numeric * 0.99), s.price_rounding))::double precision))
+  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.daily_sell = true) AND (p.sell_stop_price < (trunc(((s.price)::numeric * (0.99 + ((p.sell_counter)::numeric * 0.001))), s.price_rounding))::double precision))
 UNION ALL
  SELECT p.name,
     p.period_type,
-    trunc((((s.price)::numeric * 0.97) * 0.99), s.price_rounding) AS order_price,
+    trunc((((s.price)::numeric * (0.97 + ((p.sell_counter)::numeric * 0.001))) * 0.99), s.price_rounding) AS order_price,
     s.price AS price_now,
     p.buy_order_id,
     p.sell_coinbase_order_id AS coinbase_order_id,
     p.shares,
-    trunc(((s.price)::numeric * 0.97), s.price_rounding) AS new_stop_price,
+    trunc(((s.price)::numeric * (0.97 + ((p.sell_counter)::numeric * 0.001))), s.price_rounding) AS new_stop_price,
     'sell'::text AS order_type,
-    trunc(((((s.price)::numeric * 0.97) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
+    trunc(((((s.price)::numeric * (0.97 + ((p.sell_counter)::numeric * 0.001))) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
    FROM (public."position" p
      JOIN public.stock s ON ((p.stock_id = s.stock_id)))
-  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.period_type = 'day'::text) AND (p.daily_sell = false) AND (p.sell_stop_price < (trunc(((s.price)::numeric * 0.97), s.price_rounding))::double precision))
+  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.period_type = 'day'::text) AND (p.daily_sell = false) AND (p.sell_stop_price < (trunc(((s.price)::numeric * (0.97 + ((p.sell_counter)::numeric * 0.001))), s.price_rounding))::double precision))
 UNION ALL
  SELECT p.name,
     p.period_type,
-    trunc((((s.price)::numeric * 0.97) * 0.99), s.price_rounding) AS order_price,
+    trunc((((s.price)::numeric * (0.97 + ((p.sell_counter)::numeric * 0.001))) * 0.99), s.price_rounding) AS order_price,
     s.price AS price_now,
     p.buy_order_id,
     p.sell_coinbase_order_id AS coinbase_order_id,
     p.shares,
-    trunc(((s.price)::numeric * 0.97), s.price_rounding) AS new_stop_price,
+    trunc(((s.price)::numeric * (0.97 + ((p.sell_counter)::numeric * 0.001))), s.price_rounding) AS new_stop_price,
     'sell'::text AS order_type,
-    trunc(((((s.price)::numeric * 0.97) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
+    trunc(((((s.price)::numeric * (0.97 + ((p.sell_counter)::numeric * 0.001))) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
    FROM (public."position" p
      JOIN public.stock s ON ((p.stock_id = s.stock_id)))
-  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.period_type = 'day'::text) AND (p.daily_sell = false) AND (p.sell_stop_price > (trunc(((s.price)::numeric * 0.98), s.price_rounding))::double precision))
+  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.period_type = 'day'::text) AND (p.daily_sell = false) AND (p.sell_stop_price > (trunc(((s.price)::numeric * (0.98 + ((p.sell_counter)::numeric * 0.001))), s.price_rounding))::double precision))
 UNION ALL
  SELECT p.name,
     p.period_type,
-    trunc((((s.price)::numeric * 0.90) * 0.99), s.price_rounding) AS order_price,
+    trunc((((s.price)::numeric * (0.90 + ((p.sell_counter)::numeric * 0.001))) * 0.99), s.price_rounding) AS order_price,
     s.price AS price_now,
     p.buy_order_id,
     p.sell_coinbase_order_id AS coinbase_order_id,
     p.shares,
-    trunc(((s.price)::numeric * 0.90), s.price_rounding) AS new_stop_price,
+    trunc(((s.price)::numeric * (0.90 + ((p.sell_counter)::numeric * 0.001))), s.price_rounding) AS new_stop_price,
     'sell'::text AS order_type,
-    trunc(((((s.price)::numeric * 0.90) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
+    trunc(((((s.price)::numeric * (0.90 + ((p.sell_counter)::numeric * 0.001))) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
    FROM (public."position" p
      JOIN public.stock s ON ((p.stock_id = s.stock_id)))
-  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.period_type = 'month'::text) AND (p.daily_sell = false) AND (p.sell_stop_price < (trunc(((s.price)::numeric * 0.90), s.price_rounding))::double precision))
+  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.period_type = 'month'::text) AND (p.daily_sell = false) AND (p.sell_stop_price < (trunc(((s.price)::numeric * (0.90 + ((p.sell_counter)::numeric * 0.001))), s.price_rounding))::double precision))
 UNION ALL
  SELECT p.name,
     p.period_type,
-    trunc((((s.price)::numeric * 0.90) * 0.99), s.price_rounding) AS order_price,
+    trunc((((s.price)::numeric * (0.90 + ((p.sell_counter)::numeric * 0.001))) * 0.99), s.price_rounding) AS order_price,
     s.price AS price_now,
     p.buy_order_id,
     p.sell_coinbase_order_id AS coinbase_order_id,
     p.shares,
-    trunc(((s.price)::numeric * 0.90), s.price_rounding) AS new_stop_price,
+    trunc(((s.price)::numeric * (0.90 + ((p.sell_counter)::numeric * 0.001))), s.price_rounding) AS new_stop_price,
     'sell'::text AS order_type,
-    trunc(((((s.price)::numeric * 0.90) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
+    trunc(((((s.price)::numeric * (0.90 + ((p.sell_counter)::numeric * 0.001))) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
    FROM (public."position" p
      JOIN public.stock s ON ((p.stock_id = s.stock_id)))
-  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.period_type = 'month'::text) AND (p.daily_sell = false) AND (p.sell_stop_price > (trunc(((s.price)::numeric * 0.91), s.price_rounding))::double precision))
+  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.period_type = 'month'::text) AND (p.daily_sell = false) AND (p.sell_stop_price > (trunc(((s.price)::numeric * (0.91 + ((p.sell_counter)::numeric * 0.001))), s.price_rounding))::double precision))
 UNION ALL
  SELECT p.name,
     p.period_type,
-    trunc((((s.price)::numeric * 0.75) * 0.99), s.price_rounding) AS order_price,
+    trunc((((s.price)::numeric * (0.75 + ((p.sell_counter)::numeric * 0.001))) * 0.99), s.price_rounding) AS order_price,
     s.price AS price_now,
     p.buy_order_id,
     p.sell_coinbase_order_id AS coinbase_order_id,
     p.shares,
-    trunc(((s.price)::numeric * 0.75), s.price_rounding) AS new_stop_price,
+    trunc(((s.price)::numeric * (0.75 + ((p.sell_counter)::numeric * 0.001))), s.price_rounding) AS new_stop_price,
     'sell'::text AS order_type,
-    trunc(((((s.price)::numeric * 0.75) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
+    trunc(((((s.price)::numeric * (0.75 + ((p.sell_counter)::numeric * 0.001))) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
    FROM (public."position" p
      JOIN public.stock s ON ((p.stock_id = s.stock_id)))
-  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.period_type = 'year'::text) AND (p.daily_sell = false) AND (p.sell_stop_price < (trunc(((s.price)::numeric * 0.75), s.price_rounding))::double precision))
+  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.period_type = 'year'::text) AND (p.daily_sell = false) AND (p.sell_stop_price < (trunc(((s.price)::numeric * (0.75 + ((p.sell_counter)::numeric * 0.001))), s.price_rounding))::double precision))
 UNION ALL
  SELECT p.name,
     p.period_type,
-    trunc((((s.price)::numeric * 0.75) * 0.99), s.price_rounding) AS order_price,
+    trunc((((s.price)::numeric * (0.75 + ((p.sell_counter)::numeric * 0.001))) * 0.99), s.price_rounding) AS order_price,
     s.price AS price_now,
     p.buy_order_id,
     p.sell_coinbase_order_id AS coinbase_order_id,
     p.shares,
-    trunc(((s.price)::numeric * 0.75), s.price_rounding) AS new_stop_price,
+    trunc(((s.price)::numeric * (0.75 + ((p.sell_counter)::numeric * 0.001))), s.price_rounding) AS new_stop_price,
     'sell'::text AS order_type,
-    trunc(((((s.price)::numeric * 0.75) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
+    trunc(((((s.price)::numeric * (0.75 + ((p.sell_counter)::numeric * 0.001))) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit
    FROM (public."position" p
      JOIN public.stock s ON ((p.stock_id = s.stock_id)))
-  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.period_type = 'year'::text) AND (p.daily_sell = false) AND (p.sell_stop_price > (trunc(((s.price)::numeric * 0.76), s.price_rounding))::double precision))
+  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.period_type = 'year'::text) AND (p.daily_sell = false) AND (p.sell_stop_price > (trunc(((s.price)::numeric * (0.76 + ((p.sell_counter)::numeric * 0.001))), s.price_rounding))::double precision))
   ORDER BY 10 DESC;
 
 
@@ -1397,5 +1399,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict UJYGkGG5UpvM4d1yo4CkFcRnTdG2iFRUvaChcfRiD2ZoX6CyPwKuA3aggUrVC8q
+\unrestrict TIoVyH5KvyJVWTbozaACM95D8l4tuAURbVNh270Pxae3WQDZfZ3AFsiSbkeWkHX
 
