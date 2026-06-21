@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 2Szm0BaDcDz5meu0ohyUDxmrCfEtht4SEuBh5kASgLIcKl0lXIGNCpgxxCWUwmQ
+\restrict rpjvAVeU3J5gTuUgl7pKdq5w1a0KT4K9B4ZuYbB8z9kfnH9iNzudraKBztJ9uoN
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -289,6 +289,7 @@ $$;
 CREATE PROCEDURE public.thee_procedure()
     LANGUAGE sql
     AS $$
+
 INSERT INTO stock (name, date_created)
 SELECT bs.id, NOW()
 FROM bulk_stock bs
@@ -359,7 +360,7 @@ AND (
 )
 AND (s.close < p.min_buy_filled_price OR p.max_buy_coinbase_order_id IS NULL)
 AND recommendation = 'BUY'
-AND current_change_percent < historical_avg_change_percent
+AND s.signal < -1
 AND historical_avg_change_percent > 0
 AND COALESCE(p.cnt, 0) < 10
 LIMIT 1;
@@ -422,6 +423,7 @@ TRUNCATE TABLE bulk_stock;
 TRUNCATE TABLE bulk_fills;
 TRUNCATE TABLE bulk_currency;
 TRUNCATE TABLE bulk_open_orders;
+
 $$;
 
 
@@ -1407,5 +1409,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 2Szm0BaDcDz5meu0ohyUDxmrCfEtht4SEuBh5kASgLIcKl0lXIGNCpgxxCWUwmQ
+\unrestrict rpjvAVeU3J5gTuUgl7pKdq5w1a0KT4K9B4ZuYbB8z9kfnH9iNzudraKBztJ9uoN
 
