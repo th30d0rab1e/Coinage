@@ -132,7 +132,7 @@ ca.fetchProducts = async function (coinName) {
 ca.gatherBalance = async function (dbOrders) {
     try {
 
-        const response = await getApiCall('GET', '/api/v3/brokerage/accounts', '');
+        const response = await getApiCall('GET', '/api/v3/brokerage/accounts', '?limit=250');
 
         return response.data.accounts;
 
