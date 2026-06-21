@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict rpjvAVeU3J5gTuUgl7pKdq5w1a0KT4K9B4ZuYbB8z9kfnH9iNzudraKBztJ9uoN
+\restrict g0cw23yR5kYQffyaym9ItlCCaEmrwf4c20LeES4WnxEM4KXDEEqPDLPkDRq2vSB
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -360,7 +360,7 @@ AND (
 )
 AND (s.close < p.min_buy_filled_price OR p.max_buy_coinbase_order_id IS NULL)
 AND recommendation = 'BUY'
-AND s.signal < -1
+AND current_change_percent < historical_avg_change_percent
 AND historical_avg_change_percent > 0
 AND COALESCE(p.cnt, 0) < 10
 LIMIT 1;
@@ -1409,5 +1409,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict rpjvAVeU3J5gTuUgl7pKdq5w1a0KT4K9B4ZuYbB8z9kfnH9iNzudraKBztJ9uoN
+\unrestrict g0cw23yR5kYQffyaym9ItlCCaEmrwf4c20LeES4WnxEM4KXDEEqPDLPkDRq2vSB
 
