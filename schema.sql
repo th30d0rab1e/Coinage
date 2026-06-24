@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict IMhERdrgrCfAndVQkfIy1fY8odXuj9WvBiBtKF2QYJaD6nluGquq8YEoFWnnQTq
+\restrict ITcaFC1EXdI70AaTrmIoVIDurcO1Gw4b0BuSkIaGUSCDA7KMrg7DHsyqNkbmPDq
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -334,6 +334,10 @@ SELECT s.stock_id, s.name,
 FROM vw_signal s
 JOIN stock ON s.stock_id = stock.stock_id
 CROSS JOIN vw_balance b
+LEFT JOIN position p ON p.stock_id = s.stock_id
+    AND p.period_type = s.period_type
+    AND p.buy_coinbase_order_id IS NOT NULL
+    AND p.buy_filled_price IS NULL
 CROSS JOIN LATERAL (
     SELECT GREATEST(1.01::numeric, LEAST(1.05::numeric,
         1.01 + 0.04 * (1.0 -
@@ -350,7 +354,6 @@ CROSS JOIN LATERAL (
         )
     )) AS stop_mult
 ) bal
-LEFT JOIN vw_position p ON s.stock_id = p.stock_id AND s.period_type = p.period_type
 WHERE b.name = 'USD'
 AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
 AND (
@@ -358,12 +361,11 @@ AND (
     OR (b.available > 10.00 AND s.period_type = 'month')
     OR (b.available > 100.00 AND s.period_type = 'year')
 )
-AND (s.close < p.min_buy_filled_price OR p.max_buy_coinbase_order_id IS NULL)
+AND p.buy_order_id IS NULL
 AND recommendation = 'BUY'
 AND current_change_percent < historical_avg_change_percent
 AND historical_avg_change_percent > 0
 AND s.score > 5
-AND COALESCE(p.cnt, 0) < 10
 LIMIT 1;
 
 UPDATE position
@@ -401,23 +403,28 @@ WHERE buy_order_id IN (
     AND p.profit IS NOT NULL
 );
 
--- Volatility-adjusted initial sell stop: std_dev/2 of the asset's historical
--- price variation, capped to reasonable bounds per period type.
+-- Initial sell stop floored at buy_filled_price so we never lock in a loss.
 UPDATE position
-SET sell_stop_price = TRUNC(
-        stock.price::numeric * CASE position.period_type
-            WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
-            WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
-            WHEN 'year'  THEN LEAST(0.95, GREATEST(0.60, 1 - pat.std_dev::numeric / 200))
-        END,
-        stock.price_rounding::int),
-    sell_price = TRUNC(
-        stock.price::numeric * (CASE position.period_type
-            WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
-            WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
-            WHEN 'year'  THEN LEAST(0.95, GREATEST(0.60, 1 - pat.std_dev::numeric / 200))
-        END - 0.01),
-        stock.price_rounding::int)
+SET sell_stop_price = GREATEST(
+        position.buy_filled_price::numeric,
+        TRUNC(
+            stock.price::numeric * CASE position.period_type
+                WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
+                WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
+                WHEN 'year'  THEN LEAST(0.95, GREATEST(0.60, 1 - pat.std_dev::numeric / 200))
+            END,
+            stock.price_rounding::int)
+    ),
+    sell_price = GREATEST(
+        position.buy_filled_price::numeric,
+        TRUNC(
+            stock.price::numeric * (CASE position.period_type
+                WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
+                WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
+                WHEN 'year'  THEN LEAST(0.95, GREATEST(0.60, 1 - pat.std_dev::numeric / 200))
+            END - 0.01),
+            stock.price_rounding::int)
+    )
 FROM stock
 JOIN price_aggregate_total pat ON stock.stock_id = pat.stock_id
 WHERE position.stock_id = stock.stock_id
@@ -1004,14 +1011,14 @@ UNION ALL
 UNION ALL
  SELECT p.name,
     p.period_type,
-    trunc((((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))) * 0.99), s.price_rounding) AS order_price,
+    GREATEST((p.buy_filled_price)::numeric, trunc((((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))) * 0.99), s.price_rounding)) AS order_price,
     s.price AS price_now,
     p.buy_order_id,
     p.sell_coinbase_order_id AS coinbase_order_id,
     p.shares,
-    trunc(((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))), s.price_rounding) AS new_stop_price,
+    GREATEST((p.buy_filled_price)::numeric, trunc(((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))), s.price_rounding)) AS new_stop_price,
     'sell'::text AS order_type,
-    trunc(((((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit,
+    trunc(((GREATEST((p.buy_filled_price)::numeric, trunc(((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))), s.price_rounding)) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit,
     p.sell_counter AS counter
    FROM (((public."position" p
      JOIN public.stock s ON ((p.stock_id = s.stock_id)))
@@ -1023,18 +1030,18 @@ UNION ALL
                     WHEN 'year'::text THEN LEAST(0.95, GREATEST(0.60, ((1)::numeric - ((pat.std_dev)::numeric / (200)::numeric))))
                     ELSE NULL::numeric
                 END AS stop_ratio) vol)
-  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.daily_sell = false) AND (p.sell_stop_price < (trunc(((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))), s.price_rounding))::double precision))
+  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.daily_sell = false) AND (p.sell_stop_price < (GREATEST((p.buy_filled_price)::numeric, trunc(((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))), s.price_rounding)))::double precision))
 UNION ALL
  SELECT p.name,
     p.period_type,
-    trunc((((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))) * 0.99), s.price_rounding) AS order_price,
+    GREATEST((p.buy_filled_price)::numeric, trunc((((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))) * 0.99), s.price_rounding)) AS order_price,
     s.price AS price_now,
     p.buy_order_id,
     p.sell_coinbase_order_id AS coinbase_order_id,
     p.shares,
-    trunc(((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))), s.price_rounding) AS new_stop_price,
+    GREATEST((p.buy_filled_price)::numeric, trunc(((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))), s.price_rounding)) AS new_stop_price,
     'sell'::text AS order_type,
-    trunc(((((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit,
+    trunc(((GREATEST((p.buy_filled_price)::numeric, trunc(((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))), s.price_rounding)) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit,
     p.sell_counter AS counter
    FROM (((public."position" p
      JOIN public.stock s ON ((p.stock_id = s.stock_id)))
@@ -1374,5 +1381,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict IMhERdrgrCfAndVQkfIy1fY8odXuj9WvBiBtKF2QYJaD6nluGquq8YEoFWnnQTq
+\unrestrict ITcaFC1EXdI70AaTrmIoVIDurcO1Gw4b0BuSkIaGUSCDA7KMrg7DHsyqNkbmPDq
 
