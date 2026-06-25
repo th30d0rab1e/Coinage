@@ -128,7 +128,6 @@ async function processBuyOrders () {
                 await db.executeQuery(`UPDATE position SET buy_coinbase_order_id = '${response.success_response.order_id}' WHERE buy_order_id = '${element.buy_order_id}'`)
                 console.log(`Buy Order Created: ${element.name} | shares: ${element.shares} | price: ${element.buy_price}`)
             } else {
-                await db.executeQuery(`UPDATE position SET error_message = '${response.error_response.message}' WHERE buy_order_id = '${element.buy_order_id}'`)
                 console.log(`Buy Order FAILED: ${element.name}`, response)
             }
         }

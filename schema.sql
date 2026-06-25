@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict dPn2I8eMKLWYLDd397EutE49Vv73IG6Qx6D1Dcve9vebdzRlflspklTxdHNauf2
+\restrict L5boi7HOEse3MwOotsU6zO5eYu4WUDEV2qSCP5CpFBEZxxbZZapth5swN2Obwlw
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -475,8 +475,12 @@ AND pat.period_type = position.period_type
 AND position.buy_filled_price IS NOT NULL
 AND position.sell_price IS NULL;
 
---Delete bad records
-DELETE FROM position WHERE error_message IS NOT NULL AND buy_coinbase_order_id IS NULL;
+-- Clear error_message on unfilled buy positions instead of deleting them.
+-- Keeps the position as a buy blocker while allowing processBuyOrders to retry.
+UPDATE position SET error_message = NULL
+WHERE error_message IS NOT NULL
+AND buy_coinbase_order_id IS NULL
+AND buy_filled_price IS NULL;
 
 TRUNCATE TABLE bulk_stock;
 TRUNCATE TABLE bulk_fills;
@@ -1424,5 +1428,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict dPn2I8eMKLWYLDd397EutE49Vv73IG6Qx6D1Dcve9vebdzRlflspklTxdHNauf2
+\unrestrict L5boi7HOEse3MwOotsU6zO5eYu4WUDEV2qSCP5CpFBEZxxbZZapth5swN2Obwlw
 
