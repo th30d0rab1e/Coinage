@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict L5boi7HOEse3MwOotsU6zO5eYu4WUDEV2qSCP5CpFBEZxxbZZapth5swN2Obwlw
+\restrict CgE1zfpPHEcGuH5irW9L8nWbicckNy54busSOEMF9PDe2KDYAb1Y9KtkgUj2sgT
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -319,6 +319,7 @@ AND bs.id LIKE '%-USD'
 AND bs.price != '';
 
 -- Recover orphaned buy orders: open on Coinbase but missing from position table.
+-- Skip if an unfilled buy position already exists for that coin + period_type.
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, buy_coinbase_order_id, period_type)
 SELECT
     s.stock_id,
@@ -341,7 +342,20 @@ JOIN stock s ON s.name = o.product_id
 LEFT JOIN position p ON p.buy_coinbase_order_id = o.order_id
 WHERE o.side = 'BUY'
 AND p.buy_coinbase_order_id IS NULL
-AND o.order_configuration::text LIKE '%stop_limit_stop_limit_gtc%';
+AND o.order_configuration::text LIKE '%stop_limit_stop_limit_gtc%'
+AND NOT EXISTS (
+    SELECT 1 FROM position existing
+    WHERE existing.stock_id = s.stock_id
+    AND existing.buy_filled_price IS NULL
+    AND existing.buy_order_id IS NOT NULL
+    AND existing.period_type = CASE
+        WHEN ((o.order_configuration->'stop_limit_stop_limit_gtc'->>'limit_price')::numeric *
+              (o.order_configuration->'stop_limit_stop_limit_gtc'->>'base_size')::numeric) < 5   THEN 'day'
+        WHEN ((o.order_configuration->'stop_limit_stop_limit_gtc'->>'limit_price')::numeric *
+              (o.order_configuration->'stop_limit_stop_limit_gtc'->>'base_size')::numeric) < 50  THEN 'month'
+        ELSE 'year'
+    END
+);
 
 -- Reconcile cancelled buy orders: in DB but gone from Coinbase.
 UPDATE position
@@ -1428,5 +1442,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict L5boi7HOEse3MwOotsU6zO5eYu4WUDEV2qSCP5CpFBEZxxbZZapth5swN2Obwlw
+\unrestrict CgE1zfpPHEcGuH5irW9L8nWbicckNy54busSOEMF9PDe2KDYAb1Y9KtkgUj2sgT
 
