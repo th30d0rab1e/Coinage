@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict cs4VIapnIxrPyvVCRpjnuzbugBTzjdHz4vNMLG2zCWMgVPUaOLlu1oLUQa4hfWz
+\restrict LkaMMwKwonwfyzefTdRLLHvGGEDVCygELJyAvChtwPxrwMnnJvbC3XIKnQxZ5Kf
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -342,6 +342,24 @@ LEFT JOIN position p ON p.buy_coinbase_order_id = o.order_id
 WHERE o.side = 'BUY'
 AND p.buy_coinbase_order_id IS NULL
 AND o.order_configuration::text LIKE '%stop_limit_stop_limit_gtc%';
+
+-- Reconcile cancelled buy orders: in DB but gone from Coinbase.
+UPDATE position
+SET buy_coinbase_order_id = NULL, error_message = NULL
+WHERE buy_filled_price IS NULL
+AND buy_coinbase_order_id IS NOT NULL
+AND NOT EXISTS (
+    SELECT 1 FROM bulk_open_orders o WHERE o.order_id = position.buy_coinbase_order_id
+);
+
+-- Reconcile cancelled sell orders: in DB but gone from Coinbase.
+UPDATE position
+SET sell_coinbase_order_id = NULL, error_message = NULL
+WHERE sell_filled_price IS NULL
+AND sell_coinbase_order_id IS NOT NULL
+AND NOT EXISTS (
+    SELECT 1 FROM bulk_open_orders o WHERE o.order_id = position.sell_coinbase_order_id
+);
 
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
 SELECT s.stock_id, s.name,
@@ -1406,5 +1424,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict cs4VIapnIxrPyvVCRpjnuzbugBTzjdHz4vNMLG2zCWMgVPUaOLlu1oLUQa4hfWz
+\unrestrict LkaMMwKwonwfyzefTdRLLHvGGEDVCygELJyAvChtwPxrwMnnJvbC3XIKnQxZ5Kf
 
