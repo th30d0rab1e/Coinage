@@ -190,7 +190,11 @@ async function processRemakeOrders () {
                     }
                     console.log(`Remake OK: ${element.name} ${element.order_type} | shares: ${element.shares} | new stop: ${element.new_stop_price} | est profit: ${element.estimated_profit} | counter: ${element.counter + 1}`)
                 } else {
-                    await db.executeQuery(`UPDATE position SET error_message = '${reMakeResponse.error_response.message}' WHERE buy_order_id = '${element.buy_order_id}'`)
+                    if(element.order_type === 'buy') {
+                        await db.executeQuery(`UPDATE position SET buy_coinbase_order_id = NULL, error_message = '${reMakeResponse.error_response.message}' WHERE buy_order_id = '${element.buy_order_id}'`)
+                    } else {
+                        await db.executeQuery(`UPDATE position SET sell_coinbase_order_id = NULL, error_message = '${reMakeResponse.error_response.message}' WHERE buy_order_id = '${element.buy_order_id}'`)
+                    }
                     console.log(`Remake Create FAILED: ${element.name} ${element.order_type}`, reMakeResponse)
                 }
             } else {
