@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict LkaMMwKwonwfyzefTdRLLHvGGEDVCygELJyAvChtwPxrwMnnJvbC3XIKnQxZ5Kf
+\restrict dPn2I8eMKLWYLDd397EutE49Vv73IG6Qx6D1Dcve9vebdzRlflspklTxdHNauf2
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -379,7 +379,7 @@ JOIN stock ON s.stock_id = stock.stock_id
 CROSS JOIN vw_balance b
 LEFT JOIN position p ON p.stock_id = s.stock_id
     AND p.period_type = s.period_type
-    AND p.buy_coinbase_order_id IS NOT NULL
+    AND p.buy_order_id IS NOT NULL
     AND p.buy_filled_price IS NULL
 CROSS JOIN LATERAL (
     SELECT GREATEST(1.01::numeric, LEAST(1.05::numeric,
@@ -1424,5 +1424,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict LkaMMwKwonwfyzefTdRLLHvGGEDVCygELJyAvChtwPxrwMnnJvbC3XIKnQxZ5Kf
+\unrestrict dPn2I8eMKLWYLDd397EutE49Vv73IG6Qx6D1Dcve9vebdzRlflspklTxdHNauf2
 
