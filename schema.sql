@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict ITcaFC1EXdI70AaTrmIoVIDurcO1Gw4b0BuSkIaGUSCDA7KMrg7DHsyqNkbmPDq
+\restrict cs4VIapnIxrPyvVCRpjnuzbugBTzjdHz4vNMLG2zCWMgVPUaOLlu1oLUQa4hfWz
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -317,6 +317,31 @@ FROM bulk_stock bs
 WHERE stock.name = bs.id
 AND bs.id LIKE '%-USD'
 AND bs.price != '';
+
+-- Recover orphaned buy orders: open on Coinbase but missing from position table.
+INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, buy_coinbase_order_id, period_type)
+SELECT
+    s.stock_id,
+    o.product_id,
+    (o.order_configuration->'stop_limit_stop_limit_gtc'->>'limit_price')::double precision,
+    (o.order_configuration->'stop_limit_stop_limit_gtc'->>'stop_price')::double precision,
+    (o.order_configuration->'stop_limit_stop_limit_gtc'->>'base_size')::double precision,
+    o.created_time,
+    o.client_order_id,
+    o.order_id,
+    CASE
+        WHEN ((o.order_configuration->'stop_limit_stop_limit_gtc'->>'limit_price')::numeric *
+              (o.order_configuration->'stop_limit_stop_limit_gtc'->>'base_size')::numeric) < 5   THEN 'day'
+        WHEN ((o.order_configuration->'stop_limit_stop_limit_gtc'->>'limit_price')::numeric *
+              (o.order_configuration->'stop_limit_stop_limit_gtc'->>'base_size')::numeric) < 50  THEN 'month'
+        ELSE 'year'
+    END
+FROM bulk_open_orders o
+JOIN stock s ON s.name = o.product_id
+LEFT JOIN position p ON p.buy_coinbase_order_id = o.order_id
+WHERE o.side = 'BUY'
+AND p.buy_coinbase_order_id IS NULL
+AND o.order_configuration::text LIKE '%stop_limit_stop_limit_gtc%';
 
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
 SELECT s.stock_id, s.name,
@@ -1381,5 +1406,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict ITcaFC1EXdI70AaTrmIoVIDurcO1Gw4b0BuSkIaGUSCDA7KMrg7DHsyqNkbmPDq
+\unrestrict cs4VIapnIxrPyvVCRpjnuzbugBTzjdHz4vNMLG2zCWMgVPUaOLlu1oLUQa4hfWz
 
