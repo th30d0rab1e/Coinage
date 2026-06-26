@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict CgE1zfpPHEcGuH5irW9L8nWbicckNy54busSOEMF9PDe2KDYAb1Y9KtkgUj2sgT
+\restrict 7teQFsaQn0cHZbxcqfeVNkvJxcyY8a9ogHI4ADABVxKfIwV3t7cluaHgSvsH5U9
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -317,6 +317,12 @@ FROM bulk_stock bs
 WHERE stock.name = bs.id
 AND bs.id LIKE '%-USD'
 AND bs.price != '';
+
+-- Delete unfilled buy positions with no Coinbase order that are older than 1 hour.
+DELETE FROM position
+WHERE buy_coinbase_order_id IS NULL
+AND buy_filled_price IS NULL
+AND date_created < NOW() - INTERVAL '1 hour';
 
 -- Recover orphaned buy orders: open on Coinbase but missing from position table.
 -- Skip if an unfilled buy position already exists for that coin + period_type.
@@ -1442,5 +1448,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict CgE1zfpPHEcGuH5irW9L8nWbicckNy54busSOEMF9PDe2KDYAb1Y9KtkgUj2sgT
+\unrestrict 7teQFsaQn0cHZbxcqfeVNkvJxcyY8a9ogHI4ADABVxKfIwV3t7cluaHgSvsH5U9
 
