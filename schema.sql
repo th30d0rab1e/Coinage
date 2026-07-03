@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict gavYvigghYC7aZJ9efC7JlDI5fe9NAkLem61arhNC3FENdPp2xv0LJI11IPJuox
+\restrict zWhte3BRxzfCJOMrf2Qal56KwwHJqRfemhKeVjDxK0dhhTeSoIO5OP5XR3GqaAD
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -384,8 +384,14 @@ SELECT
 FROM bulk_fills f
 JOIN stock s ON s.name = f.product_id
 LEFT JOIN position p ON p.buy_coinbase_order_id = f.order_id
+    OR p.sell_coinbase_order_id = f.order_id
 WHERE f.side = 'BUY'
-AND p.buy_order_id IS NULL;
+AND p.buy_order_id IS NULL
+AND NOT EXISTS (
+    SELECT 1 FROM profit_history ph
+    WHERE ph.buy_coinbase_order_id = f.order_id
+    OR ph.sell_fills_id = f.order_id
+);
 
 -- Reconcile cancelled buy orders: in DB but gone from Coinbase.
 UPDATE position
@@ -1471,5 +1477,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict gavYvigghYC7aZJ9efC7JlDI5fe9NAkLem61arhNC3FENdPp2xv0LJI11IPJuox
+\unrestrict zWhte3BRxzfCJOMrf2Qal56KwwHJqRfemhKeVjDxK0dhhTeSoIO5OP5XR3GqaAD
 

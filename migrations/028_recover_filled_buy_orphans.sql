@@ -101,8 +101,14 @@ SELECT
 FROM bulk_fills f
 JOIN stock s ON s.name = f.product_id
 LEFT JOIN position p ON p.buy_coinbase_order_id = f.order_id
+    OR p.sell_coinbase_order_id = f.order_id
 WHERE f.side = 'BUY'
-AND p.buy_order_id IS NULL;
+AND p.buy_order_id IS NULL
+AND NOT EXISTS (
+    SELECT 1 FROM profit_history ph
+    WHERE ph.buy_coinbase_order_id = f.order_id
+    OR ph.sell_fills_id = f.order_id
+);
 
 -- Reconcile cancelled buy orders: in DB but gone from Coinbase.
 UPDATE position
