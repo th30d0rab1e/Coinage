@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 7teQFsaQn0cHZbxcqfeVNkvJxcyY8a9ogHI4ADABVxKfIwV3t7cluaHgSvsH5U9
+\restrict gavYvigghYC7aZJ9efC7JlDI5fe9NAkLem61arhNC3FENdPp2xv0LJI11IPJuox
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -322,7 +322,7 @@ AND bs.price != '';
 DELETE FROM position
 WHERE buy_coinbase_order_id IS NULL
 AND buy_filled_price IS NULL
-AND date_created < NOW() - INTERVAL '1 hour';
+AND date_created < NOW() - INTERVAL '1 day';
 
 -- Recover orphaned buy orders: open on Coinbase but missing from position table.
 -- Skip if an unfilled buy position already exists for that coin + period_type.
@@ -362,6 +362,30 @@ AND NOT EXISTS (
         ELSE 'year'
     END
 );
+
+-- Recover filled BUY orders with no position row.
+-- When a buy fills but the position row is missing, create it with buy_filled_price set
+-- so processSellOrders will immediately place a sell order next cycle.
+INSERT INTO position (stock_id, name, buy_coinbase_order_id, buy_filled_price, buy_fee, shares, date_created, buy_order_id, period_type)
+SELECT
+    s.stock_id,
+    f.product_id,
+    f.order_id,
+    f.price,
+    f.fee,
+    f.size,
+    f.created_at,
+    gen_random_uuid(),
+    CASE
+        WHEN f.price * f.size < 5   THEN 'day'
+        WHEN f.price * f.size < 50  THEN 'month'
+        ELSE 'year'
+    END
+FROM bulk_fills f
+JOIN stock s ON s.name = f.product_id
+LEFT JOIN position p ON p.buy_coinbase_order_id = f.order_id
+WHERE f.side = 'BUY'
+AND p.buy_order_id IS NULL;
 
 -- Reconcile cancelled buy orders: in DB but gone from Coinbase.
 UPDATE position
@@ -496,7 +520,6 @@ AND position.buy_filled_price IS NOT NULL
 AND position.sell_price IS NULL;
 
 -- Clear error_message on unfilled buy positions instead of deleting them.
--- Keeps the position as a buy blocker while allowing processBuyOrders to retry.
 UPDATE position SET error_message = NULL
 WHERE error_message IS NOT NULL
 AND buy_coinbase_order_id IS NULL
@@ -1448,5 +1471,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 7teQFsaQn0cHZbxcqfeVNkvJxcyY8a9ogHI4ADABVxKfIwV3t7cluaHgSvsH5U9
+\unrestrict gavYvigghYC7aZJ9efC7JlDI5fe9NAkLem61arhNC3FENdPp2xv0LJI11IPJuox
 
