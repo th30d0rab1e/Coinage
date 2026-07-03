@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict zWhte3BRxzfCJOMrf2Qal56KwwHJqRfemhKeVjDxK0dhhTeSoIO5OP5XR3GqaAD
+\restrict Wf7BJCx5bU6waoIT9t5W0wqf8O18KgqXuAL1vDbMzkkv5WvE4YBy1gwiTtLirwc
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -318,11 +318,17 @@ WHERE stock.name = bs.id
 AND bs.id LIKE '%-USD'
 AND bs.price != '';
 
--- Delete unfilled buy positions with no Coinbase order that are older than 1 hour.
+-- Delete unfilled buy positions that have no active order on Coinbase.
+-- A row is only removed if neither its buy nor sell order_id appears in
+-- bulk_open_orders, meaning Coinbase has no open order associated with it.
 DELETE FROM position
-WHERE buy_coinbase_order_id IS NULL
-AND buy_filled_price IS NULL
-AND date_created < NOW() - INTERVAL '1 day';
+WHERE buy_filled_price IS NULL
+AND NOT EXISTS (
+    SELECT 1 FROM bulk_open_orders o WHERE o.order_id = position.buy_coinbase_order_id
+)
+AND NOT EXISTS (
+    SELECT 1 FROM bulk_open_orders o WHERE o.order_id = position.sell_coinbase_order_id
+);
 
 -- Recover orphaned buy orders: open on Coinbase but missing from position table.
 -- Skip if an unfilled buy position already exists for that coin + period_type.
@@ -361,36 +367,6 @@ AND NOT EXISTS (
               (o.order_configuration->'stop_limit_stop_limit_gtc'->>'base_size')::numeric) < 50  THEN 'month'
         ELSE 'year'
     END
-);
-
--- Recover filled BUY orders with no position row.
--- When a buy fills but the position row is missing, create it with buy_filled_price set
--- so processSellOrders will immediately place a sell order next cycle.
-INSERT INTO position (stock_id, name, buy_coinbase_order_id, buy_filled_price, buy_fee, shares, date_created, buy_order_id, period_type)
-SELECT
-    s.stock_id,
-    f.product_id,
-    f.order_id,
-    f.price,
-    f.fee,
-    f.size,
-    f.created_at,
-    gen_random_uuid(),
-    CASE
-        WHEN f.price * f.size < 5   THEN 'day'
-        WHEN f.price * f.size < 50  THEN 'month'
-        ELSE 'year'
-    END
-FROM bulk_fills f
-JOIN stock s ON s.name = f.product_id
-LEFT JOIN position p ON p.buy_coinbase_order_id = f.order_id
-    OR p.sell_coinbase_order_id = f.order_id
-WHERE f.side = 'BUY'
-AND p.buy_order_id IS NULL
-AND NOT EXISTS (
-    SELECT 1 FROM profit_history ph
-    WHERE ph.buy_coinbase_order_id = f.order_id
-    OR ph.sell_fills_id = f.order_id
 );
 
 -- Reconcile cancelled buy orders: in DB but gone from Coinbase.
@@ -1477,5 +1453,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict zWhte3BRxzfCJOMrf2Qal56KwwHJqRfemhKeVjDxK0dhhTeSoIO5OP5XR3GqaAD
+\unrestrict Wf7BJCx5bU6waoIT9t5W0wqf8O18KgqXuAL1vDbMzkkv5WvE4YBy1gwiTtLirwc
 

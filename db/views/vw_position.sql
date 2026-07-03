@@ -1,6 +1,3 @@
--- Make min_buy_filled_price NULL when any position in the group is unfilled,
--- so the INSERT guard in thee_procedure naturally blocks new buys on pending orders.
-
 CREATE OR REPLACE VIEW public.vw_position AS
 SELECT stock_id,
     name,
@@ -15,8 +12,9 @@ SELECT stock_id,
     max(buy_coinbase_order_id) AS max_buy_coinbase_order_id,
     min(buy_coinbase_order_id) AS min_buy_coinbase_order_id,
     max(buy_filled_price) AS max_buy_filled_price,
-    CASE WHEN bool_or(buy_filled_price IS NULL) THEN NULL
-         ELSE MIN(buy_filled_price)
+    CASE
+        WHEN bool_or(buy_filled_price IS NULL) THEN NULL::double precision
+        ELSE min(buy_filled_price)
     END AS min_buy_filled_price,
     min(buy_stop_price) AS min_buy_stop_price,
     max(buy_stop_price) AS max_buy_stop_price,

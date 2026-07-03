@@ -1,9 +1,4 @@
--- Delete unfilled buy positions with no Coinbase order ID that are older than 1 hour.
--- These are positions that failed to place (insufficient funds, API error, etc.)
--- and have no chance of self-healing. Deleting them allows fresh positions to be
--- created when conditions improve (e.g. funds available after a sell fills).
-
-CREATE OR REPLACE PROCEDURE thee_procedure()
+CREATE OR REPLACE PROCEDURE public.thee_procedure()
 LANGUAGE sql
 AS $$
 
@@ -35,11 +30,17 @@ WHERE stock.name = bs.id
 AND bs.id LIKE '%-USD'
 AND bs.price != '';
 
--- Delete unfilled buy positions with no Coinbase order that are older than 1 hour.
+-- Delete unfilled buy positions that have no active order on Coinbase.
+-- A row is only removed if neither its buy nor sell order_id appears in
+-- bulk_open_orders, meaning Coinbase has no open order associated with it.
 DELETE FROM position
-WHERE buy_coinbase_order_id IS NULL
-AND buy_filled_price IS NULL
-AND date_created < NOW() - INTERVAL '1 hour';
+WHERE buy_filled_price IS NULL
+AND NOT EXISTS (
+    SELECT 1 FROM bulk_open_orders o WHERE o.order_id = position.buy_coinbase_order_id
+)
+AND NOT EXISTS (
+    SELECT 1 FROM bulk_open_orders o WHERE o.order_id = position.sell_coinbase_order_id
+);
 
 -- Recover orphaned buy orders: open on Coinbase but missing from position table.
 -- Skip if an unfilled buy position already exists for that coin + period_type.
@@ -213,7 +214,6 @@ AND position.buy_filled_price IS NOT NULL
 AND position.sell_price IS NULL;
 
 -- Clear error_message on unfilled buy positions instead of deleting them.
--- Keeps the position as a buy blocker while allowing processBuyOrders to retry.
 UPDATE position SET error_message = NULL
 WHERE error_message IS NOT NULL
 AND buy_coinbase_order_id IS NULL
