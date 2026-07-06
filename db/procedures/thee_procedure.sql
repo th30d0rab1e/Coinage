@@ -201,28 +201,39 @@ WHERE buy_order_id IN (
     AND p.profit IS NOT NULL
 );
 
--- Initial sell stop floored at buy_filled_price so we never lock in a loss.
+-- Initial sell stop. Floor at buy_filled_price only when not underwater
+-- (stop above market is rejected by Coinbase for underwater positions).
 UPDATE position
-SET sell_stop_price = GREATEST(
-        position.buy_filled_price::numeric,
-        TRUNC(
-            stock.price::numeric * CASE position.period_type
+SET sell_stop_price = CASE
+        WHEN stock.price::numeric >= position.buy_filled_price::numeric
+        THEN GREATEST(
+            position.buy_filled_price::numeric,
+            TRUNC(stock.price::numeric * CASE position.period_type
                 WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
                 WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
                 WHEN 'year'  THEN LEAST(0.95, GREATEST(0.60, 1 - pat.std_dev::numeric / 200))
-            END,
-            stock.price_rounding::int)
-    ),
-    sell_price = GREATEST(
-        position.buy_filled_price::numeric,
-        TRUNC(
-            stock.price::numeric * (CASE position.period_type
+            END, stock.price_rounding::int))
+        ELSE TRUNC(stock.price::numeric * CASE position.period_type
                 WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
                 WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
                 WHEN 'year'  THEN LEAST(0.95, GREATEST(0.60, 1 - pat.std_dev::numeric / 200))
-            END - 0.01),
-            stock.price_rounding::int)
-    )
+            END, stock.price_rounding::int)
+    END,
+    sell_price = CASE
+        WHEN stock.price::numeric >= position.buy_filled_price::numeric
+        THEN GREATEST(
+            position.buy_filled_price::numeric,
+            TRUNC(stock.price::numeric * (CASE position.period_type
+                WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
+                WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
+                WHEN 'year'  THEN LEAST(0.95, GREATEST(0.60, 1 - pat.std_dev::numeric / 200))
+            END - 0.01), stock.price_rounding::int))
+        ELSE TRUNC(stock.price::numeric * (CASE position.period_type
+                WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
+                WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
+                WHEN 'year'  THEN LEAST(0.95, GREATEST(0.60, 1 - pat.std_dev::numeric / 200))
+            END - 0.01), stock.price_rounding::int)
+    END
 FROM stock
 JOIN price_aggregate_total pat ON stock.stock_id = pat.stock_id
 WHERE position.stock_id = stock.stock_id
