@@ -30,6 +30,15 @@ WHERE stock.name = bs.id
 AND bs.id LIKE '%-USD'
 AND bs.price != '';
 
+-- Record buy fills first so a position that just filled this cycle is not
+-- deleted by the cleanup below (which only removes rows with buy_filled_price IS NULL).
+UPDATE position
+SET buy_filled_price = bf.price,
+    buy_fee = bf.fee
+FROM bulk_fills bf
+WHERE position.buy_coinbase_order_id = bf.order_id
+AND position.buy_filled_price IS NULL;
+
 -- Delete unfilled buy positions that have no active order on Coinbase.
 -- A row is only removed if neither its buy nor sell order_id appears in
 -- bulk_open_orders, meaning Coinbase has no open order associated with it.
@@ -184,13 +193,6 @@ AND (
     )
 )
 LIMIT 1;
-
-UPDATE position
-SET buy_filled_price = bf.price,
-    buy_fee = bf.fee
-FROM bulk_fills bf
-WHERE position.buy_coinbase_order_id = bf.order_id
-AND position.buy_filled_price IS NULL;
 
 WITH sell_fills AS (
     UPDATE position
