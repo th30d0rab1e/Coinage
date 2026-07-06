@@ -170,7 +170,7 @@ ca.gatherAllFillsByProduct = async function (productId) {
 
 ca.gatherOrders = async function () {
     try {
-        const response = await getApiCall('GET', '/api/v3/brokerage/orders/historical/batch', '?order_status=OPEN')
+        const response = await getApiCall('GET', '/api/v3/brokerage/orders/historical/batch', '?order_status=OPEN&order_status=PENDING')
         return response.data.orders;
 
     } catch (error) {
