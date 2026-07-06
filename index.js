@@ -8,29 +8,22 @@ main()
 async function main () {
     try {
 
-        //call thee procedure
+        //fetch fresh data first so thee_procedure sees current orders, fills, and balance
+        const pnc = processNewCoins();
+        const pnb = processNewBalance();
+        const pnf = processNewFills();
+        const poo = processOpenOrders();
+        const ppd = processPriceData();
+
+        await Promise.all([pnc, pnb, pnf, poo, ppd]);
+
+        //call thee procedure (now sees fresh bulk_open_orders, bulk_fills, bulk_currency)
         await db.executeQuery('Call thee_procedure();');
         //call aggregation
         await db.executeQuery('CALL aggregate();')
-        //call aggregate comparison
-
-        //call aggregate totals
 
         //process historical data
         await processHistoricalPrices();
-
-         //process new coins
-        const pnc = processNewCoins();
-        //get balance
-        const pnb = processNewBalance();
-        //get fills
-        const pnf = processNewFills();
-        //get Open Orders
-        const poo = processOpenOrders();
-        //get Price Datacan 
-        const ppd = processPriceData();
-
-        const [pncR, pnbR, pnfR, pooR, ppdR] = await Promise.all([pnc, pnb, pnf, poo, ppd]);
 
         //cancel buy orders 
         //await processBuyOrdersOutOfRange(pnfR)
