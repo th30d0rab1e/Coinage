@@ -147,6 +147,23 @@ AND recommendation = 'BUY'
 AND current_change_percent < historical_avg_change_percent
 AND historical_avg_change_percent > 0
 AND s.score > 5
+AND (
+    NOT EXISTS (
+        SELECT 1 FROM position existing
+        WHERE existing.stock_id = s.stock_id
+        AND existing.period_type = s.period_type
+        AND existing.buy_filled_price IS NOT NULL
+        AND existing.sell_filled_price IS NULL
+    )
+    OR s.close < (
+        SELECT MIN(existing.buy_filled_price)
+        FROM position existing
+        WHERE existing.stock_id = s.stock_id
+        AND existing.period_type = s.period_type
+        AND existing.buy_filled_price IS NOT NULL
+        AND existing.sell_filled_price IS NULL
+    )
+)
 LIMIT 1;
 
 UPDATE position

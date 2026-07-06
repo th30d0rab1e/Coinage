@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict Wf7BJCx5bU6waoIT9t5W0wqf8O18KgqXuAL1vDbMzkkv5WvE4YBy1gwiTtLirwc
+\restrict N6E8cGXHOEiuSbrmTHXlSzqNboagpo1xiH55KQl4kpMcQsnKO5Fxb12ArO3genp
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -435,6 +435,23 @@ AND recommendation = 'BUY'
 AND current_change_percent < historical_avg_change_percent
 AND historical_avg_change_percent > 0
 AND s.score > 5
+AND (
+    NOT EXISTS (
+        SELECT 1 FROM position existing
+        WHERE existing.stock_id = s.stock_id
+        AND existing.period_type = s.period_type
+        AND existing.buy_filled_price IS NOT NULL
+        AND existing.sell_filled_price IS NULL
+    )
+    OR s.close < (
+        SELECT MIN(existing.buy_filled_price)
+        FROM position existing
+        WHERE existing.stock_id = s.stock_id
+        AND existing.period_type = s.period_type
+        AND existing.buy_filled_price IS NOT NULL
+        AND existing.sell_filled_price IS NULL
+    )
+)
 LIMIT 1;
 
 UPDATE position
@@ -1453,5 +1470,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict Wf7BJCx5bU6waoIT9t5W0wqf8O18KgqXuAL1vDbMzkkv5WvE4YBy1gwiTtLirwc
+\unrestrict N6E8cGXHOEiuSbrmTHXlSzqNboagpo1xiH55KQl4kpMcQsnKO5Fxb12ArO3genp
 
