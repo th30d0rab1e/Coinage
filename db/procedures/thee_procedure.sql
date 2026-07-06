@@ -99,6 +99,25 @@ AND NOT EXISTS (
     SELECT 1 FROM bulk_open_orders o WHERE o.order_id = position.sell_coinbase_order_id
 );
 
+-- Orphan sell recovery: re-link any Coinbase SELL order to a position that lost its sell_coinbase_order_id.
+-- Uses DISTINCT ON (o.order_id) so each Coinbase order is only matched to one position row.
+WITH orphan_match AS (
+    SELECT DISTINCT ON (o.order_id) p.buy_order_id AS pos_key, o.order_id
+    FROM position p
+    JOIN bulk_open_orders o ON o.side = 'SELL'
+        AND o.product_id = p.name
+        AND ABS((o.order_configuration->'stop_limit_stop_limit_gtc'->>'base_size')::numeric - p.shares::numeric) < 0.0001
+        AND NOT EXISTS (SELECT 1 FROM position p2 WHERE p2.sell_coinbase_order_id = o.order_id)
+    WHERE p.buy_filled_price IS NOT NULL
+    AND p.sell_filled_price IS NULL
+    AND p.sell_coinbase_order_id IS NULL
+    ORDER BY o.order_id
+)
+UPDATE position p
+SET sell_coinbase_order_id = om.order_id
+FROM orphan_match om
+WHERE p.buy_order_id = om.pos_key;
+
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
 SELECT s.stock_id, s.name,
     TRUNC((s.close::numeric * bal.stop_mult * 1.01), stock.price_rounding::integer) AS buy_price,
