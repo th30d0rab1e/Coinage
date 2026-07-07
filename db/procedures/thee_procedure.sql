@@ -99,6 +99,38 @@ AND NOT EXISTS (
     SELECT 1 FROM bulk_open_orders o WHERE o.order_id = position.buy_coinbase_order_id
 );
 
+-- Match sell fills before reconciling cancelled sell orders, so a
+-- sell_coinbase_order_id that already filled (e.g. while the DB was down)
+-- gets closed out here instead of being mistaken for cancelled below
+-- (both look identical: absent from bulk_open_orders).
+WITH sell_fills AS (
+    UPDATE position
+    SET sell_filled_price = bf.price,
+        sell_fee = bf.fee,
+        profit = TRUNC(((bf.price * position.shares - bf.fee) - (position.buy_filled_price * position.shares + position.buy_fee))::numeric, 2)
+    FROM bulk_fills bf
+    WHERE position.sell_coinbase_order_id = bf.order_id
+    AND position.sell_filled_price IS NULL
+    RETURNING position.stock_id, position.name, position.period_type,
+              position.buy_coinbase_order_id, bf.order_id AS sell_fills_id,
+              TRUNC(position.buy_fee::numeric, 2) AS buy_fee,
+              TRUNC(bf.fee::numeric, 2) AS sell_fee,
+              TRUNC(((bf.price * position.shares - bf.fee) - (position.buy_filled_price * position.shares + position.buy_fee))::numeric, 2) AS profit
+),
+insert_history AS (
+    INSERT INTO profit_history (stock_id, name, period_type, buy_coinbase_order_id, sell_fills_id, buy_fee, sell_fee, profit)
+    SELECT stock_id, name, period_type, buy_coinbase_order_id, sell_fills_id, buy_fee, sell_fee, profit
+    FROM sell_fills
+)
+DELETE FROM position
+WHERE buy_order_id IN (
+    SELECT p.buy_order_id
+    FROM position p
+    JOIN bulk_fills bf ON p.sell_coinbase_order_id = bf.order_id
+    WHERE p.sell_filled_price IS NOT NULL
+    AND p.profit IS NOT NULL
+);
+
 -- Reconcile cancelled sell orders: in DB but gone from Coinbase.
 UPDATE position
 SET sell_coinbase_order_id = NULL, error_message = NULL
@@ -193,34 +225,6 @@ AND (
     )
 )
 LIMIT 1;
-
-WITH sell_fills AS (
-    UPDATE position
-    SET sell_filled_price = bf.price,
-        sell_fee = bf.fee,
-        profit = TRUNC(((bf.price * position.shares - bf.fee) - (position.buy_filled_price * position.shares + position.buy_fee))::numeric, 2)
-    FROM bulk_fills bf
-    WHERE position.sell_coinbase_order_id = bf.order_id
-    AND position.sell_filled_price IS NULL
-    RETURNING position.stock_id, position.name, position.period_type,
-              position.buy_coinbase_order_id, bf.order_id AS sell_fills_id,
-              TRUNC(position.buy_fee::numeric, 2) AS buy_fee,
-              TRUNC(bf.fee::numeric, 2) AS sell_fee,
-              TRUNC(((bf.price * position.shares - bf.fee) - (position.buy_filled_price * position.shares + position.buy_fee))::numeric, 2) AS profit
-),
-insert_history AS (
-    INSERT INTO profit_history (stock_id, name, period_type, buy_coinbase_order_id, sell_fills_id, buy_fee, sell_fee, profit)
-    SELECT stock_id, name, period_type, buy_coinbase_order_id, sell_fills_id, buy_fee, sell_fee, profit
-    FROM sell_fills
-)
-DELETE FROM position
-WHERE buy_order_id IN (
-    SELECT p.buy_order_id
-    FROM position p
-    JOIN bulk_fills bf ON p.sell_coinbase_order_id = bf.order_id
-    WHERE p.sell_filled_price IS NOT NULL
-    AND p.profit IS NOT NULL
-);
 
 -- Initial sell stop. Floor at buy_filled_price only when not underwater
 -- (stop above market is rejected by Coinbase for underwater positions).
