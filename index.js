@@ -40,6 +40,9 @@ async function main () {
         //Daily profit-taking: sell best position if no profit made today
         await processDailyProfit();
 
+        //Daily buy guarantee: tighten a pending buy if nothing filled today
+        await processDailyBuy();
+
     } catch (error) {
         console.log("main", error)
     } finally {
@@ -432,6 +435,75 @@ async function processDailyProfit () {
         }
     } catch (error) {
         console.log('processDailyProfit() ERROR', error)
+    }
+}
+
+async function processDailyBuy () {
+    try {
+        // Skip if a buy has already filled today
+        const todayCheck = await db.executeQuery(`
+            SELECT 1 FROM position WHERE DATE(buy_filled_date) = CURRENT_DATE LIMIT 1
+        `)
+        if (todayCheck.length > 0) {
+            console.log('processDailyBuy() skipped: already bought something today')
+            return
+        }
+
+        // Skip if a daily buy tighten is already in progress (not yet filled)
+        const inProgress = await db.executeQuery(`
+            SELECT 1 FROM position WHERE daily_buy = true AND buy_filled_price IS NULL LIMIT 1
+        `)
+        if (inProgress.length > 0) {
+            console.log('processDailyBuy() skipped: daily buy already in progress')
+            return
+        }
+
+        // Pending buy order closest to triggering (smallest % above current price)
+        const best = await db.executeQuery(`
+            SELECT p.*, s.price AS current_price, s.price_rounding,
+                ROUND(((p.buy_price - s.price) / NULLIF(s.price, 0) * 100)::numeric, 4) AS pct_above_current
+            FROM position p
+            JOIN stock s ON p.stock_id = s.stock_id
+            WHERE p.buy_coinbase_order_id IS NOT NULL
+              AND p.buy_filled_price IS NULL
+              AND p.daily_buy = false
+            ORDER BY pct_above_current ASC
+            LIMIT 1
+        `)
+        if (!best.length) return
+
+        const pos = best[0]
+
+        // Cancel existing buy order
+        if (pos.buy_coinbase_order_id) {
+            await ca.cancelOrder(pos.buy_coinbase_order_id)
+        }
+
+        // Tight stop: 1% above current price, limit 1% above stop (mirrors processDailyProfit's 1% sell tighten)
+        const pr = parseInt(pos.price_rounding)
+        const factor = Math.pow(10, pr)
+        const currentPrice = parseFloat(pos.current_price)
+        const stopPrice = Math.trunc(currentPrice * 1.01 * factor) / factor
+        const limitPrice = Math.trunc(stopPrice * 1.01 * factor) / factor
+        const newOrderId = crypto.randomUUID()
+
+        const response = await ca.createStopLimitOrder('buy', limitPrice, pos.shares, pos.name, stopPrice, newOrderId)
+        if (response?.success === true) {
+            await db.executeQuery(`
+                UPDATE position
+                SET buy_order_id = '${newOrderId}',
+                    buy_coinbase_order_id = '${response.success_response.order_id}',
+                    buy_stop_price = ${stopPrice},
+                    buy_price = ${limitPrice},
+                    daily_buy = true
+                WHERE buy_order_id = '${pos.buy_order_id}'
+            `)
+            console.log(`processDailyBuy() OK: ${pos.name} | was ${pos.pct_above_current}% above current | new stop: ${stopPrice}`)
+        } else {
+            console.log(`processDailyBuy() FAILED: ${pos.name}`, response)
+        }
+    } catch (error) {
+        console.log('processDailyBuy() ERROR', error)
     }
 }
 

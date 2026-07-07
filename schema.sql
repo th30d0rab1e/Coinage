@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict X44RiEojlfDgyBudPmiOQ3kDyjztfbrZOG6iAUyipBuaWgcxuH4h7xcoqWDs9c4
+\restrict PN9g8AVTman9FkyceIojK5rKuVr7soHZ2XfmMvs4BNK4UIJmsic4SLtWqtEtYjY
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -322,7 +322,8 @@ AND bs.price != '';
 -- deleted by the cleanup below (which only removes rows with buy_filled_price IS NULL).
 UPDATE position
 SET buy_filled_price = bf.price,
-    buy_fee = bf.fee
+    buy_fee = bf.fee,
+    buy_filled_date = NOW()
 FROM bulk_fills bf
 WHERE position.buy_coinbase_order_id = bf.order_id
 AND position.buy_filled_price IS NULL;
@@ -904,7 +905,9 @@ CREATE TABLE public."position" (
     profit double precision,
     daily_sell boolean DEFAULT false NOT NULL,
     sell_counter integer DEFAULT 0 NOT NULL,
-    buy_counter integer DEFAULT 0 NOT NULL
+    buy_counter integer DEFAULT 0 NOT NULL,
+    buy_filled_date timestamp without time zone,
+    daily_buy boolean DEFAULT false NOT NULL
 );
 
 
@@ -1512,5 +1515,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict X44RiEojlfDgyBudPmiOQ3kDyjztfbrZOG6iAUyipBuaWgcxuH4h7xcoqWDs9c4
+\unrestrict PN9g8AVTman9FkyceIojK5rKuVr7soHZ2XfmMvs4BNK4UIJmsic4SLtWqtEtYjY
 

@@ -34,7 +34,8 @@ AND bs.price != '';
 -- deleted by the cleanup below (which only removes rows with buy_filled_price IS NULL).
 UPDATE position
 SET buy_filled_price = bf.price,
-    buy_fee = bf.fee
+    buy_fee = bf.fee,
+    buy_filled_date = NOW()
 FROM bulk_fills bf
 WHERE position.buy_coinbase_order_id = bf.order_id
 AND position.buy_filled_price IS NULL;
