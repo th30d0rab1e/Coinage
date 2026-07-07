@@ -226,16 +226,27 @@ AND (
 )
 LIMIT 1;
 
--- Initial sell stop, floored at buy_filled_price unconditionally — a
--- position must never be sold below cost, underwater or not. When
--- underwater this floor makes the stop land above current market, which
--- Coinbase will reject at placement time; processSellOrders() must not
--- respond to that rejection by substituting a lower (loss-making) price —
--- it should leave the position unprotected and retry with fresh preview
--- data next cycle until price recovers enough for this floor to clear.
+-- Initial sell stop, floored at a breakeven price unconditionally — a
+-- position must never be sold at a net loss, underwater or not. The floor
+-- is NOT raw buy_filled_price: profit is (sell_price*shares - sell_fee) -
+-- (buy_price*shares + buy_fee), so selling at exactly buy_filled_price
+-- still loses both fees. This expression solves for the sell price where
+-- post-fee proceeds exactly cover total cost, using this position's own
+-- realized buy-side fee rate as the estimate for the sell-side fee
+-- (falling back to 1.2% if the buy fee is unknown). LATERAL can't be used
+-- here since UPDATE's target table isn't a FROM-list item it can see, so
+-- the formula is inlined directly instead of computed once via a join.
+-- When underwater this floor makes the stop land above current market,
+-- which Coinbase will reject at placement time; processSellOrders() must
+-- not respond to that rejection by substituting a lower (loss-making)
+-- price — it should leave the position unprotected and retry with fresh
+-- preview data next cycle until price recovers enough for this floor to
+-- clear.
 UPDATE position
 SET sell_stop_price = GREATEST(
-        position.buy_filled_price::numeric,
+        position.buy_filled_price::numeric
+            * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
+            / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012)),
         TRUNC(stock.price::numeric * CASE position.period_type
             WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
             WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
@@ -243,7 +254,9 @@ SET sell_stop_price = GREATEST(
         END, stock.price_rounding::int)
     ),
     sell_price = GREATEST(
-        position.buy_filled_price::numeric,
+        position.buy_filled_price::numeric
+            * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
+            / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012)),
         TRUNC(stock.price::numeric * (CASE position.period_type
             WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
             WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))

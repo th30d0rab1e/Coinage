@@ -55,14 +55,14 @@ UNION ALL
 
 SELECT p.name,
     p.period_type,
-    GREATEST(p.buy_filled_price::numeric, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001) * 0.99, s.price_rounding)) AS order_price,
+    GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001) * 0.99, s.price_rounding)) AS order_price,
     s.price AS price_now,
     p.buy_order_id,
     p.sell_coinbase_order_id AS coinbase_order_id,
     p.shares,
-    GREATEST(p.buy_filled_price::numeric, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) AS new_stop_price,
+    GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) AS new_stop_price,
     'sell'::text AS order_type,
-    trunc((GREATEST(p.buy_filled_price::numeric, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) - p.buy_filled_price::numeric) * p.shares::numeric, 2) AS estimated_profit,
+    trunc((GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) - p.buy_filled_price::numeric) * p.shares::numeric, 2) AS estimated_profit,
     p.sell_counter AS counter
 FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
@@ -75,23 +75,33 @@ CROSS JOIN LATERAL (
         ELSE NULL::numeric
     END AS stop_ratio
 ) vol
+-- Floor at a breakeven price, not raw buy_filled_price: profit also has to
+-- cover both fees, so the floor is buy_filled_price grossed up by this
+-- position's own realized buy-side fee rate (used as the sell-fee
+-- estimate), falling back to 1.2% if the buy fee is unknown.
+CROSS JOIN LATERAL (
+    SELECT p.buy_filled_price::numeric
+        * (1 + COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
+        / (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
+        AS floor_price
+) breakeven
 WHERE p.sell_coinbase_order_id IS NOT NULL
 AND p.sell_filled_price IS NULL
 AND p.daily_sell = false
-AND p.sell_stop_price < GREATEST(p.buy_filled_price::numeric, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding))::double precision
+AND p.sell_stop_price < GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding))::double precision
 
 UNION ALL
 
 SELECT p.name,
     p.period_type,
-    GREATEST(p.buy_filled_price::numeric, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001) * 0.99, s.price_rounding)) AS order_price,
+    GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001) * 0.99, s.price_rounding)) AS order_price,
     s.price AS price_now,
     p.buy_order_id,
     p.sell_coinbase_order_id AS coinbase_order_id,
     p.shares,
-    GREATEST(p.buy_filled_price::numeric, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) AS new_stop_price,
+    GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) AS new_stop_price,
     'sell'::text AS order_type,
-    trunc((GREATEST(p.buy_filled_price::numeric, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) - p.buy_filled_price::numeric) * p.shares::numeric, 2) AS estimated_profit,
+    trunc((GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) - p.buy_filled_price::numeric) * p.shares::numeric, 2) AS estimated_profit,
     p.sell_counter AS counter
 FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
@@ -104,6 +114,12 @@ CROSS JOIN LATERAL (
         ELSE NULL::numeric
     END AS stop_ratio
 ) vol
+CROSS JOIN LATERAL (
+    SELECT p.buy_filled_price::numeric
+        * (1 + COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
+        / (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
+        AS floor_price
+) breakeven
 WHERE p.sell_coinbase_order_id IS NOT NULL
 AND p.sell_filled_price IS NULL
 AND p.daily_sell = false
