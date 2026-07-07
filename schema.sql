@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict SsdE34E0Rl15QI82nILuzF7c5jOuwKYBh1U1RiiLVMS3DQ9wi7nqc7rDuYglqye
+\restrict 6QXtxhhmLGTZyI5fmbnNtTrBkGpKqAWtefB17QLyO6CIanrnde6gLf5nAex0Wfu
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -514,39 +514,30 @@ AND (
 )
 LIMIT 1;
 
--- Initial sell stop. Floor at buy_filled_price only when not underwater
--- (stop above market is rejected by Coinbase for underwater positions).
+-- Initial sell stop, floored at buy_filled_price unconditionally — a
+-- position must never be sold below cost, underwater or not. When
+-- underwater this floor makes the stop land above current market, which
+-- Coinbase will reject at placement time; processSellOrders() must not
+-- respond to that rejection by substituting a lower (loss-making) price —
+-- it should leave the position unprotected and retry with fresh preview
+-- data next cycle until price recovers enough for this floor to clear.
 UPDATE position
-SET sell_stop_price = CASE
-        WHEN stock.price::numeric >= position.buy_filled_price::numeric
-        THEN GREATEST(
-            position.buy_filled_price::numeric,
-            TRUNC(stock.price::numeric * CASE position.period_type
-                WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
-                WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
-                WHEN 'year'  THEN LEAST(0.95, GREATEST(0.60, 1 - pat.std_dev::numeric / 200))
-            END, stock.price_rounding::int))
-        ELSE TRUNC(stock.price::numeric * CASE position.period_type
-                WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
-                WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
-                WHEN 'year'  THEN LEAST(0.95, GREATEST(0.60, 1 - pat.std_dev::numeric / 200))
-            END, stock.price_rounding::int)
-    END,
-    sell_price = CASE
-        WHEN stock.price::numeric >= position.buy_filled_price::numeric
-        THEN GREATEST(
-            position.buy_filled_price::numeric,
-            TRUNC(stock.price::numeric * (CASE position.period_type
-                WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
-                WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
-                WHEN 'year'  THEN LEAST(0.95, GREATEST(0.60, 1 - pat.std_dev::numeric / 200))
-            END - 0.01), stock.price_rounding::int))
-        ELSE TRUNC(stock.price::numeric * (CASE position.period_type
-                WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
-                WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
-                WHEN 'year'  THEN LEAST(0.95, GREATEST(0.60, 1 - pat.std_dev::numeric / 200))
-            END - 0.01), stock.price_rounding::int)
-    END
+SET sell_stop_price = GREATEST(
+        position.buy_filled_price::numeric,
+        TRUNC(stock.price::numeric * CASE position.period_type
+            WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
+            WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
+            WHEN 'year'  THEN LEAST(0.95, GREATEST(0.60, 1 - pat.std_dev::numeric / 200))
+        END, stock.price_rounding::int)
+    ),
+    sell_price = GREATEST(
+        position.buy_filled_price::numeric,
+        TRUNC(stock.price::numeric * (CASE position.period_type
+            WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
+            WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
+            WHEN 'year'  THEN LEAST(0.95, GREATEST(0.60, 1 - pat.std_dev::numeric / 200))
+        END - 0.01), stock.price_rounding::int)
+    )
 FROM stock
 JOIN price_aggregate_total pat ON stock.stock_id = pat.stock_id
 WHERE position.stock_id = stock.stock_id
@@ -1506,5 +1497,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict SsdE34E0Rl15QI82nILuzF7c5jOuwKYBh1U1RiiLVMS3DQ9wi7nqc7rDuYglqye
+\unrestrict 6QXtxhhmLGTZyI5fmbnNtTrBkGpKqAWtefB17QLyO6CIanrnde6gLf5nAex0Wfu
 

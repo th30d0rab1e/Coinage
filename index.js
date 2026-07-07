@@ -142,14 +142,11 @@ async function processSellOrders () {
                 await db.executeQuery(`UPDATE position SET sell_coinbase_order_id = '${response.success_response.order_id}', sell_order_id = '${newSellOrderId}', error_message = NULL WHERE buy_order_id = '${element.buy_order_id}'`)
                 console.log(`Sell Order Created: ${element.name} | shares: ${element.shares} | price: ${element.sell_price}`)
             } else if(response?.error_response?.preview_failure_reason === 'PREVIEW_STOP_PRICE_ABOVE_LAST_TRADE_PRICE') {
-                const ratios = { day: 0.97, month: 0.90, year: 0.75 }
-                const ratio = ratios[element.period_type] ?? 0.97
-                const currentPrice = parseFloat(element.current_price)
-                const rounding = parseInt(element.price_rounding)
-                const newStop = parseFloat((currentPrice * ratio).toFixed(rounding))
-                const newPrice = parseFloat((currentPrice * ratio * 0.99).toFixed(rounding))
-                await db.executeQuery(`UPDATE position SET sell_stop_price = ${newStop}, sell_price = ${newPrice}, error_message = NULL WHERE buy_order_id = '${element.buy_order_id}'`)
-                console.log(`Sell Order stop reset (was above market): ${element.name} | current: ${currentPrice} | new stop: ${newStop}`)
+                // Underwater: the floored stop (>= buy_filled_price) sits above current
+                // market, so Coinbase rejects it. Do not substitute a lower, loss-making
+                // price — leave the position unprotected and retry with fresh preview
+                // data next cycle until price recovers enough for the floor to clear.
+                console.log(`Sell Order deferred (underwater): ${element.name} | current: ${element.current_price} | floor: ${element.sell_stop_price}`)
             } else {
                 await db.executeQuery(`UPDATE position SET error_message = '${response.error_response.message}' WHERE buy_order_id = '${element.buy_order_id}'`)
                 console.log(`Sell Order FAILED: ${element.name}`, response)
