@@ -378,44 +378,56 @@ async function processDailyProfit () {
             return
         }
 
-        // Average profit per closed trade
-        const avgRow = await db.executeQuery(`SELECT COALESCE(AVG(profit), 0) AS avg_profit FROM profit_history`)
-        const avgProfit = parseFloat(avgRow[0].avg_profit)
-
-        // Best open position by estimated profit at current price
+        // Best open position that already clears its fee-adjusted breakeven floor at
+        // current price. Comparing against the account's historical average profit
+        // (instead of against breakeven) let this force a sale whenever a position was
+        // merely "less bad than usual" — and since losing trades pull the average down,
+        // that bar kept getting easier to clear. Genuine breakeven is the only bar that
+        // can't decay like that.
         const best = await db.executeQuery(`
-            SELECT p.*, s.price AS current_price, s.price_rounding,
+            SELECT p.*, s.price AS current_price, s.price_rounding, breakeven.floor_price,
                 ROUND(((s.price - p.buy_filled_price) * p.shares - COALESCE(p.buy_fee, 0))::numeric, 4) AS est_profit_now,
                 ROUND(((s.price - p.buy_filled_price) / NULLIF(p.buy_filled_price, 0) * 100)::numeric, 4) AS pct_gain
             FROM position p
             JOIN stock s ON p.stock_id = s.stock_id
+            CROSS JOIN LATERAL (
+                SELECT CEIL(
+                    (p.buy_filled_price::numeric
+                        * (1 + COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
+                        / (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012)))
+                    * POWER(10::numeric, s.price_rounding::int)
+                ) / POWER(10::numeric, s.price_rounding::int) AS floor_price
+            ) breakeven
             WHERE p.buy_filled_price IS NOT NULL
               AND p.sell_filled_price IS NULL
               AND p.daily_sell = false
+              AND s.price::numeric >= breakeven.floor_price
             ORDER BY pct_gain DESC
             LIMIT 1
         `)
-        if (!best.length) return
-
-        const pos = best[0]
-        const estProfit = parseFloat(pos.est_profit_now)
-
-        if (estProfit <= avgProfit) {
-            console.log(`processDailyProfit() skipped: ${pos.name} est profit $${estProfit.toFixed(4)} (${parseFloat(pos.pct_gain).toFixed(2)}%) <= avg $${avgProfit.toFixed(4)}`)
+        if (!best.length) {
+            console.log('processDailyProfit() skipped: no open position currently clears its breakeven floor')
             return
         }
+
+        const pos = best[0]
+        const floorPrice = parseFloat(pos.floor_price)
 
         // Cancel existing sell order
         if (pos.sell_coinbase_order_id) {
             await ca.cancelOrder(pos.sell_coinbase_order_id)
         }
 
-        // Tight stop: 1% below current price, limit 1% below stop
+        // Tight stop: 1% below current price, limit 1% below stop — but never below the
+        // breakeven floor. The old version discounted from current_price with nothing
+        // tying the actual order back to the price the profitability check above used,
+        // so a position that looked fine at current_price could still be sold at a loss
+        // by the time these two 1% cuts were applied.
         const pr = parseInt(pos.price_rounding)
         const factor = Math.pow(10, pr)
         const currentPrice = parseFloat(pos.current_price)
-        const stopPrice = Math.trunc(currentPrice * 0.99 * factor) / factor
-        const limitPrice = Math.trunc(stopPrice * 0.99 * factor) / factor
+        const stopPrice = Math.max(floorPrice, Math.trunc(currentPrice * 0.99 * factor) / factor)
+        const limitPrice = Math.max(floorPrice, Math.trunc(stopPrice * 0.99 * factor) / factor)
         const newOrderId = crypto.randomUUID()
 
         const response = await ca.createStopLimitOrder('sell', limitPrice, pos.shares, pos.name, stopPrice, newOrderId)
@@ -429,7 +441,7 @@ async function processDailyProfit () {
                     daily_sell = true
                 WHERE buy_order_id = '${pos.buy_order_id}'
             `)
-            console.log(`processDailyProfit() OK: ${pos.name} | est profit: $${estProfit.toFixed(4)} > avg $${avgProfit.toFixed(4)} | stop: ${stopPrice}`)
+            console.log(`processDailyProfit() OK: ${pos.name} | current: ${currentPrice} | floor: ${floorPrice} | stop: ${stopPrice}`)
         } else {
             console.log(`processDailyProfit() FAILED: ${pos.name}`, response)
         }
