@@ -80,10 +80,12 @@ CROSS JOIN LATERAL (
 -- position's own realized buy-side fee rate (used as the sell-fee
 -- estimate), falling back to 1.2% if the buy fee is unknown.
 CROSS JOIN LATERAL (
-    SELECT p.buy_filled_price::numeric
-        * (1 + COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
-        / (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
-        AS floor_price
+    SELECT CEIL(
+        (p.buy_filled_price::numeric
+            * (1 + COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
+            / (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012)))
+        * POWER(10::numeric, s.price_rounding::int)
+    ) / POWER(10::numeric, s.price_rounding::int) AS floor_price
 ) breakeven
 WHERE p.sell_coinbase_order_id IS NOT NULL
 AND p.sell_filled_price IS NULL
@@ -115,10 +117,12 @@ CROSS JOIN LATERAL (
     END AS stop_ratio
 ) vol
 CROSS JOIN LATERAL (
-    SELECT p.buy_filled_price::numeric
-        * (1 + COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
-        / (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
-        AS floor_price
+    SELECT CEIL(
+        (p.buy_filled_price::numeric
+            * (1 + COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
+            / (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012)))
+        * POWER(10::numeric, s.price_rounding::int)
+    ) / POWER(10::numeric, s.price_rounding::int) AS floor_price
 ) breakeven
 WHERE p.sell_coinbase_order_id IS NOT NULL
 AND p.sell_filled_price IS NULL

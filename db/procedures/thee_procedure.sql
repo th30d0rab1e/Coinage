@@ -245,9 +245,12 @@ LIMIT 1;
 -- clear.
 UPDATE position
 SET sell_stop_price = GREATEST(
-        position.buy_filled_price::numeric
-            * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
-            / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012)),
+        CEIL(
+            (position.buy_filled_price::numeric
+                * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
+                / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012)))
+            * POWER(10::numeric, stock.price_rounding::int)
+        ) / POWER(10::numeric, stock.price_rounding::int),
         TRUNC(stock.price::numeric * CASE position.period_type
             WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
             WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
@@ -255,9 +258,12 @@ SET sell_stop_price = GREATEST(
         END, stock.price_rounding::int)
     ),
     sell_price = GREATEST(
-        position.buy_filled_price::numeric
-            * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
-            / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012)),
+        CEIL(
+            (position.buy_filled_price::numeric
+                * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
+                / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012)))
+            * POWER(10::numeric, stock.price_rounding::int)
+        ) / POWER(10::numeric, stock.price_rounding::int),
         TRUNC(stock.price::numeric * (CASE position.period_type
             WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
             WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))

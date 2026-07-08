@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict PN9g8AVTman9FkyceIojK5rKuVr7soHZ2XfmMvs4BNK4UIJmsic4SLtWqtEtYjY
+\restrict WBTGSmjQH1jRXOTTneEp5ylChUeph1QDOXYQduZ1ohdm5sMRoZp3fmEa8cYk3zJ
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -533,9 +533,12 @@ LIMIT 1;
 -- clear.
 UPDATE position
 SET sell_stop_price = GREATEST(
-        position.buy_filled_price::numeric
-            * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
-            / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012)),
+        CEIL(
+            (position.buy_filled_price::numeric
+                * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
+                / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012)))
+            * POWER(10::numeric, stock.price_rounding::int)
+        ) / POWER(10::numeric, stock.price_rounding::int),
         TRUNC(stock.price::numeric * CASE position.period_type
             WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
             WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
@@ -543,9 +546,12 @@ SET sell_stop_price = GREATEST(
         END, stock.price_rounding::int)
     ),
     sell_price = GREATEST(
-        position.buy_filled_price::numeric
-            * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
-            / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012)),
+        CEIL(
+            (position.buy_filled_price::numeric
+                * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
+                / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012)))
+            * POWER(10::numeric, stock.price_rounding::int)
+        ) / POWER(10::numeric, stock.price_rounding::int),
         TRUNC(stock.price::numeric * (CASE position.period_type
             WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
             WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
@@ -1162,7 +1168,7 @@ UNION ALL
                     WHEN 'year'::text THEN LEAST(0.95, GREATEST(0.60, ((1)::numeric - ((pat.std_dev)::numeric / (200)::numeric))))
                     ELSE NULL::numeric
                 END AS stop_ratio) vol)
-     CROSS JOIN LATERAL ( SELECT (((p.buy_filled_price)::numeric * ((1)::numeric + COALESCE((NULLIF((p.buy_fee)::numeric, (0)::numeric) / NULLIF(((p.buy_filled_price)::numeric * (p.shares)::numeric), (0)::numeric)), 0.012))) / ((1)::numeric - COALESCE((NULLIF((p.buy_fee)::numeric, (0)::numeric) / NULLIF(((p.buy_filled_price)::numeric * (p.shares)::numeric), (0)::numeric)), 0.012))) AS floor_price) breakeven)
+     CROSS JOIN LATERAL ( SELECT (ceil(((((p.buy_filled_price)::numeric * ((1)::numeric + COALESCE((NULLIF((p.buy_fee)::numeric, (0)::numeric) / NULLIF(((p.buy_filled_price)::numeric * (p.shares)::numeric), (0)::numeric)), 0.012))) / ((1)::numeric - COALESCE((NULLIF((p.buy_fee)::numeric, (0)::numeric) / NULLIF(((p.buy_filled_price)::numeric * (p.shares)::numeric), (0)::numeric)), 0.012))) * power((10)::numeric, (s.price_rounding)::numeric))) / power((10)::numeric, (s.price_rounding)::numeric)) AS floor_price) breakeven)
   WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.daily_sell = false) AND (p.sell_stop_price < (GREATEST(breakeven.floor_price, trunc(((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))), s.price_rounding)))::double precision))
 UNION ALL
  SELECT p.name,
@@ -1186,7 +1192,7 @@ UNION ALL
                     WHEN 'year'::text THEN LEAST(0.95, GREATEST(0.60, ((1)::numeric - ((pat.std_dev)::numeric / (200)::numeric))))
                     ELSE NULL::numeric
                 END AS stop_ratio) vol)
-     CROSS JOIN LATERAL ( SELECT (((p.buy_filled_price)::numeric * ((1)::numeric + COALESCE((NULLIF((p.buy_fee)::numeric, (0)::numeric) / NULLIF(((p.buy_filled_price)::numeric * (p.shares)::numeric), (0)::numeric)), 0.012))) / ((1)::numeric - COALESCE((NULLIF((p.buy_fee)::numeric, (0)::numeric) / NULLIF(((p.buy_filled_price)::numeric * (p.shares)::numeric), (0)::numeric)), 0.012))) AS floor_price) breakeven)
+     CROSS JOIN LATERAL ( SELECT (ceil(((((p.buy_filled_price)::numeric * ((1)::numeric + COALESCE((NULLIF((p.buy_fee)::numeric, (0)::numeric) / NULLIF(((p.buy_filled_price)::numeric * (p.shares)::numeric), (0)::numeric)), 0.012))) / ((1)::numeric - COALESCE((NULLIF((p.buy_fee)::numeric, (0)::numeric) / NULLIF(((p.buy_filled_price)::numeric * (p.shares)::numeric), (0)::numeric)), 0.012))) * power((10)::numeric, (s.price_rounding)::numeric))) / power((10)::numeric, (s.price_rounding)::numeric)) AS floor_price) breakeven)
   WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.daily_sell = false) AND (p.sell_stop_price > (trunc(((s.price)::numeric * ((vol.stop_ratio + 0.01) + ((p.sell_counter)::numeric * 0.001))), s.price_rounding))::double precision))
   ORDER BY 10 DESC;
 
@@ -1515,5 +1521,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict PN9g8AVTman9FkyceIojK5rKuVr7soHZ2XfmMvs4BNK4UIJmsic4SLtWqtEtYjY
+\unrestrict WBTGSmjQH1jRXOTTneEp5ylChUeph1QDOXYQduZ1ohdm5sMRoZp3fmEa8cYk3zJ
 
