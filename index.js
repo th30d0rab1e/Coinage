@@ -470,16 +470,19 @@ async function processDailyBuy () {
             return
         }
 
-        // Pending buy order closest to triggering (smallest % above current price)
+        // Pending buy order whose coin currently has the highest priority signal,
+        // not just the one closest to triggering.
         const best = await db.executeQuery(`
             SELECT p.*, s.price AS current_price, s.price_rounding,
-                ROUND(((p.buy_price - s.price) / NULLIF(s.price, 0) * 100)::numeric, 4) AS pct_above_current
+                ROUND(((p.buy_price - s.price) / NULLIF(s.price, 0) * 100)::numeric, 4) AS pct_above_current,
+                vw.priority
             FROM position p
             JOIN stock s ON p.stock_id = s.stock_id
+            JOIN vw_signal vw ON vw.stock_id = p.stock_id AND vw.period_type = p.period_type
             WHERE p.buy_coinbase_order_id IS NOT NULL
               AND p.buy_filled_price IS NULL
               AND p.daily_buy = false
-            ORDER BY pct_above_current ASC
+            ORDER BY vw.priority DESC NULLS LAST
             LIMIT 1
         `)
         if (!best.length) return
@@ -510,7 +513,7 @@ async function processDailyBuy () {
                     daily_buy = true
                 WHERE buy_order_id = '${pos.buy_order_id}'
             `)
-            console.log(`processDailyBuy() OK: ${pos.name} | was ${pos.pct_above_current}% above current | new stop: ${stopPrice}`)
+            console.log(`processDailyBuy() OK: ${pos.name} | priority: ${pos.priority} | was ${pos.pct_above_current}% above current | new stop: ${stopPrice}`)
         } else {
             console.log(`processDailyBuy() FAILED: ${pos.name}`, response)
         }
