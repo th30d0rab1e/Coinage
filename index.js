@@ -40,7 +40,7 @@ async function main () {
         //Daily profit-taking: sell best position if no profit made today
         await processDailyProfit();
 
-        //Daily buy guarantee: tighten a pending buy if nothing filled today
+        //Keep the highest-priority pending buy (per vw_signal, set in thee_procedure) tight
         await processDailyBuy();
 
     } catch (error) {
@@ -452,42 +452,30 @@ async function processDailyProfit () {
 
 async function processDailyBuy () {
     try {
-        // Skip if a buy has already filled today
-        const todayCheck = await db.executeQuery(`
-            SELECT 1 FROM position WHERE DATE(buy_filled_date) = CURRENT_DATE LIMIT 1
-        `)
-        if (todayCheck.length > 0) {
-            console.log('processDailyBuy() skipped: already bought something today')
-            return
-        }
-
-        // Skip if a daily buy tighten is already in progress (not yet filled)
-        const inProgress = await db.executeQuery(`
-            SELECT 1 FROM position WHERE daily_buy = true AND buy_filled_price IS NULL LIMIT 1
-        `)
-        if (inProgress.length > 0) {
-            console.log('processDailyBuy() skipped: daily buy already in progress')
-            return
-        }
-
-        // Pending buy order whose coin currently has the highest priority signal,
-        // not just the one closest to triggering.
-        const best = await db.executeQuery(`
+        // thee_procedure() keeps daily_buy pointed at whichever pending buy currently
+        // has the highest vw_signal priority (re-evaluated every cycle, exactly one
+        // row true at a time) — this just tightens whichever one that is right now.
+        const marked = await db.executeQuery(`
             SELECT p.*, s.price AS current_price, s.price_rounding,
-                ROUND(((p.buy_price - s.price) / NULLIF(s.price, 0) * 100)::numeric, 4) AS pct_above_current,
-                vw.priority
+                ROUND(((p.buy_price - s.price) / NULLIF(s.price, 0) * 100)::numeric, 4) AS pct_above_current
             FROM position p
             JOIN stock s ON p.stock_id = s.stock_id
-            JOIN vw_signal vw ON vw.stock_id = p.stock_id AND vw.period_type = p.period_type
-            WHERE p.buy_coinbase_order_id IS NOT NULL
+            WHERE p.daily_buy = true
+              AND p.buy_coinbase_order_id IS NOT NULL
               AND p.buy_filled_price IS NULL
-              AND p.daily_buy = false
-            ORDER BY vw.priority DESC NULLS LAST
             LIMIT 1
         `)
-        if (!best.length) return
+        if (!marked.length) return
 
-        const pos = best[0]
+        const pos = marked[0]
+        const pctAbove = parseFloat(pos.pct_above_current)
+
+        // Already tight (within 1.5% of current price) — leave the live order alone
+        // instead of cancelling/re-placing it every cycle for no real gain.
+        if (pctAbove <= 1.5) {
+            console.log(`processDailyBuy() skipped: ${pos.name} already tight (${pctAbove}% above current)`)
+            return
+        }
 
         // Cancel existing buy order
         if (pos.buy_coinbase_order_id) {
@@ -509,11 +497,10 @@ async function processDailyBuy () {
                 SET buy_order_id = '${newOrderId}',
                     buy_coinbase_order_id = '${response.success_response.order_id}',
                     buy_stop_price = ${stopPrice},
-                    buy_price = ${limitPrice},
-                    daily_buy = true
+                    buy_price = ${limitPrice}
                 WHERE buy_order_id = '${pos.buy_order_id}'
             `)
-            console.log(`processDailyBuy() OK: ${pos.name} | priority: ${pos.priority} | was ${pos.pct_above_current}% above current | new stop: ${stopPrice}`)
+            console.log(`processDailyBuy() OK: ${pos.name} | was ${pctAbove}% above current | new stop: ${stopPrice}`)
         } else {
             console.log(`processDailyBuy() FAILED: ${pos.name}`, response)
         }
