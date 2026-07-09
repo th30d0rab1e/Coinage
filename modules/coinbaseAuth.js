@@ -258,13 +258,14 @@ ca.previewStopLimitOrder = async function (side, price, shares, name, stop_price
             const realErrors = errs.filter(e => e !== 'PREVIEW_INSUFFICIENT_FUND' && e?.error !== 'PREVIEW_INSUFFICIENT_FUND')
             if (realErrors.length > 0) {
                 console.log(`previewStopLimitOrder() failed for ${name}:`, realErrors)
-                return false
+                return { ok: false, errors: realErrors }
             }
         }
-        return true
+        return { ok: true }
     } catch (error) {
-        console.log('previewStopLimitOrder()', error?.response?.data || error)
-        return false
+        const errors = error?.response?.data || error?.data || error
+        console.log('previewStopLimitOrder()', errors)
+        return { ok: false, errors }
     }
 }
 
@@ -361,7 +362,6 @@ ca.cancelOrder = async function (coinbase_order_id) {
         let response = await getApiCall('POST', '/api/v3/brokerage/orders/batch_cancel', '', cancelData);
         const result = response.data?.results?.[0];
         if (!result?.success) {
-            if (result?.failure_reason === 'UNKNOWN_CANCEL_ORDER') return true;
             console.log(`cancelOrder() FAILED: ${result?.failure_reason} | ${coinbase_order_id}`)
             return false;
         }

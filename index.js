@@ -165,11 +165,16 @@ async function processRemakeOrders () {
         const orders = await db.executeQuery(`SELECT * FROM vw_edit_orders ORDER BY estimated_profit DESC LIMIT 1;`)
         for(let i = 0; i < orders.length; i++){
             let element = orders[i];
-            const previewOk = await ca.previewStopLimitOrder(element.order_type, element.order_price, element.shares, element.name, element.new_stop_price)
-            if(!previewOk) {
-                console.log(`Remake Preview FAILED: ${element.name} ${element.order_type}, skipping`)
+            const preview = await ca.previewStopLimitOrder(element.order_type, element.order_price, element.shares, element.name, element.new_stop_price)
+            if(!preview.ok) {
+                const errMsg = JSON.stringify(preview.errors).replace(/'/g, "''")
+                await db.executeQuery(`UPDATE position SET error_message = '${errMsg}' WHERE buy_order_id = '${element.buy_order_id}'`)
+                console.log(`Remake Preview FAILED: ${element.name} ${element.order_type}, skipping`, preview.errors)
                 continue
             }
+            // Only proceed to create a replacement if the cancel genuinely succeeded —
+            // a failure can mean the old order already filled, and creating a
+            // replacement on top of that would double the position.
             let cancelResponse = await ca.cancelOrder(element.coinbase_order_id)
             if(cancelResponse == true) {
                 const newOrderId = crypto.randomUUID()
@@ -182,14 +187,17 @@ async function processRemakeOrders () {
                     }
                     console.log(`Remake OK: ${element.name} ${element.order_type} | shares: ${element.shares} | new stop: ${element.new_stop_price} | est profit: ${element.estimated_profit} | counter: ${element.counter + 1}`)
                 } else {
+                    const errMsg = (reMakeResponse?.error_response?.message || 'unknown').replace(/'/g, "''")
                     if(element.order_type === 'buy') {
-                        await db.executeQuery(`UPDATE position SET buy_coinbase_order_id = NULL, error_message = '${reMakeResponse.error_response.message}' WHERE buy_order_id = '${element.buy_order_id}'`)
+                        await db.executeQuery(`UPDATE position SET buy_coinbase_order_id = NULL, error_message = '${errMsg}' WHERE buy_order_id = '${element.buy_order_id}'`)
                     } else {
-                        await db.executeQuery(`UPDATE position SET sell_coinbase_order_id = NULL, error_message = '${reMakeResponse.error_response.message}' WHERE buy_order_id = '${element.buy_order_id}'`)
+                        await db.executeQuery(`UPDATE position SET sell_coinbase_order_id = NULL, error_message = '${errMsg}' WHERE buy_order_id = '${element.buy_order_id}'`)
                     }
                     console.log(`Remake Create FAILED: ${element.name} ${element.order_type}`, reMakeResponse)
                 }
             } else {
+                const errMsg = `cancel failed for ${element.coinbase_order_id}`
+                await db.executeQuery(`UPDATE position SET error_message = '${errMsg}' WHERE buy_order_id = '${element.buy_order_id}'`)
                 console.log(`Remake Cancel FAILED: ${element.name} ${element.order_type}`, cancelResponse)
             }
         }
@@ -413,11 +421,6 @@ async function processDailyProfit () {
         const pos = best[0]
         const floorPrice = parseFloat(pos.floor_price)
 
-        // Cancel existing sell order
-        if (pos.sell_coinbase_order_id) {
-            await ca.cancelOrder(pos.sell_coinbase_order_id)
-        }
-
         // Tight stop: 1% below current price, limit 1% below stop — but never below the
         // breakeven floor. The old version discounted from current_price with nothing
         // tying the actual order back to the price the profitability check above used,
@@ -428,8 +431,29 @@ async function processDailyProfit () {
         const currentPrice = parseFloat(pos.current_price)
         const stopPrice = Math.max(floorPrice, Math.trunc(currentPrice * 0.99 * factor) / factor)
         const limitPrice = Math.max(floorPrice, Math.trunc(stopPrice * 0.99 * factor) / factor)
-        const newOrderId = crypto.randomUUID()
 
+        const preview = await ca.previewStopLimitOrder('sell', limitPrice, pos.shares, pos.name, stopPrice)
+        if (!preview.ok) {
+            const errMsg = JSON.stringify(preview.errors).replace(/'/g, "''")
+            await db.executeQuery(`UPDATE position SET error_message = '${errMsg}' WHERE buy_order_id = '${pos.buy_order_id}'`)
+            console.log(`processDailyProfit() preview FAILED: ${pos.name}`, preview.errors)
+            return
+        }
+
+        // Only proceed to create a replacement if the cancel genuinely succeeds — a
+        // failure can mean the old order already filled, and creating a replacement on
+        // top of that would double the position.
+        if (pos.sell_coinbase_order_id) {
+            const cancelled = await ca.cancelOrder(pos.sell_coinbase_order_id)
+            if (!cancelled) {
+                const errMsg = `cancel failed for ${pos.sell_coinbase_order_id}`
+                await db.executeQuery(`UPDATE position SET error_message = '${errMsg}' WHERE buy_order_id = '${pos.buy_order_id}'`)
+                console.log(`processDailyProfit() cancel FAILED: ${pos.name}`)
+                return
+            }
+        }
+
+        const newOrderId = crypto.randomUUID()
         const response = await ca.createStopLimitOrder('sell', limitPrice, pos.shares, pos.name, stopPrice, newOrderId)
         if (response?.success === true) {
             await db.executeQuery(`
@@ -438,11 +462,14 @@ async function processDailyProfit () {
                     sell_coinbase_order_id = '${response.success_response.order_id}',
                     sell_stop_price = ${stopPrice},
                     sell_price = ${limitPrice},
-                    daily_sell = true
+                    daily_sell = true,
+                    error_message = NULL
                 WHERE buy_order_id = '${pos.buy_order_id}'
             `)
             console.log(`processDailyProfit() OK: ${pos.name} | current: ${currentPrice} | floor: ${floorPrice} | stop: ${stopPrice}`)
         } else {
+            const errMsg = (response?.error_response?.message || 'unknown').replace(/'/g, "''")
+            await db.executeQuery(`UPDATE position SET error_message = '${errMsg}' WHERE buy_order_id = '${pos.buy_order_id}'`)
             console.log(`processDailyProfit() FAILED: ${pos.name}`, response)
         }
     } catch (error) {
@@ -477,19 +504,35 @@ async function processDailyBuy () {
             return
         }
 
-        // Cancel existing buy order
-        if (pos.buy_coinbase_order_id) {
-            await ca.cancelOrder(pos.buy_coinbase_order_id)
-        }
-
         // Tight stop: 1% above current price, limit 1% above stop (mirrors processDailyProfit's 1% sell tighten)
         const pr = parseInt(pos.price_rounding)
         const factor = Math.pow(10, pr)
         const currentPrice = parseFloat(pos.current_price)
         const stopPrice = Math.trunc(currentPrice * 1.01 * factor) / factor
         const limitPrice = Math.trunc(stopPrice * 1.01 * factor) / factor
-        const newOrderId = crypto.randomUUID()
 
+        const preview = await ca.previewStopLimitOrder('buy', limitPrice, pos.shares, pos.name, stopPrice)
+        if (!preview.ok) {
+            const errMsg = JSON.stringify(preview.errors).replace(/'/g, "''")
+            await db.executeQuery(`UPDATE position SET error_message = '${errMsg}' WHERE buy_order_id = '${pos.buy_order_id}'`)
+            console.log(`processDailyBuy() preview FAILED: ${pos.name}`, preview.errors)
+            return
+        }
+
+        // Only proceed to create a replacement if the cancel genuinely succeeds — a
+        // failure can mean the old order already filled, and creating a replacement on
+        // top of that would double the position.
+        if (pos.buy_coinbase_order_id) {
+            const cancelled = await ca.cancelOrder(pos.buy_coinbase_order_id)
+            if (!cancelled) {
+                const errMsg = `cancel failed for ${pos.buy_coinbase_order_id}`
+                await db.executeQuery(`UPDATE position SET error_message = '${errMsg}' WHERE buy_order_id = '${pos.buy_order_id}'`)
+                console.log(`processDailyBuy() cancel FAILED: ${pos.name}`)
+                return
+            }
+        }
+
+        const newOrderId = crypto.randomUUID()
         const response = await ca.createStopLimitOrder('buy', limitPrice, pos.shares, pos.name, stopPrice, newOrderId)
         if (response?.success === true) {
             await db.executeQuery(`
@@ -497,11 +540,14 @@ async function processDailyBuy () {
                 SET buy_order_id = '${newOrderId}',
                     buy_coinbase_order_id = '${response.success_response.order_id}',
                     buy_stop_price = ${stopPrice},
-                    buy_price = ${limitPrice}
+                    buy_price = ${limitPrice},
+                    error_message = NULL
                 WHERE buy_order_id = '${pos.buy_order_id}'
             `)
             console.log(`processDailyBuy() OK: ${pos.name} | was ${pctAbove}% above current | new stop: ${stopPrice}`)
         } else {
+            const errMsg = (response?.error_response?.message || 'unknown').replace(/'/g, "''")
+            await db.executeQuery(`UPDATE position SET error_message = '${errMsg}' WHERE buy_order_id = '${pos.buy_order_id}'`)
             console.log(`processDailyBuy() FAILED: ${pos.name}`, response)
         }
     } catch (error) {
