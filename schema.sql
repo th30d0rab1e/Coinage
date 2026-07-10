@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict MX29G6zZ53vA41EhhPM5t0V0Ialy1KtIl4T9zTACzY8DBgtkDRc8zsjkClg8plK
+\restrict 1koJKqLv9IWawQeKGi7kf8HHCa5vyjEzneYd7qpslG48E6hLT5dJroqsrlV5BIi
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -319,7 +319,12 @@ AND bs.id LIKE '%-USD'
 AND bs.price != '';
 
 -- Record buy fills first so a position that just filled this cycle is not
--- deleted by the cleanup below (which only removes rows with buy_filled_price IS NULL).
+-- lost to any downstream cleanup (which used to delete rows with
+-- buy_filled_price IS NULL — removed because a filled order also disappears
+-- from bulk_open_orders, indistinguishable from a genuinely cancelled one,
+-- so that delete could destroy a row before its just-happened fill ever
+-- got a chance to match on a later cycle. Rows with a dead order_id now just
+-- sit unfilled until reconciled/retried instead of being erased.
 UPDATE position
 SET buy_filled_price = bf.price,
     buy_fee = bf.fee,
@@ -327,18 +332,6 @@ SET buy_filled_price = bf.price,
 FROM bulk_fills bf
 WHERE position.buy_coinbase_order_id = bf.order_id
 AND position.buy_filled_price IS NULL;
-
--- Delete unfilled buy positions that have no active order on Coinbase.
--- A row is only removed if neither its buy nor sell order_id appears in
--- bulk_open_orders, meaning Coinbase has no open order associated with it.
-DELETE FROM position
-WHERE buy_filled_price IS NULL
-AND NOT EXISTS (
-    SELECT 1 FROM bulk_open_orders o WHERE o.order_id = position.buy_coinbase_order_id
-)
-AND NOT EXISTS (
-    SELECT 1 FROM bulk_open_orders o WHERE o.order_id = position.sell_coinbase_order_id
-);
 
 -- Recover orphaned buy orders: open on Coinbase but missing from position table.
 -- Skip if an unfilled buy position already exists for that coin + period_type.
@@ -1538,5 +1531,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict MX29G6zZ53vA41EhhPM5t0V0Ialy1KtIl4T9zTACzY8DBgtkDRc8zsjkClg8plK
+\unrestrict 1koJKqLv9IWawQeKGi7kf8HHCa5vyjEzneYd7qpslG48E6hLT5dJroqsrlV5BIi
 
