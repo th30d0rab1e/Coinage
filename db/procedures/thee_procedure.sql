@@ -252,15 +252,19 @@ AND buy_filled_price IS NULL;
 -- from this statement, so a NULL fee here can never silently block the
 -- close-out the way it used to (buy_fee NULL -> profit NULL -> position
 -- stuck forever with no way back in).
+-- Also retries fee alone even after the price is already filled in: Coinbase
+-- can return a fill with price known but commission not yet settled, and
+-- without this the fee would stay NULL forever since nothing else ever
+-- rechecks a row once buy_filled_price/sell_filled_price is no longer NULL.
 UPDATE position
 SET buy_filled_price  = CASE WHEN position.buy_filled_price IS NULL AND bf.order_id = position.buy_coinbase_order_id THEN bf.price ELSE position.buy_filled_price END,
-    buy_fee            = CASE WHEN position.buy_filled_price IS NULL AND bf.order_id = position.buy_coinbase_order_id THEN bf.fee ELSE position.buy_fee END,
+    buy_fee            = CASE WHEN position.buy_fee IS NULL AND bf.order_id = position.buy_coinbase_order_id THEN bf.fee ELSE position.buy_fee END,
     buy_filled_date    = CASE WHEN position.buy_filled_price IS NULL AND bf.order_id = position.buy_coinbase_order_id THEN NOW() ELSE position.buy_filled_date END,
     sell_filled_price  = CASE WHEN position.sell_filled_price IS NULL AND bf.order_id = position.sell_coinbase_order_id THEN bf.price ELSE position.sell_filled_price END,
-    sell_fee           = CASE WHEN position.sell_filled_price IS NULL AND bf.order_id = position.sell_coinbase_order_id THEN bf.fee ELSE position.sell_fee END
+    sell_fee           = CASE WHEN position.sell_fee IS NULL AND bf.order_id = position.sell_coinbase_order_id THEN bf.fee ELSE position.sell_fee END
 FROM bulk_fills bf
-WHERE (bf.order_id = position.buy_coinbase_order_id AND position.buy_filled_price IS NULL)
-   OR (bf.order_id = position.sell_coinbase_order_id AND position.sell_filled_price IS NULL);
+WHERE (bf.order_id = position.buy_coinbase_order_id AND (position.buy_filled_price IS NULL OR position.buy_fee IS NULL))
+   OR (bf.order_id = position.sell_coinbase_order_id AND (position.sell_filled_price IS NULL OR position.sell_fee IS NULL));
 
 -- Step 2: record any fully bought-and-sold position into profit_history,
 -- computing profit fresh from position's current buy/sell price and fee
