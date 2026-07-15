@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict GSKRYOUIdou4qJdhDy7jvMpZ1qTatu7OOEus8aksrtXTaJzsff2tg589aAiMa4O
+\restrict c1A9xOYsfRH5nqL9pD2tIfTXHnUH5YCvnpibpycItEaA8y06jox69f8mUDywLNj
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -556,18 +556,27 @@ WHERE (bf.order_id = position.buy_coinbase_order_id AND (position.buy_filled_pri
 
 -- Step 2: record any fully bought-and-sold position into profit_history,
 -- computing profit fresh from position's current buy/sell price and fee
--- columns (COALESCEd so a missing fee can never produce a NULL profit that
--- blocks Step 3). Skips anything already recorded, matched on both the buy
--- and sell order_id together.
+-- columns. Requires every one of buy/sell order_id, buy/sell filled price,
+-- and buy/sell fee to actually be populated -- no COALESCE fallback, so a
+-- still-missing fee (e.g. not yet settled by Coinbase) correctly holds this
+-- position back rather than recording a wrong, understated profit. It'll
+-- pick it up automatically once Step 1 finishes backfilling it. Skips
+-- anything already recorded, matched on both the buy and sell order_id
+-- together.
 INSERT INTO profit_history (stock_id, name, period_type, buy_coinbase_order_id, sell_fills_id, buy_fee, sell_fee, profit)
 SELECT
     p.stock_id, p.name, p.period_type, p.buy_coinbase_order_id, p.sell_coinbase_order_id AS sell_fills_id,
-    TRUNC(COALESCE(p.buy_fee, 0)::numeric, 2) AS buy_fee,
-    TRUNC(COALESCE(p.sell_fee, 0)::numeric, 2) AS sell_fee,
-    TRUNC(((p.sell_filled_price::numeric * p.shares::numeric - COALESCE(p.sell_fee, 0)::numeric)
-         - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee, 0)::numeric))::numeric, 2) AS profit
+    TRUNC(p.buy_fee::numeric, 2) AS buy_fee,
+    TRUNC(p.sell_fee::numeric, 2) AS sell_fee,
+    TRUNC(((p.sell_filled_price::numeric * p.shares::numeric - p.sell_fee::numeric)
+         - (p.buy_filled_price::numeric * p.shares::numeric + p.buy_fee::numeric))::numeric, 2) AS profit
 FROM position p
-WHERE p.buy_filled_price IS NOT NULL AND p.sell_filled_price IS NOT NULL
+WHERE p.buy_coinbase_order_id IS NOT NULL
+AND p.sell_coinbase_order_id IS NOT NULL
+AND p.buy_filled_price IS NOT NULL
+AND p.sell_filled_price IS NOT NULL
+AND p.buy_fee IS NOT NULL
+AND p.sell_fee IS NOT NULL
 AND NOT EXISTS (
     SELECT 1 FROM profit_history ph
     WHERE ph.buy_coinbase_order_id = p.buy_coinbase_order_id AND ph.sell_fills_id = p.sell_coinbase_order_id
@@ -1533,5 +1542,5 @@ ALTER TABLE ONLY public.profit_history
 -- PostgreSQL database dump complete
 --
 
-\unrestrict GSKRYOUIdou4qJdhDy7jvMpZ1qTatu7OOEus8aksrtXTaJzsff2tg589aAiMa4O
+\unrestrict c1A9xOYsfRH5nqL9pD2tIfTXHnUH5YCvnpibpycItEaA8y06jox69f8mUDywLNj
 
