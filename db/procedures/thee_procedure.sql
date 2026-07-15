@@ -30,21 +30,6 @@ WHERE stock.name = bs.id
 AND bs.id LIKE '%-USD'
 AND bs.price != '';
 
--- Record buy fills first so a position that just filled this cycle is not
--- lost to any downstream cleanup (which used to delete rows with
--- buy_filled_price IS NULL — removed because a filled order also disappears
--- from bulk_open_orders, indistinguishable from a genuinely cancelled one,
--- so that delete could destroy a row before its just-happened fill ever
--- got a chance to match on a later cycle. Rows with a dead order_id now just
--- sit unfilled until reconciled/retried instead of being erased.
-UPDATE position
-SET buy_filled_price = bf.price,
-    buy_fee = bf.fee,
-    buy_filled_date = NOW()
-FROM bulk_fills bf
-WHERE position.buy_coinbase_order_id = bf.order_id
-AND position.buy_filled_price IS NULL;
-
 -- Recover orphaned buy orders: open on Coinbase but missing from position table.
 -- Skip if an unfilled buy position already exists for that coin + period_type.
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, buy_coinbase_order_id, period_type)
@@ -109,38 +94,6 @@ SET daily_buy = (position.buy_order_id IN (SELECT buy_order_id FROM ranked WHERE
 WHERE position.buy_coinbase_order_id IS NOT NULL
 AND position.buy_filled_price IS NULL
 AND position.daily_buy != (position.buy_order_id IN (SELECT buy_order_id FROM ranked WHERE rn = 1));
-
--- Match sell fills before reconciling cancelled sell orders, so a
--- sell_coinbase_order_id that already filled (e.g. while the DB was down)
--- gets closed out here instead of being mistaken for cancelled below
--- (both look identical: absent from bulk_open_orders).
-WITH sell_fills AS (
-    UPDATE position
-    SET sell_filled_price = bf.price,
-        sell_fee = bf.fee,
-        profit = TRUNC(((bf.price * position.shares - bf.fee) - (position.buy_filled_price * position.shares + position.buy_fee))::numeric, 2)
-    FROM bulk_fills bf
-    WHERE position.sell_coinbase_order_id = bf.order_id
-    AND position.sell_filled_price IS NULL
-    RETURNING position.stock_id, position.name, position.period_type,
-              position.buy_coinbase_order_id, bf.order_id AS sell_fills_id,
-              TRUNC(position.buy_fee::numeric, 2) AS buy_fee,
-              TRUNC(bf.fee::numeric, 2) AS sell_fee,
-              TRUNC(((bf.price * position.shares - bf.fee) - (position.buy_filled_price * position.shares + position.buy_fee))::numeric, 2) AS profit
-),
-insert_history AS (
-    INSERT INTO profit_history (stock_id, name, period_type, buy_coinbase_order_id, sell_fills_id, buy_fee, sell_fee, profit)
-    SELECT stock_id, name, period_type, buy_coinbase_order_id, sell_fills_id, buy_fee, sell_fee, profit
-    FROM sell_fills
-)
-DELETE FROM position
-WHERE buy_order_id IN (
-    SELECT p.buy_order_id
-    FROM position p
-    JOIN bulk_fills bf ON p.sell_coinbase_order_id = bf.order_id
-    WHERE p.sell_filled_price IS NOT NULL
-    AND p.profit IS NOT NULL
-);
 
 -- Reconcile cancelled sell orders: in DB but gone from Coinbase.
 UPDATE position
@@ -292,6 +245,51 @@ UPDATE position SET error_message = NULL
 WHERE error_message IS NOT NULL
 AND buy_coinbase_order_id IS NULL
 AND buy_filled_price IS NULL;
+
+-- Step 1: match fills for either side of a position (buy or sell) against
+-- this cycle's bulk_fills. Deliberately does not compute profit here — that
+-- happens fresh in Step 2 from position's own stored columns, decoupled
+-- from this statement, so a NULL fee here can never silently block the
+-- close-out the way it used to (buy_fee NULL -> profit NULL -> position
+-- stuck forever with no way back in).
+UPDATE position
+SET buy_filled_price  = CASE WHEN position.buy_filled_price IS NULL AND bf.order_id = position.buy_coinbase_order_id THEN bf.price ELSE position.buy_filled_price END,
+    buy_fee            = CASE WHEN position.buy_filled_price IS NULL AND bf.order_id = position.buy_coinbase_order_id THEN bf.fee ELSE position.buy_fee END,
+    buy_filled_date    = CASE WHEN position.buy_filled_price IS NULL AND bf.order_id = position.buy_coinbase_order_id THEN NOW() ELSE position.buy_filled_date END,
+    sell_filled_price  = CASE WHEN position.sell_filled_price IS NULL AND bf.order_id = position.sell_coinbase_order_id THEN bf.price ELSE position.sell_filled_price END,
+    sell_fee           = CASE WHEN position.sell_filled_price IS NULL AND bf.order_id = position.sell_coinbase_order_id THEN bf.fee ELSE position.sell_fee END
+FROM bulk_fills bf
+WHERE (bf.order_id = position.buy_coinbase_order_id AND position.buy_filled_price IS NULL)
+   OR (bf.order_id = position.sell_coinbase_order_id AND position.sell_filled_price IS NULL);
+
+-- Step 2: record any fully bought-and-sold position into profit_history,
+-- computing profit fresh from position's current buy/sell price and fee
+-- columns (COALESCEd so a missing fee can never produce a NULL profit that
+-- blocks Step 3). Skips anything already recorded, matched on both the buy
+-- and sell order_id together.
+INSERT INTO profit_history (stock_id, name, period_type, buy_coinbase_order_id, sell_fills_id, buy_fee, sell_fee, profit)
+SELECT
+    p.stock_id, p.name, p.period_type, p.buy_coinbase_order_id, p.sell_coinbase_order_id AS sell_fills_id,
+    TRUNC(COALESCE(p.buy_fee, 0)::numeric, 2) AS buy_fee,
+    TRUNC(COALESCE(p.sell_fee, 0)::numeric, 2) AS sell_fee,
+    TRUNC(((p.sell_filled_price::numeric * p.shares::numeric - COALESCE(p.sell_fee, 0)::numeric)
+         - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee, 0)::numeric))::numeric, 2) AS profit
+FROM position p
+WHERE p.buy_filled_price IS NOT NULL AND p.sell_filled_price IS NOT NULL
+AND NOT EXISTS (
+    SELECT 1 FROM profit_history ph
+    WHERE ph.buy_coinbase_order_id = p.buy_coinbase_order_id AND ph.sell_fills_id = p.sell_coinbase_order_id
+);
+
+-- Step 3: delete the position row, but only once it's confirmed recorded in
+-- profit_history — never delete on the strength of this statement's own
+-- assumptions the way the old combined version did.
+DELETE FROM position p
+WHERE p.buy_filled_price IS NOT NULL AND p.sell_filled_price IS NOT NULL
+AND EXISTS (
+    SELECT 1 FROM profit_history ph
+    WHERE ph.buy_coinbase_order_id = p.buy_coinbase_order_id AND ph.sell_fills_id = p.sell_coinbase_order_id
+);
 
 TRUNCATE TABLE bulk_stock;
 TRUNCATE TABLE bulk_fills;
