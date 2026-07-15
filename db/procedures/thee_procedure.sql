@@ -190,6 +190,45 @@ AND (
 )
 LIMIT 1;
 
+-- Buy again (always $1) if current price has dropped below the lowest
+-- already-filled price for a stock+period, ever (not just currently open).
+-- Anchored on position itself, not vw_signal — purely "average down
+-- further," no score/recommendation conditions involved. Only triggers off
+-- a coin whose buy is actually filled, and only if there's no other buy
+-- order currently open/pending for that same stock+period. One new
+-- position per cycle.
+WITH held AS (
+    SELECT stock_id, period_type, MIN(buy_filled_price) AS lowest_filled_price
+    FROM position
+    WHERE buy_filled_price IS NOT NULL
+    GROUP BY stock_id, period_type
+)
+INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
+SELECT
+    s.stock_id,
+    s.name,
+    TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) AS buy_price,
+    TRUNC(s.price::numeric * 1.01,  s.price_rounding::integer) AS buy_stop_price,
+    TRUNC((1.00 / s.price)::numeric, s.share_rounding::integer) AS shares,
+    NOW() AS date_created,
+    gen_random_uuid(),
+    held.period_type
+FROM held
+JOIN stock s ON s.stock_id = held.stock_id
+CROSS JOIN vw_balance b
+WHERE b.name = 'USD'
+AND b.available > 1.00
+AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
+AND TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) < held.lowest_filled_price
+AND NOT EXISTS (
+    SELECT 1 FROM position existing
+    WHERE existing.stock_id = held.stock_id
+    AND existing.period_type = held.period_type
+    AND existing.buy_order_id IS NOT NULL
+    AND existing.buy_filled_price IS NULL
+)
+LIMIT 1;
+
 -- Initial sell stop, floored at a breakeven price unconditionally — a
 -- position must never be sold at a net loss, underwater or not. The floor
 -- is NOT raw buy_filled_price: profit is (sell_price*shares - sell_fee) -
