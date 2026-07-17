@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict ExgMaKLpg2u5T6nLBfkPavvxwvVviUcm6DOw30TMMoaETImfkCBUgmWBDIwUSjY
+\restrict txmQoQl7JxbXmc67TbJAH62X1oKcRHmzctHQkdXp1OcZ9hhnk8vqkEs4yrbFpzD
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -295,13 +295,13 @@ DECLARE
     key TEXT;
 BEGIN
     IF TG_OP = 'INSERT' THEN
-        INSERT INTO position_audit (buy_order_id, operation, column_name, old_value, new_value)
-        VALUES (NEW.buy_order_id, 'INSERT', NULL, NULL, to_jsonb(NEW)::text);
+        INSERT INTO position_audit (position_id, buy_order_id, operation, column_name, old_value, new_value)
+        VALUES (NEW.position_id, NEW.buy_order_id, 'INSERT', NULL, NULL, to_jsonb(NEW)::text);
         RETURN NEW;
 
     ELSIF TG_OP = 'DELETE' THEN
-        INSERT INTO position_audit (buy_order_id, operation, column_name, old_value, new_value)
-        VALUES (OLD.buy_order_id, 'DELETE', NULL, to_jsonb(OLD)::text, NULL);
+        INSERT INTO position_audit (position_id, buy_order_id, operation, column_name, old_value, new_value)
+        VALUES (OLD.position_id, OLD.buy_order_id, 'DELETE', NULL, to_jsonb(OLD)::text, NULL);
         RETURN OLD;
 
     ELSIF TG_OP = 'UPDATE' THEN
@@ -309,8 +309,8 @@ BEGIN
         new_json := to_jsonb(NEW);
         FOR key IN SELECT jsonb_object_keys(new_json) LOOP
             IF old_json -> key IS DISTINCT FROM new_json -> key THEN
-                INSERT INTO position_audit (buy_order_id, operation, column_name, old_value, new_value)
-                VALUES (NEW.buy_order_id, 'UPDATE', key, old_json ->> key, new_json ->> key);
+                INSERT INTO position_audit (position_id, buy_order_id, operation, column_name, old_value, new_value)
+                VALUES (NEW.position_id, NEW.buy_order_id, 'UPDATE', key, old_json ->> key, new_json ->> key);
             END IF;
         END LOOP;
         RETURN NEW;
@@ -1014,7 +1014,8 @@ CREATE TABLE public."position" (
     sell_counter integer DEFAULT 0 NOT NULL,
     buy_counter integer DEFAULT 0 NOT NULL,
     buy_filled_date timestamp without time zone,
-    daily_buy boolean DEFAULT false NOT NULL
+    daily_buy boolean DEFAULT false NOT NULL,
+    position_id bigint NOT NULL
 );
 
 
@@ -1024,6 +1025,7 @@ CREATE TABLE public."position" (
 
 CREATE TABLE public.position_audit (
     audit_id bigint NOT NULL,
+    position_id bigint,
     buy_order_id text,
     operation text NOT NULL,
     column_name text,
@@ -1050,6 +1052,25 @@ CREATE SEQUENCE public.position_audit_audit_id_seq
 --
 
 ALTER SEQUENCE public.position_audit_audit_id_seq OWNED BY public.position_audit.audit_id;
+
+
+--
+-- Name: position_position_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.position_position_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: position_position_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.position_position_id_seq OWNED BY public."position".position_id;
 
 
 --
@@ -1535,6 +1556,13 @@ ALTER TABLE ONLY public.bulk_stock ALTER COLUMN bulk_stock_id SET DEFAULT nextva
 
 
 --
+-- Name: position position_id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public."position" ALTER COLUMN position_id SET DEFAULT nextval('public.position_position_id_seq'::regclass);
+
+
+--
 -- Name: position_audit audit_id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -1628,6 +1656,14 @@ ALTER TABLE ONLY public.position_audit
 
 
 --
+-- Name: position position_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public."position"
+    ADD CONSTRAINT position_pkey PRIMARY KEY (position_id);
+
+
+--
 -- Name: price_aggregate_comparison price_aggregate_comparison_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1689,6 +1725,13 @@ CREATE INDEX idx_position_audit_column_name ON public.position_audit USING btree
 
 
 --
+-- Name: idx_position_audit_position_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_position_audit_position_id ON public.position_audit USING btree (position_id);
+
+
+--
 -- Name: position position_audit_trg; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -1699,5 +1742,5 @@ CREATE TRIGGER position_audit_trg AFTER INSERT OR DELETE OR UPDATE ON public."po
 -- PostgreSQL database dump complete
 --
 
-\unrestrict ExgMaKLpg2u5T6nLBfkPavvxwvVviUcm6DOw30TMMoaETImfkCBUgmWBDIwUSjY
+\unrestrict txmQoQl7JxbXmc67TbJAH62X1oKcRHmzctHQkdXp1OcZ9hhnk8vqkEs4yrbFpzD
 
