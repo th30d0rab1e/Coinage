@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict txmQoQl7JxbXmc67TbJAH62X1oKcRHmzctHQkdXp1OcZ9hhnk8vqkEs4yrbFpzD
+\restrict RUvoJPAyLA1lwGoDsy9oNky3FqRmwrdOlmYcawLWVBfJAxQbcZJFgurRDOX9JnU
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -295,13 +295,13 @@ DECLARE
     key TEXT;
 BEGIN
     IF TG_OP = 'INSERT' THEN
-        INSERT INTO position_audit (position_id, buy_order_id, operation, column_name, old_value, new_value)
-        VALUES (NEW.position_id, NEW.buy_order_id, 'INSERT', NULL, NULL, to_jsonb(NEW)::text);
+        INSERT INTO position_audit (position_id, operation, column_name, old_value, new_value)
+        VALUES (NEW.position_id, 'INSERT', NULL, NULL, to_jsonb(NEW)::text);
         RETURN NEW;
 
     ELSIF TG_OP = 'DELETE' THEN
-        INSERT INTO position_audit (position_id, buy_order_id, operation, column_name, old_value, new_value)
-        VALUES (OLD.position_id, OLD.buy_order_id, 'DELETE', NULL, to_jsonb(OLD)::text, NULL);
+        INSERT INTO position_audit (position_id, operation, column_name, old_value, new_value)
+        VALUES (OLD.position_id, 'DELETE', NULL, to_jsonb(OLD)::text, NULL);
         RETURN OLD;
 
     ELSIF TG_OP = 'UPDATE' THEN
@@ -309,8 +309,8 @@ BEGIN
         new_json := to_jsonb(NEW);
         FOR key IN SELECT jsonb_object_keys(new_json) LOOP
             IF old_json -> key IS DISTINCT FROM new_json -> key THEN
-                INSERT INTO position_audit (position_id, buy_order_id, operation, column_name, old_value, new_value)
-                VALUES (NEW.position_id, NEW.buy_order_id, 'UPDATE', key, old_json ->> key, new_json ->> key);
+                INSERT INTO position_audit (position_id, operation, column_name, old_value, new_value)
+                VALUES (NEW.position_id, 'UPDATE', key, old_json ->> key, new_json ->> key);
             END IF;
         END LOOP;
         RETURN NEW;
@@ -1026,7 +1026,6 @@ CREATE TABLE public."position" (
 CREATE TABLE public.position_audit (
     audit_id bigint NOT NULL,
     position_id bigint,
-    buy_order_id text,
     operation text NOT NULL,
     column_name text,
     old_value text,
@@ -1704,13 +1703,6 @@ ALTER TABLE ONLY public.profit_history
 
 
 --
--- Name: idx_position_audit_buy_order_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_position_audit_buy_order_id ON public.position_audit USING btree (buy_order_id);
-
-
---
 -- Name: idx_position_audit_changed_at; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1742,5 +1734,5 @@ CREATE TRIGGER position_audit_trg AFTER INSERT OR DELETE OR UPDATE ON public."po
 -- PostgreSQL database dump complete
 --
 
-\unrestrict txmQoQl7JxbXmc67TbJAH62X1oKcRHmzctHQkdXp1OcZ9hhnk8vqkEs4yrbFpzD
+\unrestrict RUvoJPAyLA1lwGoDsy9oNky3FqRmwrdOlmYcawLWVBfJAxQbcZJFgurRDOX9JnU
 
