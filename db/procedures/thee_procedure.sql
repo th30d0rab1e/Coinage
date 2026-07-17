@@ -343,6 +343,9 @@ AND EXISTS (
     WHERE ph.buy_coinbase_order_id = p.buy_coinbase_order_id AND ph.sell_fills_id = p.sell_coinbase_order_id
 );
 
+-- Prune position_audit records older than a month.
+DELETE FROM position_audit WHERE changed_at < NOW() - INTERVAL '1 month';
+
 TRUNCATE TABLE bulk_stock;
 TRUNCATE TABLE bulk_fills;
 TRUNCATE TABLE bulk_currency;

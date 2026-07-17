@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict ZOIII5d3KJt6dQGv6h6OQgckaACzTSXkBAGzZbRCZ3ZkUace3lx7PsH1cutCipo
+\restrict ExgMaKLpg2u5T6nLBfkPavvxwvVviUcm6DOw30TMMoaETImfkCBUgmWBDIwUSjY
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -668,6 +668,9 @@ AND EXISTS (
     SELECT 1 FROM profit_history ph
     WHERE ph.buy_coinbase_order_id = p.buy_coinbase_order_id AND ph.sell_fills_id = p.sell_coinbase_order_id
 );
+
+-- Prune position_audit records older than a month.
+DELETE FROM position_audit WHERE changed_at < NOW() - INTERVAL '1 month';
 
 TRUNCATE TABLE bulk_stock;
 TRUNCATE TABLE bulk_fills;
@@ -1696,5 +1699,5 @@ CREATE TRIGGER position_audit_trg AFTER INSERT OR DELETE OR UPDATE ON public."po
 -- PostgreSQL database dump complete
 --
 
-\unrestrict ZOIII5d3KJt6dQGv6h6OQgckaACzTSXkBAGzZbRCZ3ZkUace3lx7PsH1cutCipo
+\unrestrict ExgMaKLpg2u5T6nLBfkPavvxwvVviUcm6DOw30TMMoaETImfkCBUgmWBDIwUSjY
 
