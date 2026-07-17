@@ -114,6 +114,18 @@ async function processNewBalance () {
 
 async function processBuyOrders () {
     try {
+        // bulk_currency is already truncated by the time this runs (thee_procedure()
+        // truncates it at the end, and that runs before this), so check live rather
+        // than via vw_balance. If there isn't at least $1 free, don't even look at
+        // the pending-buy backlog -- every one of them would just fail anyway.
+        const accounts = await ca.gatherBalance();
+        const usd = accounts?.find(a => a.currency === 'USD');
+        const available = usd ? parseFloat(usd.available_balance.value) : 0;
+        if (!(available > 1)) {
+            console.log(`processBuyOrders() skipped: only $${available.toFixed(2)} available`);
+            return;
+        }
+
         const orders = await db.executeQuery(`SELECT * FROM position WHERE buy_coinbase_order_id IS NULL AND error_message IS NULL;`)
         console.log(`Buy Orders to Process: ${orders.length}`);
 
