@@ -69,15 +69,6 @@ AND NOT EXISTS (
     END
 );
 
--- Reconcile cancelled buy orders: in DB but gone from Coinbase.
-UPDATE position
-SET buy_coinbase_order_id = NULL, error_message = NULL
-WHERE buy_filled_price IS NULL
-AND buy_coinbase_order_id IS NOT NULL
-AND NOT EXISTS (
-    SELECT 1 FROM bulk_open_orders o WHERE o.order_id = position.buy_coinbase_order_id
-);
-
 -- Mark the pending buy order whose coin currently has the highest vw_signal
 -- priority as daily_buy. Re-evaluated every cycle (not a once-per-day pick),
 -- so exactly one row is true at a time and it tracks priority as it shifts.

@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 733YVz01ka3rgsqpWamoH2qgtzT04Rar9hITVUvEHairwp0EzK1r9qmYNNqoKST
+\restrict 3l1nIK2CWDKmpgqsGVGWMl3dSGHdqCrverspUubbHbi5WeXTvjjaFoxnVTGxc5h
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -393,15 +393,6 @@ AND NOT EXISTS (
               (o.order_configuration->'stop_limit_stop_limit_gtc'->>'base_size')::numeric) < 50  THEN 'month'
         ELSE 'year'
     END
-);
-
--- Reconcile cancelled buy orders: in DB but gone from Coinbase.
-UPDATE position
-SET buy_coinbase_order_id = NULL, error_message = NULL
-WHERE buy_filled_price IS NULL
-AND buy_coinbase_order_id IS NOT NULL
-AND NOT EXISTS (
-    SELECT 1 FROM bulk_open_orders o WHERE o.order_id = position.buy_coinbase_order_id
 );
 
 -- Mark the pending buy order whose coin currently has the highest vw_signal
@@ -1725,5 +1716,5 @@ CREATE TRIGGER position_audit_trg AFTER INSERT OR DELETE OR UPDATE ON public."po
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 733YVz01ka3rgsqpWamoH2qgtzT04Rar9hITVUvEHairwp0EzK1r9qmYNNqoKST
+\unrestrict 3l1nIK2CWDKmpgqsGVGWMl3dSGHdqCrverspUubbHbi5WeXTvjjaFoxnVTGxc5h
 
