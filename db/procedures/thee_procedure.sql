@@ -95,15 +95,6 @@ WHERE position.buy_coinbase_order_id IS NOT NULL
 AND position.buy_filled_price IS NULL
 AND position.daily_buy != (position.buy_order_id IN (SELECT buy_order_id FROM ranked WHERE rn = 1));
 
--- Reconcile cancelled sell orders: in DB but gone from Coinbase.
-UPDATE position
-SET sell_coinbase_order_id = NULL, error_message = NULL
-WHERE sell_filled_price IS NULL
-AND sell_coinbase_order_id IS NOT NULL
-AND NOT EXISTS (
-    SELECT 1 FROM bulk_open_orders o WHERE o.order_id = position.sell_coinbase_order_id
-);
-
 -- Orphan sell recovery: re-link any Coinbase SELL order to a position that lost its sell_coinbase_order_id.
 -- Uses DISTINCT ON (o.order_id) so each Coinbase order is only matched to one position row.
 WITH orphan_match AS (
