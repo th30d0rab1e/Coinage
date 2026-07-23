@@ -50,6 +50,12 @@ WHERE p.sell_coinbase_order_id IS NOT NULL
 AND p.sell_filled_price IS NULL
 AND p.daily_sell = true
 AND p.sell_stop_price < trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001), s.price_rounding)::double precision
+AND (
+    trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001) * 0.99, s.price_rounding)::numeric
+    * p.shares::numeric
+    * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
+    - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0))
+) > 0
 
 UNION ALL
 
@@ -91,6 +97,12 @@ WHERE p.sell_coinbase_order_id IS NOT NULL
 AND p.sell_filled_price IS NULL
 AND p.daily_sell = false
 AND p.sell_stop_price < GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding))::double precision
+AND (
+    GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001) * 0.99, s.price_rounding))
+    * p.shares::numeric
+    * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
+    - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0))
+) > 0
 
 UNION ALL
 
@@ -128,4 +140,10 @@ WHERE p.sell_coinbase_order_id IS NOT NULL
 AND p.sell_filled_price IS NULL
 AND p.daily_sell = false
 AND p.sell_stop_price > trunc(s.price::numeric * (vol.stop_ratio + 0.01 + p.sell_counter::numeric * 0.001), s.price_rounding)::double precision
+AND (
+    GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001) * 0.99, s.price_rounding))
+    * p.shares::numeric
+    * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
+    - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0))
+) > 0
 ORDER BY 10 DESC;
