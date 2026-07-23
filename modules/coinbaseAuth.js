@@ -177,6 +177,15 @@ ca.gatherOrders = async function () {
     }
 }
 
+ca.getOrderById = async function (orderId) {
+    try {
+        const response = await getApiCall('GET', `/api/v3/brokerage/orders/historical/${orderId}`, '')
+        return response.data.order;
+    } catch (error) {
+        console.log("getOrderById()", error?.response?.data || error);
+    }
+}
+
 ca.createLimitOrder = async function (side, price, shares, name, orderID) {
     try {
         let data = JSON.stringify({
@@ -361,11 +370,23 @@ ca.cancelOrder = async function (coinbase_order_id) {
         const cancelData = JSON.stringify({ order_ids: [coinbase_order_id] });
         let response = await getApiCall('POST', '/api/v3/brokerage/orders/batch_cancel', '', cancelData);
         const result = response.data?.results?.[0];
-        if (!result?.success) {
-            console.log(`cancelOrder() FAILED: ${result?.failure_reason} | ${coinbase_order_id}`)
-            return false;
+        if (result?.success) return true;
+
+        // batch_cancel can report failure (e.g. UNKNOWN_CANCEL_ORDER) even when the
+        // cancel actually took effect -- confirmed 2026-07-23 on JUPITER-USD and
+        // LIGHTER-USD, both left permanently stuck retrying a cancel every cycle on
+        // an order Coinbase's own order history showed as already CANCELLED with
+        // zero fill. Before treating this as a real failure -- which could mean the
+        // order already filled, the genuinely dangerous case a caller must not
+        // paper over -- check the order's actual terminal state directly.
+        console.log(`cancelOrder() reported FAILED: ${result?.failure_reason} | ${coinbase_order_id} -- verifying actual order status`)
+        const order = await ca.getOrderById(coinbase_order_id)
+        if (order?.status === 'CANCELLED' && parseFloat(order.filled_size || 0) === 0) {
+            console.log(`cancelOrder() verified actually cancelled (no fill): ${coinbase_order_id}`)
+            return true
         }
-        return true;
+        console.log(`cancelOrder() confirmed still unsafe (status: ${order?.status}, filled_size: ${order?.filled_size}): ${coinbase_order_id}`)
+        return false;
     } catch (error) {
         console.log(`cancelOrder() ERROR`, error)
         return false
