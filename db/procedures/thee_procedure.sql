@@ -259,7 +259,23 @@ JOIN price_aggregate_total pat ON stock.stock_id = pat.stock_id
 WHERE position.stock_id = stock.stock_id
 AND pat.period_type = position.period_type
 AND position.buy_filled_price IS NOT NULL
-AND position.sell_price IS NULL;
+AND position.sell_price IS NULL
+-- Estimated profit, from buy_filled_price and buy_fee alone: at the
+-- fee-adjusted floor price (same CEIL(...) breakeven formula as above),
+-- proceeds after an estimated sell fee (same buy-side fee rate, falling
+-- back to 1.2%) must exceed total cost (buy_filled_price * shares +
+-- buy_fee). Uses only known buy-side values, not current market price.
+AND (
+    (CEIL(
+        (position.buy_filled_price::numeric
+            * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
+            / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012)))
+        * POWER(10::numeric, stock.price_rounding::int)
+    ) / POWER(10::numeric, stock.price_rounding::int))
+    * position.shares::numeric
+    * (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
+    - (position.buy_filled_price::numeric * position.shares::numeric + COALESCE(position.buy_fee::numeric, 0))
+) > 0;
 
 -- Clear error_message on unfilled buy positions instead of deleting them.
 UPDATE position SET error_message = NULL
