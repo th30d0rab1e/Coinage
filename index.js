@@ -424,6 +424,9 @@ async function processDailyProfit () {
               AND p.sell_filled_price IS NULL
               AND p.daily_sell = false
               AND s.price::numeric >= breakeven.floor_price
+              AND ((s.price - p.buy_filled_price) * p.shares - COALESCE(p.buy_fee, 0)) > (
+                  SELECT COALESCE(AVG(profit), 0) FROM profit_history WHERE period_type = p.period_type
+              )
             ORDER BY pct_gain DESC
             LIMIT 1
         `)
