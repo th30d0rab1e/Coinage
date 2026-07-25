@@ -5,6 +5,19 @@ const PORT = 3000
 
 const PROFIT_SUMMARY_QUERY = `SELECT * FROM vw_profit_summary`
 
+const PROFIT_HISTORY_24H_QUERY = `
+    SELECT ph.name, ph.period_type,
+        (pa.old_value::jsonb ->> 'buy_filled_price') AS buy_price,
+        (pa.old_value::jsonb ->> 'sell_filled_price') AS sell_price,
+        ph.buy_fee, ph.sell_fee, ph.profit, ph.date_created
+    FROM profit_history ph
+    LEFT JOIN position_audit pa ON pa.operation = 'DELETE'
+        AND (pa.old_value::jsonb ->> 'buy_coinbase_order_id') = ph.buy_coinbase_order_id
+        AND (pa.old_value::jsonb ->> 'sell_coinbase_order_id') = ph.sell_fills_id
+    WHERE ph.date_created > NOW() - INTERVAL '24 hours'
+    ORDER BY ph.date_created DESC
+`
+
 const OPEN_POSITIONS_QUERY = `
     SELECT p.name, p.shares,
         p.buy_filled_price, s.price AS current_price, p.sell_price AS sell_target,
@@ -60,7 +73,7 @@ function esc (value) {
     return String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 }
 
-function renderPage (profitSummary, openPositions, recentFills) {
+function renderPage (profitSummary, profitHistory24h, openPositions, recentFills) {
     const summaryRows = profitSummary.map(r => `
         <tr>
             <td>${esc(r.period_type)}</td>
@@ -73,6 +86,19 @@ function renderPage (profitSummary, openPositions, recentFills) {
             <td>${r.month_trades}</td>
             <td>${money(r.month_profit)}</td>
             <td>${money(r.month_avg)}</td>
+        </tr>
+    `).join('')
+
+    const historyRows = profitHistory24h.map(r => `
+        <tr>
+            <td>${esc(r.name)}</td>
+            <td>${esc(r.period_type)}</td>
+            <td>${num(r.buy_price)}</td>
+            <td>${num(r.sell_price)}</td>
+            <td>${money(r.buy_fee)}</td>
+            <td>${money(r.sell_fee)}</td>
+            <td>${money(r.profit)}</td>
+            <td class="dim">${new Date(r.date_created).toLocaleString()}</td>
         </tr>
     `).join('')
 
@@ -137,6 +163,15 @@ function renderPage (profitSummary, openPositions, recentFills) {
         ${summaryRows || '<tr><td class="empty" colspan="10">No data</td></tr>'}
     </table>
 
+    <h2>Profit History — Last 24 Hours (${profitHistory24h.length})</h2>
+    <table>
+        <tr>
+            <th>Coin</th><th>Period</th><th>Buy Price</th><th>Sell Price</th>
+            <th>Buy Fee</th><th>Sell Fee</th><th>Profit</th><th>When</th>
+        </tr>
+        ${historyRows || '<tr><td class="empty" colspan="8">No trades in the last 24 hours</td></tr>'}
+    </table>
+
     <h2>Open Positions &amp; Estimated Profit (${openPositions.length})</h2>
     <table>
         <tr>
@@ -157,13 +192,14 @@ function renderPage (profitSummary, openPositions, recentFills) {
 
 const server = http.createServer(async (req, res) => {
     try {
-        const [profitSummary, openPositions, recentFills] = await Promise.all([
+        const [profitSummary, profitHistory24h, openPositions, recentFills] = await Promise.all([
             db.executeQuery(PROFIT_SUMMARY_QUERY),
+            db.executeQuery(PROFIT_HISTORY_24H_QUERY),
             db.executeQuery(OPEN_POSITIONS_QUERY),
             db.executeQuery(RECENT_FILLS_QUERY),
         ])
         res.writeHead(200, { 'Content-Type': 'text/html' })
-        res.end(renderPage(profitSummary, openPositions, recentFills))
+        res.end(renderPage(profitSummary, profitHistory24h, openPositions, recentFills))
     } catch (error) {
         console.log('dashboard request error', error)
         res.writeHead(500, { 'Content-Type': 'text/plain' })
