@@ -36,7 +36,7 @@ const OPEN_POSITIONS_QUERY = `
     FROM position p
     JOIN stock s ON s.stock_id = p.stock_id
     WHERE p.buy_filled_price IS NOT NULL AND p.sell_filled_price IS NULL
-    ORDER BY has_live_sell DESC, target_profit DESC
+    ORDER BY has_live_sell DESC, current_profit DESC
 `
 
 const RECENT_FILLS_QUERY = `
