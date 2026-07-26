@@ -27,11 +27,16 @@ const OPEN_POSITIONS_QUERY = `
             p.sell_price::numeric * p.shares::numeric
             * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
             - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0))
-        ) AS est_profit_at_target
+        ) AS target_profit,
+        (
+            s.price::numeric * p.shares::numeric
+            * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
+            - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0))
+        ) AS current_profit
     FROM position p
     JOIN stock s ON s.stock_id = p.stock_id
     WHERE p.buy_filled_price IS NOT NULL AND p.sell_filled_price IS NULL
-    ORDER BY has_live_sell DESC, est_profit_at_target DESC
+    ORDER BY has_live_sell DESC, target_profit DESC
 `
 
 const RECENT_FILLS_QUERY = `
@@ -58,7 +63,8 @@ function money (value) {
     const n = parseFloat(value)
     if (Number.isNaN(n)) return '—'
     const cls = n > 0 ? 'pos' : n < 0 ? 'neg' : ''
-    return `<span class="${cls}">$${n.toFixed(4)}</span>`
+    const sign = n < 0 ? '-' : ''
+    return `<span class="${cls}">${sign}$${Math.abs(n).toFixed(4)}</span>`
 }
 
 function num (value, digits) {
@@ -110,7 +116,8 @@ function renderPage (profitSummary, profitHistory24h, openPositions, recentFills
             <td>${num(r.current_price)}</td>
             <td>${num(r.sell_target)}</td>
             <td>${r.has_live_sell ? '<span class="pos">live</span>' : '<span class="dim">none</span>'}</td>
-            <td>${money(r.est_profit_at_target)}</td>
+            <td>${money(r.target_profit)}</td>
+            <td>${money(r.current_profit)}</td>
             <td class="dim">${esc(r.error_message)}</td>
         </tr>
     `).join('')
@@ -176,9 +183,9 @@ function renderPage (profitSummary, profitHistory24h, openPositions, recentFills
     <table>
         <tr>
             <th>Coin</th><th>Shares</th><th>Bought @</th><th>Current</th><th>Sell Target</th>
-            <th>Sell Order</th><th>Est. Profit</th><th>Error</th>
+            <th>Sell Order</th><th>Target Profit</th><th>Current Profit</th><th>Error</th>
         </tr>
-        ${positionRows || '<tr><td class="empty" colspan="8">No open positions</td></tr>'}
+        ${positionRows || '<tr><td class="empty" colspan="9">No open positions</td></tr>'}
     </table>
 
     <h2>Last 100 Fills</h2>
