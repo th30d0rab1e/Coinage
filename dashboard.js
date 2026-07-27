@@ -18,6 +18,17 @@ const PROFIT_HISTORY_24H_QUERY = `
     ORDER BY ph.date_created DESC
 `
 
+const OPEN_BUY_ORDERS_QUERY = `
+    SELECT p.name, p.shares, p.buy_price, p.buy_stop_price, s.price AS current_price,
+        ROUND(((p.buy_stop_price - s.price) / NULLIF(s.price, 0) * 100)::numeric, 4) AS pct_to_trigger,
+        p.error_message, p.date_created
+    FROM position p
+    JOIN stock s ON s.stock_id = p.stock_id
+    WHERE p.buy_coinbase_order_id IS NOT NULL AND p.buy_coinbase_order_id != ''
+    AND p.buy_filled_price IS NULL
+    ORDER BY pct_to_trigger ASC
+`
+
 const OPEN_POSITIONS_QUERY = `
     SELECT p.name, p.shares,
         p.buy_filled_price, s.price AS current_price, p.sell_price AS sell_target,
@@ -79,7 +90,7 @@ function esc (value) {
     return String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 }
 
-function renderPage (profitSummary, profitHistory24h, openPositions, recentFills) {
+function renderPage (profitSummary, profitHistory24h, openBuyOrders, openPositions, recentFills) {
     const summaryRows = profitSummary.map(r => `
         <tr>
             <td>${esc(r.period_type)}</td>
@@ -104,6 +115,19 @@ function renderPage (profitSummary, profitHistory24h, openPositions, recentFills
             <td>${money(r.buy_fee)}</td>
             <td>${money(r.sell_fee)}</td>
             <td>${money(r.profit)}</td>
+            <td class="dim">${new Date(r.date_created).toLocaleString()}</td>
+        </tr>
+    `).join('')
+
+    const buyOrderRows = openBuyOrders.map(r => `
+        <tr>
+            <td>${esc(r.name)}</td>
+            <td>${num(r.shares)}</td>
+            <td>${num(r.buy_price)}</td>
+            <td>${num(r.buy_stop_price)}</td>
+            <td>${num(r.current_price)}</td>
+            <td>${r.pct_to_trigger}%</td>
+            <td class="dim">${esc(r.error_message)}</td>
             <td class="dim">${new Date(r.date_created).toLocaleString()}</td>
         </tr>
     `).join('')
@@ -179,6 +203,15 @@ function renderPage (profitSummary, profitHistory24h, openPositions, recentFills
         ${historyRows || '<tr><td class="empty" colspan="8">No trades in the last 24 hours</td></tr>'}
     </table>
 
+    <h2>Open Buy Orders (${openBuyOrders.length})</h2>
+    <table>
+        <tr>
+            <th>Coin</th><th>Shares</th><th>Buy Limit</th><th>Buy Stop</th><th>Current</th>
+            <th>% to Trigger</th><th>Error</th><th>Placed</th>
+        </tr>
+        ${buyOrderRows || '<tr><td class="empty" colspan="8">No pending buy orders</td></tr>'}
+    </table>
+
     <h2>Open Positions &amp; Estimated Profit (${openPositions.length})</h2>
     <table>
         <tr>
@@ -199,14 +232,15 @@ function renderPage (profitSummary, profitHistory24h, openPositions, recentFills
 
 const server = http.createServer(async (req, res) => {
     try {
-        const [profitSummary, profitHistory24h, openPositions, recentFills] = await Promise.all([
+        const [profitSummary, profitHistory24h, openBuyOrders, openPositions, recentFills] = await Promise.all([
             db.executeQuery(PROFIT_SUMMARY_QUERY),
             db.executeQuery(PROFIT_HISTORY_24H_QUERY),
+            db.executeQuery(OPEN_BUY_ORDERS_QUERY),
             db.executeQuery(OPEN_POSITIONS_QUERY),
             db.executeQuery(RECENT_FILLS_QUERY),
         ])
         res.writeHead(200, { 'Content-Type': 'text/html' })
-        res.end(renderPage(profitSummary, profitHistory24h, openPositions, recentFills))
+        res.end(renderPage(profitSummary, profitHistory24h, openBuyOrders, openPositions, recentFills))
     } catch (error) {
         console.log('dashboard request error', error)
         res.writeHead(500, { 'Content-Type': 'text/plain' })
