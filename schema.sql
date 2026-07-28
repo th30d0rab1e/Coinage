@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict SLen3qZqMUuvftvCSJzVFbNh7YZ92yTgkuPOWXWWDgW9e9jCOE3G2jDUcr0WOLL
+\restrict nWbuAzKKMAg5idS6tN4dFXUzDpHoxN4znkf90XQEDahSQRNWGIs3mpIfPQxE5N7
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -621,10 +621,10 @@ AND buy_filled_price IS NULL;
 -- rechecks a row once buy_filled_price/sell_filled_price is no longer NULL.
 UPDATE position
 SET buy_filled_price  = CASE WHEN position.buy_filled_price IS NULL AND bf.order_id = position.buy_coinbase_order_id THEN bf.price ELSE position.buy_filled_price END,
-    buy_fee            = CASE WHEN position.buy_fee IS NULL AND bf.order_id = position.buy_coinbase_order_id THEN bf.fee ELSE position.buy_fee END,
+    buy_fee            = CASE WHEN position.buy_fee IS NULL AND bf.order_id = position.buy_coinbase_order_id AND bf.fee > 0 THEN bf.fee ELSE position.buy_fee END,
     buy_filled_date    = CASE WHEN position.buy_filled_price IS NULL AND bf.order_id = position.buy_coinbase_order_id THEN NOW() ELSE position.buy_filled_date END,
     sell_filled_price  = CASE WHEN position.sell_filled_price IS NULL AND bf.order_id = position.sell_coinbase_order_id THEN bf.price ELSE position.sell_filled_price END,
-    sell_fee           = CASE WHEN position.sell_fee IS NULL AND bf.order_id = position.sell_coinbase_order_id THEN bf.fee ELSE position.sell_fee END
+    sell_fee           = CASE WHEN position.sell_fee IS NULL AND bf.order_id = position.sell_coinbase_order_id AND bf.fee > 0 THEN bf.fee ELSE position.sell_fee END
 FROM bulk_fills bf
 WHERE (bf.order_id = position.buy_coinbase_order_id AND (position.buy_filled_price IS NULL OR position.buy_fee IS NULL))
    OR (bf.order_id = position.sell_coinbase_order_id AND (position.sell_filled_price IS NULL OR position.sell_fee IS NULL));
@@ -1738,5 +1738,5 @@ CREATE TRIGGER position_audit_trg AFTER INSERT OR DELETE OR UPDATE ON public."po
 -- PostgreSQL database dump complete
 --
 
-\unrestrict SLen3qZqMUuvftvCSJzVFbNh7YZ92yTgkuPOWXWWDgW9e9jCOE3G2jDUcr0WOLL
+\unrestrict nWbuAzKKMAg5idS6tN4dFXUzDpHoxN4znkf90XQEDahSQRNWGIs3mpIfPQxE5N7
 

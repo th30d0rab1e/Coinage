@@ -53,7 +53,7 @@ const OPEN_POSITIONS_QUERY = `
 const RECENT_FILLS_QUERY = `
     SELECT
         pa.position_id,
-        COALESCE(cur.name, ins.new_value::jsonb ->> 'name') AS name,
+        COALESCE(cur.name, ins.new_value::jsonb ->> 'name', del.old_value::jsonb ->> 'name') AS name,
         CASE pa.column_name WHEN 'buy_filled_price' THEN 'BUY' ELSE 'SELL' END AS fill_type,
         pa.new_value AS price,
         pa.changed_at
@@ -64,6 +64,11 @@ const RECENT_FILLS_QUERY = `
         WHERE ins.position_id = pa.position_id AND ins.operation = 'INSERT'
         LIMIT 1
     ) ins ON true
+    LEFT JOIN LATERAL (
+        SELECT old_value FROM position_audit del
+        WHERE del.position_id = pa.position_id AND del.operation = 'DELETE'
+        LIMIT 1
+    ) del ON true
     WHERE pa.column_name IN ('buy_filled_price', 'sell_filled_price')
     ORDER BY pa.changed_at DESC
     LIMIT 100
