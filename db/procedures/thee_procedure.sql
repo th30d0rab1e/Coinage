@@ -227,12 +227,28 @@ LIMIT 1;
 -- price — it should leave the position unprotected and retry with fresh
 -- preview data next cycle until price recovers enough for this floor to
 -- clear.
+--
+-- sell_stop_price's floor branch carries an extra 1.01 multiplier that
+-- sell_price's floor branch does not: when the floor is the binding
+-- constraint (GREATEST picks it over the volatility-discount branch,
+-- which is most underwater positions), the two branches would otherwise
+-- compute to the exact same price, leaving zero gap between trigger and
+-- fill. A sell stop-limit order triggers at stop_price and then only
+-- fills at limit_price or better; with no gap, price crosses the trigger
+-- and keeps falling before the now-working limit order ever gets a
+-- chance to execute against it, stranding it above the market
+-- indefinitely (confirmed on two LSETH-USD orders: both showed
+-- trigger_status STOP_TRIGGERED but sat unfilled since stop_price and
+-- limit_price were identical). The 1% buffer only raises the trigger
+-- threshold; sell_price's floor is untouched, so the guaranteed-minimum
+-- fill price is unchanged and the no-loss floor still holds exactly.
 UPDATE position
 SET sell_stop_price = GREATEST(
         CEIL(
             (position.buy_filled_price::numeric
                 * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
                 / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012)))
+                * 1.01
             * POWER(10::numeric, stock.price_rounding::int)
         ) / POWER(10::numeric, stock.price_rounding::int),
         TRUNC(stock.price::numeric * CASE position.period_type
@@ -275,7 +291,20 @@ AND (
     * position.shares::numeric
     * (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
     - (position.buy_filled_price::numeric * position.shares::numeric + COALESCE(position.buy_fee::numeric, 0))
-) > 0;
+) > 0
+-- Also must exceed this period_type's historical average profit, same gate
+-- already applied to vw_edit_orders' sell-remake branches.
+AND (
+    (CEIL(
+        (position.buy_filled_price::numeric
+            * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
+            / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012)))
+        * POWER(10::numeric, stock.price_rounding::int)
+    ) / POWER(10::numeric, stock.price_rounding::int))
+    * position.shares::numeric
+    * (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
+    - (position.buy_filled_price::numeric * position.shares::numeric + COALESCE(position.buy_fee::numeric, 0))
+) > (SELECT COALESCE(AVG(profit), 0) FROM profit_history WHERE period_type = position.period_type);
 
 -- Clear error_message on unfilled buy positions instead of deleting them.
 UPDATE position SET error_message = NULL
