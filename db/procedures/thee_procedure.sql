@@ -30,6 +30,15 @@ WHERE stock.name = bs.id
 AND bs.id LIKE '%-USD'
 AND bs.price != '';
 
+-- Snapshot each stock's year-basis signal score onto the stock row itself, as
+-- a priority marker for what to buy -- vw_signal's score isn't otherwise
+-- persisted anywhere outside the view.
+UPDATE stock
+SET score = vw.score
+FROM vw_signal vw
+WHERE stock.stock_id = vw.stock_id
+AND vw.period_type = 'year';
+
 -- Recover orphaned buy orders: open on Coinbase but missing from position table.
 -- Skip if an unfilled buy position already exists for that coin + period_type.
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, buy_coinbase_order_id, period_type)

@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict SMTXeEpTCSahvQiEFDrJ9wfxv4nkfu8sKqAAxgs8ylSZosB1MhHiIp9FiQVHz3U
+\restrict tPWrzJzQ6e03QNe4gpwNp4cJYqzLlNmvbD3NoAoNMbUi1SoaVwdTJ3URDrMlZWW
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -355,6 +355,15 @@ FROM bulk_stock bs
 WHERE stock.name = bs.id
 AND bs.id LIKE '%-USD'
 AND bs.price != '';
+
+-- Snapshot each stock's year-basis signal score onto the stock row itself, as
+-- a priority marker for what to buy -- vw_signal's score isn't otherwise
+-- persisted anywhere outside the view.
+UPDATE stock
+SET score = vw.score
+FROM vw_signal vw
+WHERE stock.stock_id = vw.stock_id
+AND vw.period_type = 'year';
 
 -- Recover orphaned buy orders: open on Coinbase but missing from position table.
 -- Skip if an unfilled buy position already exists for that coin + period_type.
@@ -722,7 +731,7 @@ CREATE TABLE public.stock (
     price double precision,
     historical_finished bit(1),
     historical_last_date date,
-    score bigint,
+    score numeric,
     price_movement text,
     max_shares double precision,
     min_shares double precision,
@@ -1767,5 +1776,5 @@ CREATE TRIGGER position_audit_trg AFTER INSERT OR DELETE OR UPDATE ON public."po
 -- PostgreSQL database dump complete
 --
 
-\unrestrict SMTXeEpTCSahvQiEFDrJ9wfxv4nkfu8sKqAAxgs8ylSZosB1MhHiIp9FiQVHz3U
+\unrestrict tPWrzJzQ6e03QNe4gpwNp4cJYqzLlNmvbD3NoAoNMbUi1SoaVwdTJ3URDrMlZWW
 
