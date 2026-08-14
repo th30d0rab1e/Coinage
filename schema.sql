@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict H2IfydA9nQhwkFfgbm6l6hSRc8ex43SlBFbbIRL9Se3imUbAldX7pP6iDgNlgU0
+\restrict 2wCm1SMi74fFabdZKZlhlA6PcidDaXxXmGPYMICeUXoHUCRMVesMuX6aOIg0Gnb
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -450,8 +450,8 @@ WHERE p.buy_order_id = om.pos_key;
 -- cycle.
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
 SELECT s.stock_id, s.name,
-    TRUNC((s.close::numeric * bal.stop_mult * 1.01), stock.price_rounding::integer) AS buy_price,
-    TRUNC((s.close::numeric * bal.stop_mult),        stock.price_rounding::integer) AS buy_stop_price,
+    TRUNC((s.close::numeric * 1.05 * 1.01), stock.price_rounding::integer) AS buy_price,
+    TRUNC((s.close::numeric * 1.05),        stock.price_rounding::integer) AS buy_stop_price,
     TRUNC((1.00 / s.close)::numeric, stock.share_rounding::integer) AS shares,
     NOW() AS date_created,
     gen_random_uuid(),
@@ -463,22 +463,6 @@ LEFT JOIN position p ON p.stock_id = s.stock_id
     AND p.period_type = 'day'
     AND p.buy_order_id IS NOT NULL
     AND p.buy_filled_price IS NULL
-CROSS JOIN LATERAL (
-    SELECT GREATEST(1.01::numeric, LEAST(1.05::numeric,
-        1.01 + 0.04 * (1.0 -
-            b.available::numeric /
-            NULLIF(
-                b.available::numeric + COALESCE((
-                    SELECT SUM(p2.buy_price * p2.shares)
-                    FROM position p2
-                    WHERE p2.buy_coinbase_order_id IS NOT NULL
-                    AND p2.buy_filled_price IS NULL
-                ), 0)::numeric,
-                0
-            )
-        )
-    )) AS stop_mult
-) bal
 WHERE b.name = 'USD'
 AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
 AND b.available > 1.00
@@ -1348,13 +1332,7 @@ CREATE VIEW public.vw_edit_orders AS
     p.buy_counter AS counter
    FROM ((public."position" p
      JOIN public.stock s ON ((p.stock_id = s.stock_id)))
-     CROSS JOIN LATERAL ( SELECT GREATEST(1.001, LEAST(1.05, ((1.01 + (0.04 * (1.0 - (COALESCE(( SELECT (b.available)::numeric AS available
-                   FROM public.vw_balance b
-                  WHERE (b.name = 'USD'::text)), (0)::numeric) / NULLIF((COALESCE(( SELECT (b.available)::numeric AS available
-                   FROM public.vw_balance b
-                  WHERE (b.name = 'USD'::text)), (0)::numeric) + COALESCE(( SELECT (sum((p2.buy_price * p2.shares)))::numeric AS sum
-                   FROM public."position" p2
-                  WHERE ((p2.buy_coinbase_order_id IS NOT NULL) AND (p2.buy_filled_price IS NULL))), (0)::numeric)), (0)::numeric))))) - ((p.buy_counter)::numeric * 0.001)))) AS stop_mult) bal)
+     CROSS JOIN LATERAL ( SELECT GREATEST(1.001, (1.05 - ((p.buy_counter)::numeric * 0.001))) AS stop_mult) bal)
   WHERE ((p.buy_coinbase_order_id IS NOT NULL) AND (p.buy_filled_price IS NULL) AND (p.buy_stop_price > (trunc(((s.price)::numeric * bal.stop_mult), s.price_rounding))::double precision))
 UNION ALL
  SELECT p.name,
@@ -1810,5 +1788,5 @@ CREATE TRIGGER position_audit_trg AFTER INSERT OR DELETE OR UPDATE ON public."po
 -- PostgreSQL database dump complete
 --
 
-\unrestrict H2IfydA9nQhwkFfgbm6l6hSRc8ex43SlBFbbIRL9Se3imUbAldX7pP6iDgNlgU0
+\unrestrict 2wCm1SMi74fFabdZKZlhlA6PcidDaXxXmGPYMICeUXoHUCRMVesMuX6aOIg0Gnb
 

@@ -124,8 +124,8 @@ WHERE p.buy_order_id = om.pos_key;
 -- cycle.
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
 SELECT s.stock_id, s.name,
-    TRUNC((s.close::numeric * bal.stop_mult * 1.01), stock.price_rounding::integer) AS buy_price,
-    TRUNC((s.close::numeric * bal.stop_mult),        stock.price_rounding::integer) AS buy_stop_price,
+    TRUNC((s.close::numeric * 1.05 * 1.01), stock.price_rounding::integer) AS buy_price,
+    TRUNC((s.close::numeric * 1.05),        stock.price_rounding::integer) AS buy_stop_price,
     TRUNC((1.00 / s.close)::numeric, stock.share_rounding::integer) AS shares,
     NOW() AS date_created,
     gen_random_uuid(),
@@ -137,22 +137,6 @@ LEFT JOIN position p ON p.stock_id = s.stock_id
     AND p.period_type = 'day'
     AND p.buy_order_id IS NOT NULL
     AND p.buy_filled_price IS NULL
-CROSS JOIN LATERAL (
-    SELECT GREATEST(1.01::numeric, LEAST(1.05::numeric,
-        1.01 + 0.04 * (1.0 -
-            b.available::numeric /
-            NULLIF(
-                b.available::numeric + COALESCE((
-                    SELECT SUM(p2.buy_price * p2.shares)
-                    FROM position p2
-                    WHERE p2.buy_coinbase_order_id IS NOT NULL
-                    AND p2.buy_filled_price IS NULL
-                ), 0)::numeric,
-                0
-            )
-        )
-    )) AS stop_mult
-) bal
 WHERE b.name = 'USD'
 AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
 AND b.available > 1.00

@@ -16,16 +16,7 @@ SELECT p.name,
 FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
 CROSS JOIN LATERAL (
-    SELECT GREATEST(1.001, LEAST(1.05,
-        1.01 + 0.04 * (1.0 -
-            COALESCE((SELECT b.available::numeric FROM vw_balance b WHERE b.name = 'USD'::text), 0::numeric) /
-            NULLIF(
-                COALESCE((SELECT b.available::numeric FROM vw_balance b WHERE b.name = 'USD'::text), 0::numeric) +
-                COALESCE((SELECT sum(p2.buy_price * p2.shares)::numeric FROM position p2 WHERE p2.buy_coinbase_order_id IS NOT NULL AND p2.buy_filled_price IS NULL), 0::numeric),
-                0::numeric
-            )
-        ) - p.buy_counter::numeric * 0.001
-    )) AS stop_mult
+    SELECT GREATEST(1.001, 1.05 - p.buy_counter::numeric * 0.001) AS stop_mult
 ) bal
 WHERE p.buy_coinbase_order_id IS NOT NULL
 AND p.buy_filled_price IS NULL
