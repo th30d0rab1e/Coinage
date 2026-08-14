@@ -114,24 +114,27 @@ SET sell_coinbase_order_id = om.order_id
 FROM orphan_match om
 WHERE p.buy_order_id = om.pos_key;
 
+-- New position: $1 into the highest year-basis-score coin not already held,
+-- gated only on the coin's year-basis trend being positive -- no day-timing
+-- signal (recommendation / current-vs-average dip) and no score floor, since
+-- the goal is broad $1 exposure across every coin trending up over the
+-- year, ranked by score, not picking entries by short-term dip timing.
+-- Always recorded as period_type 'day' (the existing $1-size bucket), even
+-- though the signal driving the pick is the year row. One new position per
+-- cycle.
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
 SELECT s.stock_id, s.name,
     TRUNC((s.close::numeric * bal.stop_mult * 1.01), stock.price_rounding::integer) AS buy_price,
     TRUNC((s.close::numeric * bal.stop_mult),        stock.price_rounding::integer) AS buy_stop_price,
-    CASE
-        WHEN s.period_type = 'day'   THEN TRUNC((1.00   / s.close)::numeric, stock.share_rounding::integer)
-        WHEN s.period_type = 'month' THEN TRUNC((10.00  / s.close)::numeric, stock.share_rounding::integer)
-        WHEN s.period_type = 'year'  THEN TRUNC((100.00 / s.close)::numeric, stock.share_rounding::integer)
-        ELSE 0
-    END AS shares,
+    TRUNC((1.00 / s.close)::numeric, stock.share_rounding::integer) AS shares,
     NOW() AS date_created,
     gen_random_uuid(),
-    s.period_type
+    'day'
 FROM vw_signal s
 JOIN stock ON s.stock_id = stock.stock_id
 CROSS JOIN vw_balance b
 LEFT JOIN position p ON p.stock_id = s.stock_id
-    AND p.period_type = s.period_type
+    AND p.period_type = 'day'
     AND p.buy_order_id IS NOT NULL
     AND p.buy_filled_price IS NULL
 CROSS JOIN LATERAL (
@@ -152,21 +155,15 @@ CROSS JOIN LATERAL (
 ) bal
 WHERE b.name = 'USD'
 AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
-AND (
-    (b.available > 1.00  AND s.period_type = 'day')
-    OR (b.available > 10.00 AND s.period_type = 'month')
-    OR (b.available > 100.00 AND s.period_type = 'year')
-)
+AND b.available > 1.00
+AND s.period_type = 'year'
 AND p.buy_order_id IS NULL
-AND recommendation = 'BUY'
-AND current_change_percent < historical_avg_change_percent
 AND historical_avg_change_percent > 0
-AND s.score > 5
 AND (
     NOT EXISTS (
         SELECT 1 FROM position existing
         WHERE existing.stock_id = s.stock_id
-        AND existing.period_type = s.period_type
+        AND existing.period_type = 'day'
         AND existing.buy_filled_price IS NOT NULL
         AND existing.sell_filled_price IS NULL
     )
@@ -174,11 +171,12 @@ AND (
         SELECT MIN(existing.buy_filled_price)
         FROM position existing
         WHERE existing.stock_id = s.stock_id
-        AND existing.period_type = s.period_type
+        AND existing.period_type = 'day'
         AND existing.buy_filled_price IS NOT NULL
         AND existing.sell_filled_price IS NULL
     )
 )
+ORDER BY s.score DESC NULLS LAST
 LIMIT 1;
 
 -- Buy again (always $1) if current price has dropped below the lowest
