@@ -313,6 +313,42 @@ AND (
     - (position.buy_filled_price::numeric * position.shares::numeric + COALESCE(position.buy_fee::numeric, 0))
 ) > (SELECT COALESCE(AVG(profit), 0) FROM profit_history WHERE period_type = position.period_type);
 
+-- Bootstrap protection for underwater positions that have never gotten a
+-- sell order onto the exchange: the breakeven floor above always makes
+-- Coinbase reject the order while price sits below buy_filled_price
+-- (processSellOrders() logs this as "Sell Order deferred (underwater)" and
+-- leaves the position with nothing resting on Coinbase, indefinitely).
+-- Rather than stay unprotected, place a real stop using only the same
+-- volatility band used everywhere else in this file (no breakeven floor)
+-- -- it can fill at a loss if price keeps falling, but that beats no
+-- protection at all. Deliberately not gated on sell_price IS NULL, so it
+-- keeps re-tracking current price every cycle until the order actually
+-- lands on Coinbase and sell_coinbase_order_id gets set -- at that point
+-- this WHERE no longer matches, and vw_edit_orders' daily_sell = false
+-- branches take over entirely; those already re-apply the breakeven floor
+-- via GREATEST(breakeven.floor_price, ...), so once the position clears
+-- into profit the trailing stop is raised back to a no-loss floor same as
+-- any other profitable position.
+UPDATE position
+SET sell_stop_price = TRUNC(stock.price::numeric * CASE position.period_type
+        WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
+        WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
+        WHEN 'year'  THEN LEAST(0.95, GREATEST(0.60, 1 - pat.std_dev::numeric / 200))
+    END, stock.price_rounding::int),
+    sell_price = TRUNC(stock.price::numeric * (CASE position.period_type
+        WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
+        WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
+        WHEN 'year'  THEN LEAST(0.95, GREATEST(0.60, 1 - pat.std_dev::numeric / 200))
+    END - 0.01), stock.price_rounding::int)
+FROM stock
+JOIN price_aggregate_total pat ON stock.stock_id = pat.stock_id
+WHERE position.stock_id = stock.stock_id
+AND pat.period_type = position.period_type
+AND position.buy_filled_price IS NOT NULL
+AND position.sell_coinbase_order_id IS NULL
+AND position.sell_filled_price IS NULL
+AND stock.price < position.buy_filled_price;
+
 -- Clear error_message on unfilled buy positions instead of deleting them.
 UPDATE position SET error_message = NULL
 WHERE error_message IS NOT NULL
