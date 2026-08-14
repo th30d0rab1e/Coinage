@@ -132,7 +132,7 @@ async function processBuyOrders () {
         for (i = 0; i < orders.length; i++) {
             const element = orders[i];
             let response = await ca.createStopLimitOrder('buy', element.buy_price, element.shares, element.name, element.buy_stop_price, element.buy_order_id);
-            if(response.success == true) {
+            if(response?.success == true) {
                 await db.executeQuery(`UPDATE position SET buy_coinbase_order_id = '${response.success_response.order_id}' WHERE buy_order_id = '${element.buy_order_id}'`)
                 console.log(`Buy Order Created: ${element.name} | shares: ${element.shares} | price: ${element.buy_price}`)
             } else {
@@ -165,7 +165,8 @@ async function processSellOrders () {
                 // data next cycle until price recovers enough for the floor to clear.
                 console.log(`Sell Order deferred (underwater): ${element.name} | current: ${element.current_price} | floor: ${element.sell_stop_price}`)
             } else {
-                await db.executeQuery(`UPDATE position SET error_message = '${response.error_response.message}' WHERE buy_order_id = '${element.buy_order_id}'`)
+                const errMsg = (response?.error_response?.message || 'unknown').replace(/'/g, "''")
+                await db.executeQuery(`UPDATE position SET error_message = '${errMsg}' WHERE buy_order_id = '${element.buy_order_id}'`)
                 console.log(`Sell Order FAILED: ${element.name}`, response)
             }
         }

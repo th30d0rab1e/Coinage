@@ -313,9 +313,11 @@ ca.createStopLimitOrder = async function (side, price, shares, name, stop_price,
         return result.data;
 
     } catch (error) {
-        console.log(`createStopLimitOrder() ERROR: ${name}`, error?.response?.data || error?.data || error)
+        const errData = error?.response?.data || error?.data || error
+        console.log(`createStopLimitOrder() ERROR: ${name}`, errData)
+        return { success: false, error_response: { message: errData?.message || errData?.error_details || String(errData) } }
     }
-} 
+}
 
 ca.editStopLimitOrder = async function(order_id, price, shares, stop_price, side, name, coinbase_order_id) {
     try {
