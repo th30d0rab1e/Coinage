@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict yXnyCyqfKolVoXCeSov4D7M9imYknfKBlGmBgPlvEQYk3t2HgdzI1XkFf7EE352
+\restrict q36cMPJv6fu6BtTMci3kyPRJlqd3j9MIDM4EbJAO1gRr9IjztdbY2ZUXw68D1Hs
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -489,21 +489,24 @@ AND (
 ORDER BY s.score DESC NULLS LAST
 LIMIT 1;
 
--- Buy again (always $1) if current price has dropped below the lowest
--- already-filled price for a stock+period, ever (not just currently open).
--- Anchored on position itself, not vw_signal — purely "average down
--- further," no score/recommendation conditions involved. Only triggers off
--- a coin whose buy is actually filled, and only if there's no other buy
--- order currently open/pending for that same stock+period. When multiple
--- held coins qualify in the same cycle, ranked by stock.score descending
--- (same year-basis priority marker the new-position buy uses) so the
--- highest-priority coin gets the average-down dollar first. One new
--- position per cycle.
+-- Buy again (always $1) if current price has dropped below the MOST
+-- RECENT already-filled price for a stock+period (not the lowest ever --
+-- anchored on whichever fill actually happened last, so this can
+-- re-trigger even after a good fill if price has since moved against
+-- the latest one). Anchored on position itself, not vw_signal — purely
+-- "average down further," no score/recommendation conditions involved.
+-- Only triggers off a coin whose buy is actually filled, and only if
+-- there's no other buy order currently open/pending for that same
+-- stock+period. When multiple held coins qualify in the same cycle,
+-- ranked by stock.score descending (same year-basis priority marker the
+-- new-position buy uses) so the highest-priority coin gets the
+-- average-down dollar first. One new position per cycle.
 WITH held AS (
-    SELECT stock_id, period_type, MIN(buy_filled_price) AS lowest_filled_price
+    SELECT DISTINCT ON (stock_id, period_type)
+        stock_id, period_type, buy_filled_price AS last_filled_price
     FROM position
     WHERE buy_filled_price IS NOT NULL
-    GROUP BY stock_id, period_type
+    ORDER BY stock_id, period_type, buy_filled_date DESC
 )
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
 SELECT
@@ -521,7 +524,7 @@ CROSS JOIN vw_balance b
 WHERE b.name = 'USD'
 AND b.available > 1.00
 AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
-AND TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) < held.lowest_filled_price
+AND TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) < held.last_filled_price
 AND NOT EXISTS (
     SELECT 1 FROM position existing
     WHERE existing.stock_id = held.stock_id
@@ -1777,5 +1780,5 @@ CREATE TRIGGER position_audit_trg AFTER INSERT OR DELETE OR UPDATE ON public."po
 -- PostgreSQL database dump complete
 --
 
-\unrestrict yXnyCyqfKolVoXCeSov4D7M9imYknfKBlGmBgPlvEQYk3t2HgdzI1XkFf7EE352
+\unrestrict q36cMPJv6fu6BtTMci3kyPRJlqd3j9MIDM4EbJAO1gRr9IjztdbY2ZUXw68D1Hs
 
