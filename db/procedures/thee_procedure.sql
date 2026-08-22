@@ -301,6 +301,27 @@ AND (
     - (position.buy_filled_price::numeric * position.shares::numeric + COALESCE(position.buy_fee::numeric, 0))
 ) > (SELECT COALESCE(AVG(profit), 0) FROM profit_history WHERE period_type = position.period_type);
 
+-- Refresh stale buy candidates: a pending buy that has never gotten a
+-- Coinbase order ID keeps its original buy_stop_price forever, since
+-- nothing else ever touches it (the remake logic in vw_edit_orders only
+-- applies once a position has SOME coinbase_order_id, pending or filled).
+-- If the market moves up past that stop before the order is ever
+-- successfully placed, every attempt fails with
+-- PREVIEW_STOP_PRICE_BELOW_LAST_TRADE_PRICE (the stop needs room above
+-- current price to trigger) -- and since the "clear error_message" step
+-- below resets it every cycle, it just retries the same doomed price
+-- forever (confirmed stuck this way on OCEAN-USD for 4 days). Recompute
+-- using the same flat 5% rule a fresh pick uses, off current price
+-- instead of the stale signal-time price.
+UPDATE position
+SET buy_stop_price = TRUNC(stock.price::numeric * 1.05, stock.price_rounding::integer),
+    buy_price = TRUNC(stock.price::numeric * 1.05 * 1.01, stock.price_rounding::integer)
+FROM stock
+WHERE position.stock_id = stock.stock_id
+AND position.buy_coinbase_order_id IS NULL
+AND position.buy_filled_price IS NULL
+AND stock.price::numeric >= position.buy_stop_price::numeric;
+
 -- Clear error_message on unfilled buy positions instead of deleting them.
 UPDATE position SET error_message = NULL
 WHERE error_message IS NOT NULL
