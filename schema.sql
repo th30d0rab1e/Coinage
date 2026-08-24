@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict eTf3ATGfvN9VuURqABNel2jHYhXky72HQ5xNmVWVstJ1QMm2ZUFh0ESQVrgVYig
+\restrict ME0yTkCZkTnhDNQNIUpxmTcpTcFNgaMiuc8tiFupcOEuECsRGTRvGGkiWWkI9h8
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -364,6 +364,17 @@ SET score = vw.score
 FROM vw_signal vw
 WHERE stock.stock_id = vw.stock_id
 AND vw.period_type = 'year';
+
+-- Archive every fill into the permanent ledger before anything else touches
+-- bulk_fills this cycle. bulk_fills gets truncated at the end of every
+-- cycle and was never meant to be a historical record; fills is. Keyed on
+-- trade_id (Coinbase's own unique id per fill execution, since one order
+-- can partially fill across several), so this is naturally idempotent --
+-- a fill already archived on a previous cycle is silently skipped.
+INSERT INTO fills (order_id, trade_id, product_id, side, price, size, fee, trade_time)
+SELECT bf.order_id, bf.trade_id, bf.product_id, bf.side, bf.price, bf.size, bf.fee, bf.created_at
+FROM bulk_fills bf
+ON CONFLICT (trade_id) DO NOTHING;
 
 -- Recover orphaned buy orders: open on Coinbase but missing from position table.
 -- Skip if an unfilled buy position already exists for that coin + period_type.
@@ -1032,6 +1043,43 @@ CREATE TABLE public.config (
 
 
 --
+-- Name: fills; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.fills (
+    fill_id bigint NOT NULL,
+    order_id text,
+    trade_id text,
+    product_id text,
+    side text,
+    price double precision,
+    size double precision,
+    fee double precision,
+    trade_time timestamp without time zone,
+    recorded_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: fills_fill_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.fills_fill_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: fills_fill_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.fills_fill_id_seq OWNED BY public.fills.fill_id;
+
+
+--
 -- Name: portfolio; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1662,6 +1710,13 @@ ALTER TABLE ONLY public.bulk_stock ALTER COLUMN bulk_stock_id SET DEFAULT nextva
 
 
 --
+-- Name: fills fill_id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.fills ALTER COLUMN fill_id SET DEFAULT nextval('public.fills_fill_id_seq'::regclass);
+
+
+--
 -- Name: position position_id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -1753,6 +1808,14 @@ ALTER TABLE ONLY public.config
 
 
 --
+-- Name: fills fills_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.fills
+    ADD CONSTRAINT fills_pkey PRIMARY KEY (fill_id);
+
+
+--
 -- Name: portfolio portfolio_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1825,6 +1888,20 @@ ALTER TABLE ONLY public.unmatched_fills
 
 
 --
+-- Name: idx_fills_order_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_fills_order_id ON public.fills USING btree (order_id);
+
+
+--
+-- Name: idx_fills_trade_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_fills_trade_id ON public.fills USING btree (trade_id);
+
+
+--
 -- Name: idx_position_audit_changed_at; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1863,5 +1940,5 @@ CREATE TRIGGER position_audit_trg AFTER INSERT OR DELETE OR UPDATE ON public."po
 -- PostgreSQL database dump complete
 --
 
-\unrestrict eTf3ATGfvN9VuURqABNel2jHYhXky72HQ5xNmVWVstJ1QMm2ZUFh0ESQVrgVYig
+\unrestrict ME0yTkCZkTnhDNQNIUpxmTcpTcFNgaMiuc8tiFupcOEuECsRGTRvGGkiWWkI9h8
 

@@ -39,6 +39,17 @@ FROM vw_signal vw
 WHERE stock.stock_id = vw.stock_id
 AND vw.period_type = 'year';
 
+-- Archive every fill into the permanent ledger before anything else touches
+-- bulk_fills this cycle. bulk_fills gets truncated at the end of every
+-- cycle and was never meant to be a historical record; fills is. Keyed on
+-- trade_id (Coinbase's own unique id per fill execution, since one order
+-- can partially fill across several), so this is naturally idempotent --
+-- a fill already archived on a previous cycle is silently skipped.
+INSERT INTO fills (order_id, trade_id, product_id, side, price, size, fee, trade_time)
+SELECT bf.order_id, bf.trade_id, bf.product_id, bf.side, bf.price, bf.size, bf.fee, bf.created_at
+FROM bulk_fills bf
+ON CONFLICT (trade_id) DO NOTHING;
+
 -- Recover orphaned buy orders: open on Coinbase but missing from position table.
 -- Skip if an unfilled buy position already exists for that coin + period_type.
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, buy_coinbase_order_id, period_type)
