@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict ME0yTkCZkTnhDNQNIUpxmTcpTcFNgaMiuc8tiFupcOEuECsRGTRvGGkiWWkI9h8
+\restrict CwyybjbkDtlN1HIe4npPfoAIqQq1fois2OE6EHMV5e2XPLmH0DlpfwSukZP0kHu
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -628,15 +628,15 @@ AND (
     - (position.buy_filled_price::numeric * position.shares::numeric + COALESCE(position.buy_fee::numeric, 0))
 ) > 0
 -- Also must exceed this period_type's historical average profit, same gate
--- already applied to vw_edit_orders' sell-remake branches.
+-- already applied to vw_edit_orders' sell-remake branches -- but evaluated
+-- at today's actual market price (stock.price), not the rock-bottom floor
+-- price. The floor is always a hair above buy_filled_price by construction
+-- (just enough to cover fees), so checking profit there against a real
+-- average could never pass regardless of how far price has actually moved
+-- -- confirmed on LINK-USD, up $0.147 at current price yet blocked because
+-- its floor-price profit was $0.00002.
 AND (
-    (CEIL(
-        (position.buy_filled_price::numeric
-            * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
-            / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012)))
-        * POWER(10::numeric, stock.price_rounding::int)
-    ) / POWER(10::numeric, stock.price_rounding::int))
-    * position.shares::numeric
+    stock.price::numeric * position.shares::numeric
     * (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
     - (position.buy_filled_price::numeric * position.shares::numeric + COALESCE(position.buy_fee::numeric, 0))
 ) > (SELECT COALESCE(AVG(profit), 0) FROM profit_history WHERE period_type = position.period_type);
@@ -1940,5 +1940,5 @@ CREATE TRIGGER position_audit_trg AFTER INSERT OR DELETE OR UPDATE ON public."po
 -- PostgreSQL database dump complete
 --
 
-\unrestrict ME0yTkCZkTnhDNQNIUpxmTcpTcFNgaMiuc8tiFupcOEuECsRGTRvGGkiWWkI9h8
+\unrestrict CwyybjbkDtlN1HIe4npPfoAIqQq1fois2OE6EHMV5e2XPLmH0DlpfwSukZP0kHu
 
