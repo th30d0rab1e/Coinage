@@ -19,6 +19,9 @@ async function main () {
 
         //call thee procedure (now sees fresh bulk_open_orders, bulk_fills, bulk_currency)
         await db.executeQuery('Call thee_procedure();');
+        //surface anything thee_procedure just logged to unmatched_fills so the
+        //30-min health check (greps outputLog.txt for ERROR/FAILED) catches it
+        await checkUnmatchedFills();
         //call aggregation
         await db.executeQuery('CALL aggregate();')
 
@@ -91,6 +94,20 @@ async function processOpenOrders () {
         await db.insertOpenOrders(results);
     } catch (error) {
         console.log("processOpenOrders() ERROR", error)
+    }
+}
+
+async function checkUnmatchedFills () {
+    try {
+        const rows = await db.executeQuery(`
+            SELECT order_id, product_id, side, price, size, fee, trade_time
+            FROM unmatched_fills WHERE detected_at > NOW() - INTERVAL '90 seconds'
+        `)
+        for (const r of rows) {
+            console.log(`ERROR: unmatched fill detected -- ${r.product_id} ${r.side} ${r.size} @ ${r.price} (order ${r.order_id}, fee ${r.fee}, filled ${r.trade_time})`)
+        }
+    } catch (error) {
+        console.log("checkUnmatchedFills() ERROR", error)
     }
 }
 

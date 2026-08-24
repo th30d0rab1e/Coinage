@@ -392,6 +392,30 @@ AND EXISTS (
 -- Prune position_audit records older than a month.
 DELETE FROM position_audit WHERE changed_at < NOW() - INTERVAL '1 month';
 
+-- Catch any fill this cycle that no position and no profit_history row
+-- claims, before bulk_fills is truncated below and the evidence is gone
+-- for good. Checked against both live positions (buy/sell_coinbase_order_id)
+-- and already-recorded closes (profit_history.buy_coinbase_order_id /
+-- sell_fills_id), so a fill legitimately matched and closed out earlier
+-- this same cycle (Step 1-3 above) is correctly excluded, not
+-- re-flagged as orphaned. NOT EXISTS against unmatched_fills itself
+-- avoids re-logging the same fill every cycle it keeps showing up in
+-- Coinbase's recent-fills window.
+INSERT INTO unmatched_fills (order_id, trade_id, product_id, side, price, size, fee, trade_time)
+SELECT bf.order_id, bf.trade_id, bf.product_id, bf.side, bf.price, bf.size, bf.fee, bf.created_at
+FROM bulk_fills bf
+WHERE NOT EXISTS (
+    SELECT 1 FROM position p
+    WHERE p.buy_coinbase_order_id = bf.order_id OR p.sell_coinbase_order_id = bf.order_id
+)
+AND NOT EXISTS (
+    SELECT 1 FROM profit_history ph
+    WHERE ph.buy_coinbase_order_id = bf.order_id OR ph.sell_fills_id = bf.order_id
+)
+AND NOT EXISTS (
+    SELECT 1 FROM unmatched_fills uf WHERE uf.order_id = bf.order_id
+);
+
 TRUNCATE TABLE bulk_stock;
 TRUNCATE TABLE bulk_fills;
 TRUNCATE TABLE bulk_currency;

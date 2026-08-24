@@ -150,6 +150,24 @@ ca.gatherFills = async function () {
     }
 }
 
+ca.gatherAllFills = async function () {
+    try {
+        const fills = []
+        let cursor = ''
+        do {
+            const query = `?limit=250${cursor ? `&cursor=${cursor}` : ''}`
+            const response = await getApiCall('GET', '/api/v3/brokerage/orders/historical/fills', query)
+            const page = response.data.fills || []
+            fills.push(...page)
+            cursor = page.length === 250 ? response.data.cursor : ''
+        } while (cursor)
+        return fills
+    } catch (error) {
+        console.log(`gatherAllFills()`, error?.response?.data || error)
+        return []
+    }
+}
+
 ca.gatherAllFillsByProduct = async function (productId) {
     try {
         const fills = []

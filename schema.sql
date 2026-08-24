@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict q36cMPJv6fu6BtTMci3kyPRJlqd3j9MIDM4EbJAO1gRr9IjztdbY2ZUXw68D1Hs
+\restrict eTf3ATGfvN9VuURqABNel2jHYhXky72HQ5xNmVWVstJ1QMm2ZUFh0ESQVrgVYig
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -718,6 +718,30 @@ AND EXISTS (
 -- Prune position_audit records older than a month.
 DELETE FROM position_audit WHERE changed_at < NOW() - INTERVAL '1 month';
 
+-- Catch any fill this cycle that no position and no profit_history row
+-- claims, before bulk_fills is truncated below and the evidence is gone
+-- for good. Checked against both live positions (buy/sell_coinbase_order_id)
+-- and already-recorded closes (profit_history.buy_coinbase_order_id /
+-- sell_fills_id), so a fill legitimately matched and closed out earlier
+-- this same cycle (Step 1-3 above) is correctly excluded, not
+-- re-flagged as orphaned. NOT EXISTS against unmatched_fills itself
+-- avoids re-logging the same fill every cycle it keeps showing up in
+-- Coinbase's recent-fills window.
+INSERT INTO unmatched_fills (order_id, trade_id, product_id, side, price, size, fee, trade_time)
+SELECT bf.order_id, bf.trade_id, bf.product_id, bf.side, bf.price, bf.size, bf.fee, bf.created_at
+FROM bulk_fills bf
+WHERE NOT EXISTS (
+    SELECT 1 FROM position p
+    WHERE p.buy_coinbase_order_id = bf.order_id OR p.sell_coinbase_order_id = bf.order_id
+)
+AND NOT EXISTS (
+    SELECT 1 FROM profit_history ph
+    WHERE ph.buy_coinbase_order_id = bf.order_id OR ph.sell_fills_id = bf.order_id
+)
+AND NOT EXISTS (
+    SELECT 1 FROM unmatched_fills uf WHERE uf.order_id = bf.order_id
+);
+
 TRUNCATE TABLE bulk_stock;
 TRUNCATE TABLE bulk_fills;
 TRUNCATE TABLE bulk_currency;
@@ -1275,6 +1299,43 @@ ALTER SEQUENCE public.profit_history_profit_history_id_seq OWNED BY public.profi
 
 
 --
+-- Name: unmatched_fills; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.unmatched_fills (
+    unmatched_fill_id bigint NOT NULL,
+    order_id text,
+    trade_id text,
+    product_id text,
+    side text,
+    price double precision,
+    size double precision,
+    fee double precision,
+    trade_time timestamp without time zone,
+    detected_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: unmatched_fills_unmatched_fill_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.unmatched_fills_unmatched_fill_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: unmatched_fills_unmatched_fill_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.unmatched_fills_unmatched_fill_id_seq OWNED BY public.unmatched_fills.unmatched_fill_id;
+
+
+--
 -- Name: vw_balance; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -1629,6 +1690,13 @@ ALTER TABLE ONLY public.profit_history ALTER COLUMN profit_history_id SET DEFAUL
 
 
 --
+-- Name: unmatched_fills unmatched_fill_id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unmatched_fills ALTER COLUMN unmatched_fill_id SET DEFAULT nextval('public.unmatched_fills_unmatched_fill_id_seq'::regclass);
+
+
+--
 -- Name: stock Stock_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1749,6 +1817,14 @@ ALTER TABLE ONLY public.profit_history
 
 
 --
+-- Name: unmatched_fills unmatched_fills_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unmatched_fills
+    ADD CONSTRAINT unmatched_fills_pkey PRIMARY KEY (unmatched_fill_id);
+
+
+--
 -- Name: idx_position_audit_changed_at; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1770,6 +1846,13 @@ CREATE INDEX idx_position_audit_position_id ON public.position_audit USING btree
 
 
 --
+-- Name: idx_unmatched_fills_order_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_unmatched_fills_order_id ON public.unmatched_fills USING btree (order_id);
+
+
+--
 -- Name: position position_audit_trg; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -1780,5 +1863,5 @@ CREATE TRIGGER position_audit_trg AFTER INSERT OR DELETE OR UPDATE ON public."po
 -- PostgreSQL database dump complete
 --
 
-\unrestrict q36cMPJv6fu6BtTMci3kyPRJlqd3j9MIDM4EbJAO1gRr9IjztdbY2ZUXw68D1Hs
+\unrestrict eTf3ATGfvN9VuURqABNel2jHYhXky72HQ5xNmVWVstJ1QMm2ZUFh0ESQVrgVYig
 
