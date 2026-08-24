@@ -12,7 +12,8 @@ SELECT p.name,
         SELECT min(pa.low)::numeric FROM price_aggregate pa
         WHERE pa.stock_id = p.stock_id AND pa.period_type = p.period_type
     ), 0::numeric), 4) AS estimated_profit,
-    p.buy_counter AS counter
+    p.buy_counter AS counter,
+    ABS(trunc(s.price::numeric * bal.stop_mult, s.price_rounding) - p.buy_stop_price::numeric) AS price_diff
 FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
 CROSS JOIN LATERAL (
@@ -34,7 +35,8 @@ SELECT p.name,
     trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001), s.price_rounding) AS new_stop_price,
     'sell'::text AS order_type,
     trunc((s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001) - p.buy_filled_price::numeric) * p.shares::numeric, 2) AS estimated_profit,
-    p.sell_counter AS counter
+    p.sell_counter AS counter,
+    ABS(trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001), s.price_rounding) - p.sell_stop_price::numeric) AS price_diff
 FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
 WHERE p.sell_coinbase_order_id IS NOT NULL
@@ -66,7 +68,8 @@ SELECT p.name,
     GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) AS new_stop_price,
     'sell'::text AS order_type,
     trunc((GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) - p.buy_filled_price::numeric) * p.shares::numeric, 2) AS estimated_profit,
-    p.sell_counter AS counter
+    p.sell_counter AS counter,
+    ABS(GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) - p.sell_stop_price::numeric) AS price_diff
 FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
 JOIN price_aggregate_total pat ON p.stock_id = pat.stock_id AND p.period_type = pat.period_type
@@ -119,7 +122,8 @@ SELECT p.name,
     GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) AS new_stop_price,
     'sell'::text AS order_type,
     trunc((GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) - p.buy_filled_price::numeric) * p.shares::numeric, 2) AS estimated_profit,
-    p.sell_counter AS counter
+    p.sell_counter AS counter,
+    ABS(GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) - p.sell_stop_price::numeric) AS price_diff
 FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
 JOIN price_aggregate_total pat ON p.stock_id = pat.stock_id AND p.period_type = pat.period_type
@@ -155,4 +159,4 @@ AND (
     * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
     - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0))
 ) > (SELECT COALESCE(AVG(profit), 0) FROM profit_history WHERE period_type = p.period_type)
-ORDER BY 10 DESC;
+ORDER BY price_diff DESC;

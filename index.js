@@ -194,7 +194,7 @@ async function processSellOrders () {
 
 async function processRemakeOrders () {
     try {
-        const orders = await db.executeQuery(`SELECT * FROM vw_edit_orders ORDER BY estimated_profit DESC LIMIT 1;`)
+        const orders = await db.executeQuery(`SELECT * FROM vw_edit_orders ORDER BY price_diff DESC LIMIT 1;`)
         for(let i = 0; i < orders.length; i++){
             let element = orders[i];
             const preview = await ca.previewStopLimitOrder(element.order_type, element.order_price, element.shares, element.name, element.new_stop_price)
