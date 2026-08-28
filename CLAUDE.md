@@ -2,9 +2,9 @@
 
 ## On every session start, register these cron jobs:
 
-### 1. 30-minute health check
+### 1. Hourly health check
 ```
-cron: */30 * * * *
+cron: 17 * * * *
 durable: true
 prompt:
 You are monitoring a Coinbase trading bot. Working directory: /Volumes/2TBSSD/theodorecrossX/Library/Mobile Documents/com~apple~CloudDocs/Coinbase tedTosterone
@@ -13,13 +13,13 @@ Run all of these checks:
 
 1. psql -U theodorecross -d coinbase -c "SELECT * FROM vw_profit_summary;"
 
-2. Read the last 60 lines of outputLog.txt and extract any lines containing ERROR, FAILED, or error (case-insensitive) from the past 30 minutes.
+2. Read the last 120 lines of outputLog.txt and extract any lines containing ERROR, FAILED, or error (case-insensitive) from the past 60 minutes.
 
-3. psql -U theodorecross -d coinbase -c "SELECT ph.name, (SELECT AVG(price) FROM fills WHERE order_id = ph.buy_coinbase_order_id) AS bought_at, (SELECT AVG(price) FROM fills WHERE order_id = ph.sell_fills_id) AS sold_at, ph.profit, ph.date_created FROM profit_history ph WHERE ph.date_created > NOW() - INTERVAL '30 minutes' ORDER BY ph.date_created;"
+3. psql -U theodorecross -d coinbase -c "SELECT ph.name, (SELECT AVG(price) FROM fills WHERE order_id = ph.buy_coinbase_order_id) AS bought_at, (SELECT AVG(price) FROM fills WHERE order_id = ph.sell_fills_id) AS sold_at, ph.profit, ph.date_created FROM profit_history ph WHERE ph.date_created > NOW() - INTERVAL '60 minutes' ORDER BY ph.date_created;"
 
 Then apply these rules:
-- If there are any ERROR/FAILED log lines from the past 30 minutes: include a summary of them
-- If any trades closed in the last 30 minutes (query 3 returned rows): include a one-line summary with coin, bought@, sold@, and profit for each, e.g. "LINK-USD $9.83->$11.19 +$0.15" (comma-separate multiple; if it won't fit, keep the largest profits and note "+N more")
+- If there are any ERROR/FAILED log lines from the past 60 minutes: include a summary of them
+- If any trades closed in the last 60 minutes (query 3 returned rows): include a one-line summary with coin, bought@, sold@, and profit for each, e.g. "LINK-USD $9.83->$11.19 +$0.15" (comma-separate multiple; if it won't fit, keep the largest profits and note "+N more")
 - If either condition is true, send one push notification combining whatever applies, under 180 characters total
 - If nothing is wrong and nothing sold, do not send any notification
 ```
