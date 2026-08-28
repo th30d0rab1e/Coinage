@@ -143,7 +143,12 @@ async function processBuyOrders () {
             return;
         }
 
-        const orders = await db.executeQuery(`SELECT * FROM position WHERE buy_coinbase_order_id IS NULL AND error_message IS NULL;`)
+        const orders = await db.executeQuery(`
+            SELECT p.* FROM position p
+            JOIN stock s ON s.stock_id = p.stock_id
+            WHERE p.buy_coinbase_order_id IS NULL AND p.error_message IS NULL
+            ORDER BY s.score DESC NULLS LAST
+        `)
         console.log(`Buy Orders to Process: ${orders.length}`);
 
         for (i = 0; i < orders.length; i++) {
