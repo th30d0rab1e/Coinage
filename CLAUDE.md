@@ -15,9 +15,13 @@ Run all of these checks:
 
 2. Read the last 60 lines of outputLog.txt and extract any lines containing ERROR, FAILED, or error (case-insensitive) from the past 30 minutes.
 
+3. psql -U theodorecross -d coinbase -c "SELECT name, profit, date_created FROM profit_history WHERE date_created > NOW() - INTERVAL '30 minutes' ORDER BY date_created;"
+
 Then apply these rules:
-- If there are any ERROR/FAILED log lines from the past 30 minutes: send a push notification summarizing them in under 180 characters
-- If nothing is wrong, do not send any notification
+- If there are any ERROR/FAILED log lines from the past 30 minutes: include a summary of them
+- If any trades closed in the last 30 minutes (query 3 returned rows): include a one-line summary, e.g. "Sold: LINK-USD +$0.15, ETH-USD +$0.02" (list every coin and profit; if it won't fit, keep the largest and note "+N more")
+- If either condition is true, send one push notification combining whatever applies, under 180 characters total
+- If nothing is wrong and nothing sold, do not send any notification
 ```
 
 ### 2. Daily 8:03am report
