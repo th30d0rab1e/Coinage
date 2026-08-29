@@ -30,11 +30,11 @@ WHERE stock.name = bs.id
 AND bs.id LIKE '%-USD'
 AND bs.price != '';
 
--- Snapshot each stock's year-basis signal score onto the stock row itself, as
--- a priority marker for what to buy -- vw_signal's score isn't otherwise
--- persisted anywhere outside the view.
+-- Snapshot each stock's year-basis signal priority onto the stock row itself,
+-- as a priority marker for what to buy -- vw_signal's priority isn't
+-- otherwise persisted anywhere outside the view.
 UPDATE stock
-SET score = vw.score
+SET priority = vw.priority
 FROM vw_signal vw
 WHERE stock.stock_id = vw.stock_id
 AND vw.period_type = 'year';
@@ -125,11 +125,12 @@ SET sell_coinbase_order_id = om.order_id
 FROM orphan_match om
 WHERE p.buy_order_id = om.pos_key;
 
--- New position: $1 into the highest year-basis-score coin not already held,
--- gated only on the coin's year-basis trend being positive -- no day-timing
--- signal (recommendation / current-vs-average dip) and no score floor, since
--- the goal is broad $1 exposure across every coin trending up over the
--- year, ranked by score, not picking entries by short-term dip timing.
+-- New position: $1 into the highest year-basis-priority coin not already
+-- held, gated only on the coin's year-basis trend being positive -- no
+-- day-timing signal (recommendation / current-vs-average dip) and no
+-- priority floor, since the goal is broad $1 exposure across every coin
+-- trending up over the year, ranked by priority, not picking entries by
+-- short-term dip timing.
 -- Always recorded as period_type 'day' (the existing $1-size bucket), even
 -- though the signal driving the pick is the year row. One new position per
 -- cycle.
@@ -171,7 +172,7 @@ AND (
         AND existing.sell_filled_price IS NULL
     )
 )
-ORDER BY s.score DESC NULLS LAST
+ORDER BY s.priority DESC NULLS LAST
 LIMIT 1;
 
 -- Buy again (always $1) if current price has dropped below the MOST
@@ -179,11 +180,11 @@ LIMIT 1;
 -- anchored on whichever fill actually happened last, so this can
 -- re-trigger even after a good fill if price has since moved against
 -- the latest one). Anchored on position itself, not vw_signal — purely
--- "average down further," no score/recommendation conditions involved.
+-- "average down further," no recommendation conditions involved.
 -- Only triggers off a coin whose buy is actually filled, and only if
 -- there's no other buy order currently open/pending for that same
 -- stock+period. When multiple held coins qualify in the same cycle,
--- ranked by stock.score descending (same year-basis priority marker the
+-- ranked by stock.priority descending (same year-basis priority marker the
 -- new-position buy uses) so the highest-priority coin gets the
 -- average-down dollar first. One new position per cycle.
 WITH held AS (
@@ -217,7 +218,7 @@ AND NOT EXISTS (
     AND existing.buy_order_id IS NOT NULL
     AND existing.buy_filled_price IS NULL
 )
-ORDER BY s.score DESC NULLS LAST
+ORDER BY s.priority DESC NULLS LAST
 LIMIT 1;
 
 -- Initial sell stop, floored at a breakeven price unconditionally — a

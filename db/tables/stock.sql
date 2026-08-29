@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS public.stock (
     price                double precision,
     historical_finished  bit(1),
     historical_last_date date,
-    score                bigint,
+    priority             bigint,
     price_movement       text,
     max_shares           double precision,
     min_shares           double precision,

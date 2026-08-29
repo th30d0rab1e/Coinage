@@ -147,7 +147,7 @@ async function processBuyOrders () {
             SELECT p.* FROM position p
             JOIN stock s ON s.stock_id = p.stock_id
             WHERE p.buy_coinbase_order_id IS NULL AND p.error_message IS NULL
-            ORDER BY s.score DESC NULLS LAST
+            ORDER BY s.priority DESC NULLS LAST
         `)
         console.log(`Buy Orders to Process: ${orders.length}`);
 
