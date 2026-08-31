@@ -204,6 +204,24 @@ ca.getOrderById = async function (orderId) {
     }
 }
 
+// Coinbase's documented client_order_id lookup params (both the deprecated
+// query param on get-order-by-id, and a filter on the list-orders/batch
+// endpoint) don't actually filter anything -- confirmed 2026-08-31, both
+// silently returned an unrelated order instead of erroring. This lists open
+// orders for the product and matches client_order_id client-side instead,
+// which does work. Only checks OPEN orders since this is meant to verify a
+// just-attempted create within the same cycle, well before a fresh stop
+// order could plausibly have already triggered and filled.
+ca.findOpenOrderByClientId = async function (productId, clientOrderId) {
+    try {
+        const response = await getApiCall('GET', '/api/v3/brokerage/orders/historical/batch', `?order_status=OPEN&product_id=${productId}`)
+        const orders = response.data.orders || []
+        return orders.find(o => o.client_order_id === clientOrderId)
+    } catch (error) {
+        console.log("findOpenOrderByClientId()", error?.response?.data || error);
+    }
+}
+
 ca.createLimitOrder = async function (side, price, shares, name, orderID) {
     try {
         let data = JSON.stringify({
@@ -327,12 +345,30 @@ ca.createStopLimitOrder = async function (side, price, shares, name, stop_price,
           //console.log("Order To Make", data);
 
         const result = await getApiCall('POST', '/api/v3/brokerage/orders', '', data);
-        if (!result.data?.success) console.log(`createStopLimitOrder() FAILED: ${name}`, result.data)
+        if (result.data?.success) return result.data;
+
+        // A reported failure can still mean Coinbase received and created the
+        // order -- confirmed 2026-08-31 on MORPHO-USD, which sat as a real open
+        // order for 4 days and eventually filled while completely untracked,
+        // because a prior call here discarded the attempt as failed and never
+        // checked. Before trusting the failure, verify no open order actually
+        // exists under this client_order_id.
+        console.log(`createStopLimitOrder() FAILED: ${name}`, result.data, `-- verifying via open orders`)
+        const existing = await ca.findOpenOrderByClientId(name, order_id)
+        if (existing) {
+            console.log(`createStopLimitOrder() verified order actually exists: ${name} ${existing.order_id}`)
+            return { success: true, success_response: { order_id: existing.order_id } }
+        }
         return result.data;
 
     } catch (error) {
         const errData = error?.response?.data || error?.data || error
-        console.log(`createStopLimitOrder() ERROR: ${name}`, errData)
+        console.log(`createStopLimitOrder() ERROR: ${name}`, errData, `-- verifying via open orders`)
+        const existing = await ca.findOpenOrderByClientId(name, order_id)
+        if (existing) {
+            console.log(`createStopLimitOrder() verified order actually exists despite error: ${name} ${existing.order_id}`)
+            return { success: true, success_response: { order_id: existing.order_id } }
+        }
         return { success: false, error_response: { message: errData?.message || errData?.error_details || String(errData) } }
     }
 }
@@ -401,8 +437,13 @@ ca.cancelOrder = async function (coinbase_order_id) {
         // paper over -- check the order's actual terminal state directly.
         console.log(`cancelOrder() reported FAILED: ${result?.failure_reason} | ${coinbase_order_id} -- verifying actual order status`)
         const order = await ca.getOrderById(coinbase_order_id)
-        if (order?.status === 'CANCELLED' && parseFloat(order.filled_size || 0) === 0) {
-            console.log(`cancelOrder() verified actually cancelled (no fill): ${coinbase_order_id}`)
+        // FAILED is just as safe as CANCELLED here: it means the order was
+        // rejected and never went live, so there's nothing resting on the book
+        // to accidentally leave open. Confirmed 2026-08-30/31 on AGLD-USD, stuck
+        // retrying a cancel every cycle for 24+ hours on an order Coinbase's own
+        // order history showed as status FAILED with zero fill the entire time.
+        if ((order?.status === 'CANCELLED' || order?.status === 'FAILED') && parseFloat(order.filled_size || 0) === 0) {
+            console.log(`cancelOrder() verified safe to proceed (status: ${order?.status}, no fill): ${coinbase_order_id}`)
             return true
         }
         console.log(`cancelOrder() confirmed still unsafe (status: ${order?.status}, filled_size: ${order?.filled_size}): ${coinbase_order_id}`)
