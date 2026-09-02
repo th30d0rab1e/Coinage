@@ -209,6 +209,24 @@ async function processRemakeOrders () {
                 console.log(`Remake Preview FAILED: ${element.name} ${element.order_type}, skipping`, preview.errors)
                 continue
             }
+            // For buy remakes, confirm there's actually enough cash for the
+            // replacement before cancelling the old order -- previewStopLimitOrder()
+            // deliberately ignores PREVIEW_INSUFFICIENT_FUND (the old order's own
+            // hold is still on the books at preview time, so that check is
+            // unreliable here), which meant a cancel could succeed and then the
+            // recreate would fail on genuine insufficient funds, leaving the
+            // position with no order at all until it re-earns a backlog slot.
+            // Confirmed 2026-09-02 on BTC-USD, twice.
+            if (element.order_type === 'buy') {
+                const accounts = await ca.gatherBalance();
+                const usd = accounts?.find(a => a.currency === 'USD');
+                const available = usd ? parseFloat(usd.available_balance.value) : 0;
+                const required = element.order_price * element.shares;
+                if (!(available >= required)) {
+                    console.log(`Remake skipped: ${element.name} buy -- insufficient cash ($${available.toFixed(2)} available, ~$${required.toFixed(2)} needed), leaving existing order intact`)
+                    continue
+                }
+            }
             // Only proceed to create a replacement if the cancel genuinely succeeded —
             // a failure can mean the old order already filled, and creating a
             // replacement on top of that would double the position.
