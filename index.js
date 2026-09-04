@@ -43,9 +43,6 @@ async function main () {
         //Daily profit-taking: sell best position if no profit made today
         await processDailyProfit();
 
-        //Keep the highest-priority pending buy (per vw_signal, set in thee_procedure) tight
-        await processDailyBuy();
-
     } catch (error) {
         console.log("main", error)
     } finally {
@@ -534,90 +531,6 @@ async function processDailyProfit () {
         }
     } catch (error) {
         console.log('processDailyProfit() ERROR', error)
-    }
-}
-
-async function processDailyBuy () {
-    try {
-        // thee_procedure() keeps daily_buy pointed at whichever pending buy currently
-        // has the highest vw_signal priority (re-evaluated every cycle, exactly one
-        // row true at a time) — this just tightens whichever one that is right now.
-        const marked = await db.executeQuery(`
-            SELECT p.*, s.price AS current_price, s.price_rounding,
-                ROUND(((p.buy_price - s.price) / NULLIF(s.price, 0) * 100)::numeric, 4) AS pct_above_current
-            FROM position p
-            JOIN stock s ON p.stock_id = s.stock_id
-            WHERE p.daily_buy = true
-              AND p.buy_coinbase_order_id IS NOT NULL
-              AND p.buy_filled_price IS NULL
-            LIMIT 1
-        `)
-        if (!marked.length) return
-
-        const pos = marked[0]
-        const pctAbove = parseFloat(pos.pct_above_current)
-
-        // Already tight (within 1.5% of current price) — leave the live order alone
-        // instead of cancelling/re-placing it every cycle for no real gain.
-        if (pctAbove <= 1.5) {
-            console.log(`processDailyBuy() skipped: ${pos.name} already tight (${pctAbove}% above current)`)
-            return
-        }
-
-        // Tight stop: 1% above current price, limit 1% above stop (mirrors processDailyProfit's 1% sell tighten)
-        const pr = parseInt(pos.price_rounding)
-        const factor = Math.pow(10, pr)
-        const currentPrice = parseFloat(pos.current_price)
-        const stopPrice = Math.trunc(currentPrice * 1.01 * factor) / factor
-        const limitPrice = Math.trunc(stopPrice * 1.01 * factor) / factor
-
-        const preview = await ca.previewStopLimitOrder('buy', limitPrice, pos.shares, pos.name, stopPrice)
-        if (!preview.ok) {
-            const errMsg = JSON.stringify(preview.errors).replace(/'/g, "''")
-            await db.executeQuery(`UPDATE position SET error_message = '${errMsg}' WHERE buy_order_id = '${pos.buy_order_id}'`)
-            console.log(`processDailyBuy() preview FAILED: ${pos.name}`, preview.errors)
-            return
-        }
-
-        // Only proceed to create a replacement if the cancel genuinely succeeds — a
-        // failure can mean the old order already filled, and creating a replacement on
-        // top of that would double the position.
-        if (pos.buy_coinbase_order_id) {
-            const cancelled = await ca.cancelOrder(pos.buy_coinbase_order_id)
-            if (!cancelled) {
-                const errMsg = `cancel failed for ${pos.buy_coinbase_order_id}`
-                await db.executeQuery(`UPDATE position SET error_message = '${errMsg}' WHERE buy_order_id = '${pos.buy_order_id}'`)
-                console.log(`processDailyBuy() cancel FAILED: ${pos.name}`)
-                return
-            }
-        }
-
-        const newOrderId = crypto.randomUUID()
-        const response = await ca.createStopLimitOrder('buy', limitPrice, pos.shares, pos.name, stopPrice, newOrderId)
-        if (response?.success === true) {
-            await db.executeQuery(`
-                UPDATE position
-                SET buy_order_id = '${newOrderId}',
-                    buy_coinbase_order_id = '${response.success_response.order_id}',
-                    buy_stop_price = ${stopPrice},
-                    buy_price = ${limitPrice},
-                    error_message = NULL
-                WHERE buy_order_id = '${pos.buy_order_id}'
-            `)
-            console.log(`processDailyBuy() OK: ${pos.name} | was ${pctAbove}% above current | new stop: ${stopPrice}`)
-        } else {
-            const errMsg = (response?.error_response?.message || 'unknown').replace(/'/g, "''")
-            // Cancel already succeeded above -- buy_coinbase_order_id must be
-            // nulled here too, or the position is left pointing at a dead order
-            // Coinbase has already cancelled, invisible to every recovery path
-            // that checks for a live order id. Confirmed on 00-USD: cancelled
-            // 2026-08-24, stuck untouched for 10 days since nothing ever saw it
-            // as needing a new order.
-            await db.executeQuery(`UPDATE position SET buy_coinbase_order_id = NULL, error_message = '${errMsg}' WHERE buy_order_id = '${pos.buy_order_id}'`)
-            console.log(`processDailyBuy() FAILED: ${pos.name}`, response)
-        }
-    } catch (error) {
-        console.log('processDailyBuy() ERROR', error)
     }
 }
 
