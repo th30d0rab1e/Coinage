@@ -524,7 +524,12 @@ async function processDailyProfit () {
             console.log(`processDailyProfit() OK: ${pos.name} | current: ${currentPrice} | floor: ${floorPrice} | stop: ${stopPrice}`)
         } else {
             const errMsg = (response?.error_response?.message || 'unknown').replace(/'/g, "''")
-            await db.executeQuery(`UPDATE position SET error_message = '${errMsg}' WHERE buy_order_id = '${pos.buy_order_id}'`)
+            // Cancel already succeeded above -- sell_coinbase_order_id must be
+            // nulled here too, or the position is left pointing at a dead order
+            // Coinbase has already cancelled, invisible to every recovery path
+            // that checks for a live order id (same bug confirmed on 00-USD via
+            // processDailyBuy()'s matching gap, stuck 10 days).
+            await db.executeQuery(`UPDATE position SET sell_coinbase_order_id = NULL, error_message = '${errMsg}' WHERE buy_order_id = '${pos.buy_order_id}'`)
             console.log(`processDailyProfit() FAILED: ${pos.name}`, response)
         }
     } catch (error) {
@@ -602,7 +607,13 @@ async function processDailyBuy () {
             console.log(`processDailyBuy() OK: ${pos.name} | was ${pctAbove}% above current | new stop: ${stopPrice}`)
         } else {
             const errMsg = (response?.error_response?.message || 'unknown').replace(/'/g, "''")
-            await db.executeQuery(`UPDATE position SET error_message = '${errMsg}' WHERE buy_order_id = '${pos.buy_order_id}'`)
+            // Cancel already succeeded above -- buy_coinbase_order_id must be
+            // nulled here too, or the position is left pointing at a dead order
+            // Coinbase has already cancelled, invisible to every recovery path
+            // that checks for a live order id. Confirmed on 00-USD: cancelled
+            // 2026-08-24, stuck untouched for 10 days since nothing ever saw it
+            // as needing a new order.
+            await db.executeQuery(`UPDATE position SET buy_coinbase_order_id = NULL, error_message = '${errMsg}' WHERE buy_order_id = '${pos.buy_order_id}'`)
             console.log(`processDailyBuy() FAILED: ${pos.name}`, response)
         }
     } catch (error) {
