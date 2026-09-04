@@ -89,23 +89,6 @@ AND NOT EXISTS (
     END
 );
 
--- Mark the pending buy order whose coin currently has the highest vw_signal
--- priority as daily_buy. Re-evaluated every cycle (not a once-per-day pick),
--- so exactly one row is true at a time and it tracks priority as it shifts.
-WITH ranked AS (
-    SELECT p.buy_order_id,
-        ROW_NUMBER() OVER (ORDER BY vw.priority DESC NULLS LAST) AS rn
-    FROM position p
-    JOIN vw_signal vw ON vw.stock_id = p.stock_id AND vw.period_type = p.period_type
-    WHERE p.buy_coinbase_order_id IS NOT NULL
-    AND p.buy_filled_price IS NULL
-)
-UPDATE position
-SET daily_buy = (position.buy_order_id IN (SELECT buy_order_id FROM ranked WHERE rn = 1))
-WHERE position.buy_coinbase_order_id IS NOT NULL
-AND position.buy_filled_price IS NULL
-AND position.daily_buy != (position.buy_order_id IN (SELECT buy_order_id FROM ranked WHERE rn = 1));
-
 -- Orphan sell recovery: re-link any Coinbase SELL order to a position that lost its sell_coinbase_order_id.
 -- Uses DISTINCT ON (o.order_id) so each Coinbase order is only matched to one position row.
 WITH orphan_match AS (
