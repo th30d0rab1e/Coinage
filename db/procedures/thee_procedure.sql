@@ -413,7 +413,11 @@ AND NOT EXISTS (
 
 TRUNCATE TABLE bulk_stock;
 TRUNCATE TABLE bulk_fills;
-TRUNCATE TABLE bulk_currency;
-TRUNCATE TABLE bulk_open_orders;
+-- bulk_currency and bulk_open_orders are no longer truncated here -- moved to
+-- insertCurrency()/insertOpenOrders() in modules/database.js, immediately
+-- before each fresh insert, so these tables hold a continuously-queryable
+-- last-cycle snapshot the whole time instead of being emptied the moment
+-- this procedure finishes. Needed for vw_position_order_balance_audit to be
+-- queryable anytime, not just in the brief window mid-cycle.
 
 $$;

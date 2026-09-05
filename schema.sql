@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict nhOVZjAzbCGztZBnbnZ1389ifaK9YcYiR4Eu30tuUwswZmF6dDoiiQh6JjsXl2b
+\restrict hGwxz1B7Z0eDIVVl8THpTuLqmvPxGCqEWLmI3BE5gNI51gbYwnw0QHgPw0RokXa
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -739,8 +739,12 @@ AND NOT EXISTS (
 
 TRUNCATE TABLE bulk_stock;
 TRUNCATE TABLE bulk_fills;
-TRUNCATE TABLE bulk_currency;
-TRUNCATE TABLE bulk_open_orders;
+-- bulk_currency and bulk_open_orders are no longer truncated here -- moved to
+-- insertCurrency()/insertOpenOrders() in modules/database.js, immediately
+-- before each fresh insert, so these tables hold a continuously-queryable
+-- last-cycle snapshot the whole time instead of being emptied the moment
+-- this procedure finishes. Needed for vw_position_order_balance_audit to be
+-- queryable anytime, not just in the brief window mid-cycle.
 
 $_$;
 
@@ -1541,6 +1545,56 @@ CREATE VIEW public.vw_position AS
 
 
 --
+-- Name: vw_position_order_balance_audit; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.vw_position_order_balance_audit AS
+ SELECT 'ghost_buy_order'::text AS issue_type,
+    p.name,
+    p.buy_coinbase_order_id AS order_id,
+    NULL::text AS currency,
+    NULL::double precision AS balance,
+    (((('position '::text || p.position_id) || ' references buy order '::text) || p.buy_coinbase_order_id) || ' which is not in bulk_open_orders'::text) AS detail
+   FROM public."position" p
+  WHERE ((p.buy_coinbase_order_id IS NOT NULL) AND (p.buy_filled_price IS NULL) AND (NOT (EXISTS ( SELECT 1
+           FROM public.bulk_open_orders o
+          WHERE (o.order_id = p.buy_coinbase_order_id)))))
+UNION ALL
+ SELECT 'ghost_sell_order'::text AS issue_type,
+    p.name,
+    p.sell_coinbase_order_id AS order_id,
+    NULL::text AS currency,
+    NULL::double precision AS balance,
+    (((('position '::text || p.position_id) || ' references sell order '::text) || p.sell_coinbase_order_id) || ' which is not in bulk_open_orders'::text) AS detail
+   FROM public."position" p
+  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (NOT (EXISTS ( SELECT 1
+           FROM public.bulk_open_orders o
+          WHERE (o.order_id = p.sell_coinbase_order_id)))))
+UNION ALL
+ SELECT 'untracked_holding'::text AS issue_type,
+    (bc.currency || '-USD'::text) AS name,
+    NULL::text AS order_id,
+    bc.currency,
+    bc.balance,
+    (((('bulk_currency shows '::text || bc.balance) || ' '::text) || bc.currency) || ' held with no matching open position'::text) AS detail
+   FROM public.bulk_currency bc
+  WHERE ((bc.currency <> ALL (ARRAY['USD'::text, 'USDC'::text])) AND (bc.balance > (0)::double precision) AND (NOT (EXISTS ( SELECT 1
+           FROM public."position" p
+          WHERE ((p.name = (bc.currency || '-USD'::text)) AND (p.buy_filled_price IS NOT NULL) AND (p.sell_filled_price IS NULL))))))
+UNION ALL
+ SELECT 'orphaned_coinbase_order'::text AS issue_type,
+    o.product_id AS name,
+    o.order_id,
+    NULL::text AS currency,
+    NULL::double precision AS balance,
+    (((((('bulk_open_orders has '::text || o.side) || ' order '::text) || o.order_id) || ' for '::text) || o.product_id) || ' not referenced by any position'::text) AS detail
+   FROM public.bulk_open_orders o
+  WHERE (NOT (EXISTS ( SELECT 1
+           FROM public."position" p
+          WHERE ((p.buy_coinbase_order_id = o.order_id) OR (p.sell_coinbase_order_id = o.order_id)))));
+
+
+--
 -- Name: vw_profit_summary; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -1905,5 +1959,5 @@ CREATE TRIGGER position_audit_trg AFTER INSERT OR DELETE OR UPDATE ON public."po
 -- PostgreSQL database dump complete
 --
 
-\unrestrict nhOVZjAzbCGztZBnbnZ1389ifaK9YcYiR4Eu30tuUwswZmF6dDoiiQh6JjsXl2b
+\unrestrict hGwxz1B7Z0eDIVVl8THpTuLqmvPxGCqEWLmI3BE5gNI51gbYwnw0QHgPw0RokXa
 

@@ -74,6 +74,13 @@ con.downloadStocks = async function (data) {
 con.insertCurrency = async function (data) {
   try {
       //console.log(data);
+      // Truncate here (not at the end of thee_procedure(), where it used to
+      // happen) so this table holds a continuously-queryable snapshot of the
+      // last cycle's balances the whole time, instead of only for the brief
+      // moment between insert and thee_procedure()'s own truncate -- needed
+      // so vw_position_order_balance_audit can actually be queried anytime,
+      // not just mid-cycle.
+      await con.query('TRUNCATE TABLE bulk_currency;')
       if(data.length > 0) {
           const id = data.map(obj => obj.uuid)
           const currency = data.map(obj => obj.currency)
@@ -102,6 +109,10 @@ con.insertCurrency = async function (data) {
 
 con.insertOpenOrders = async function (data) {
     try {
+        // See insertCurrency() -- truncate here instead of at the end of
+        // thee_procedure() so this table stays queryable as a continuous
+        // last-cycle snapshot, not just for a brief moment mid-cycle.
+        await con.query('TRUNCATE TABLE bulk_open_orders;')
         if (data.length > 0) {
             const order_id = data.map(obj => obj.order_id)
             const product_id = data.map(obj => obj.product_id)
