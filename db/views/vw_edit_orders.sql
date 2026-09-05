@@ -1,3 +1,13 @@
+-- price_diff is a fraction of current price (e.g. 0.05 = 5% drift), not a
+-- raw dollar amount -- switched from absolute dollars because that measure
+-- structurally favored expensive coins (a routine 2% buy-price adjustment on
+-- a $3,000 coin always outranked a genuine 28% swing on a penny coin), which
+-- meant cheap coins with real profit at stake could get starved out of ever
+-- being remade. Confirmed on BLZ-USD, up 28% with its stop never trailed up
+-- because CBETH-USD/PAXG-USD's routine buy adjustments kept winning on
+-- absolute dollars alone. processRemakeOrders() picks exactly one candidate
+-- per cycle via ORDER BY price_diff DESC, so this ranking is the only thing
+-- deciding whose stale order actually gets fixed.
 CREATE OR REPLACE VIEW public.vw_edit_orders AS
 SELECT p.name,
     p.period_type,
@@ -13,7 +23,7 @@ SELECT p.name,
         WHERE pa.stock_id = p.stock_id AND pa.period_type = p.period_type
     ), 0::numeric), 4) AS estimated_profit,
     p.buy_counter AS counter,
-    ABS(trunc(s.price::numeric * bal.stop_mult, s.price_rounding) - p.buy_stop_price::numeric) AS price_diff
+    ABS(trunc(s.price::numeric * bal.stop_mult, s.price_rounding) - p.buy_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
 FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
 CROSS JOIN LATERAL (
@@ -36,7 +46,7 @@ SELECT p.name,
     'sell'::text AS order_type,
     trunc((s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001) - p.buy_filled_price::numeric) * p.shares::numeric, 2) AS estimated_profit,
     p.sell_counter AS counter,
-    ABS(trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001), s.price_rounding) - p.sell_stop_price::numeric) AS price_diff
+    ABS(trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001), s.price_rounding) - p.sell_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
 FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
 WHERE p.sell_coinbase_order_id IS NOT NULL
@@ -69,7 +79,7 @@ SELECT p.name,
     'sell'::text AS order_type,
     trunc((GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) - p.buy_filled_price::numeric) * p.shares::numeric, 2) AS estimated_profit,
     p.sell_counter AS counter,
-    ABS(GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) - p.sell_stop_price::numeric) AS price_diff
+    ABS(GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) - p.sell_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
 FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
 JOIN price_aggregate_total pat ON p.stock_id = pat.stock_id AND p.period_type = pat.period_type
@@ -123,7 +133,7 @@ SELECT p.name,
     'sell'::text AS order_type,
     trunc((GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) - p.buy_filled_price::numeric) * p.shares::numeric, 2) AS estimated_profit,
     p.sell_counter AS counter,
-    ABS(GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) - p.sell_stop_price::numeric) AS price_diff
+    ABS(GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) - p.sell_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
 FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
 JOIN price_aggregate_total pat ON p.stock_id = pat.stock_id AND p.period_type = pat.period_type
