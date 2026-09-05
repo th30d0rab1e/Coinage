@@ -196,14 +196,16 @@ async function processSellOrders () {
 
 async function processRemakeOrders () {
     try {
-        // LIMIT 60 (not 1): an unaffordable buy at the very top of the queue would
-        // otherwise consume the entire cycle's remake slot on a skip, permanently
-        // blocking every candidate below it -- confirmed on MAMO-USD (perpetually
-        // #1, perpetually insufficient funds) starving BLZ-USD (#2, a real 28%
-        // gain sitting untrailed) out of ever getting a turn. The loop below still
-        // skips (continue) anything unaffordable or preview-failed, so this lets
-        // it fall through to the next candidate instead of stopping cold.
-        const orders = await db.executeQuery(`SELECT * FROM vw_edit_orders ORDER BY price_diff DESC LIMIT 60;`)
+        // No LIMIT: an unaffordable/skipped candidate anywhere in the list would
+        // otherwise block every candidate behind it from ever being considered in
+        // the same cycle -- confirmed on MAMO-USD (perpetually top of the queue,
+        // perpetually insufficient funds) starving BLZ-USD out of ever getting a
+        // turn back when this was LIMIT 1. Now protected against runaway API
+        // usage by the real rate limiter in getApiCall() (10 req/sec) instead of
+        // an arbitrary row cap. Explicit ORDER BY here matches vw_edit_orders'
+        // own ordering exactly -- a bare `SELECT * FROM view` doesn't reliably
+        // preserve a view's internal ORDER BY once queried from outside it.
+        const orders = await db.executeQuery(`SELECT * FROM vw_edit_orders ORDER BY last_remade_at ASC NULLS FIRST, price_diff DESC;`)
         for(let i = 0; i < orders.length; i++){
             let element = orders[i];
             const preview = await ca.previewStopLimitOrder(element.order_type, element.order_price, element.shares, element.name, element.new_stop_price)
