@@ -4,32 +4,29 @@ const { sign } = require('jsonwebtoken');
 const crypto = require('crypto');
 const axios = require('axios');
 let ca = {};
-ca.timeArray = [];
 const startProgram = new Date();
 
-ca.makeTimeArray = function () {
-
-    //create time array for seconds in minute
-    for(let index = 0; index < 60; index++) {
-        ca.timeArray.push({second: index, count: 0})
-    }
+function sleep (ms) {
+    return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+// Coinbase's private-endpoint limit is 15 req/sec per API key. Capped at 10
+// here (not 15) to leave margin for manual out-of-band calls against the
+// same key (live status checks run alongside the cron) and for imprecision
+// at the edge of the rolling window. Tracks real elapsed time via Date.now(),
+// unlike the previous version of this function, which counted by clock-
+// second (0-59) with no reset -- once any second-slot passed 9 lifetime
+// calls it stayed over the threshold forever, throttling every future call
+// through it. That version was also unreachable dead code: it called a
+// sleep() that was never defined anywhere in this file.
+let requestTimestamps = []
 async function determineWait () {
-    let secondNow = new Date().getSeconds();
-    let count = 0
-    for (let index = 0; index < ca.timeArray.length; index++) {
-        const element = ca.timeArray[index];
-        //console.log("timeArray", element)
-        if(element.second == secondNow) {
-            element.count++;
-            count = element.count;
-        }
+    const now = Date.now()
+    requestTimestamps = requestTimestamps.filter(t => now - t < 1000)
+    if (requestTimestamps.length >= 10) {
+        await sleep(1000 - (now - requestTimestamps[0]))
     }
-    if(count > 9) {
-       await sleep(100)
-    }
-    //console.log(secondNow, count);
+    requestTimestamps.push(Date.now())
 }
 
 async function tokenate(method, path) {
@@ -77,6 +74,7 @@ async function tokenate(method, path) {
 
 async function getApiCall(method, address, query, data) {
     try {
+        await determineWait();
         const token = await tokenate(method, address);
         //console.log(token);
         let config
