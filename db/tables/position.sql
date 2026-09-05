@@ -20,5 +20,6 @@ CREATE TABLE IF NOT EXISTS public.position (
     profit                 double precision,
     daily_sell             boolean NOT NULL DEFAULT false,
     sell_counter           integer NOT NULL DEFAULT 0,
-    buy_counter            integer NOT NULL DEFAULT 0
+    buy_counter            integer NOT NULL DEFAULT 0,
+    last_remade_at         timestamp without time zone
 );

@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict fohVJoLTShtYncLy95TKCsUTSEP0fW2Tw15hBjtPpdAmhuOWSv00o10uDUZ4GTZ
+\restrict D0zR4wS2zCSkEa9xVAKWD4azAmxAA8uTJzci8SXtQgXaplZECkbDSQjaRDudPHX
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -1117,7 +1117,8 @@ CREATE TABLE public."position" (
     buy_counter integer DEFAULT 0 NOT NULL,
     buy_filled_date timestamp without time zone,
     daily_buy boolean DEFAULT false NOT NULL,
-    position_id bigint NOT NULL
+    position_id bigint NOT NULL,
+    last_remade_at timestamp without time zone
 );
 
 
@@ -1414,6 +1415,7 @@ CREATE VIEW public.vw_edit_orders AS
     trunc((1.0 - ((s.price)::numeric / NULLIF(( SELECT (min(pa.low))::numeric AS min
            FROM public.price_aggregate pa
           WHERE ((pa.stock_id = p.stock_id) AND (pa.period_type = p.period_type))), (0)::numeric))), 4) AS estimated_profit,
+    p.last_remade_at,
     p.buy_counter AS counter,
     (abs((trunc(((s.price)::numeric * bal.stop_mult), s.price_rounding) - (p.buy_stop_price)::numeric)) / NULLIF((s.price)::numeric, (0)::numeric)) AS price_diff
    FROM ((public."position" p
@@ -1431,6 +1433,7 @@ UNION ALL
     trunc(((s.price)::numeric * (0.99 + ((p.sell_counter)::numeric * 0.001))), s.price_rounding) AS new_stop_price,
     'sell'::text AS order_type,
     trunc(((((s.price)::numeric * (0.99 + ((p.sell_counter)::numeric * 0.001))) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit,
+    p.last_remade_at,
     p.sell_counter AS counter,
     (abs((trunc(((s.price)::numeric * (0.99 + ((p.sell_counter)::numeric * 0.001))), s.price_rounding) - (p.sell_stop_price)::numeric)) / NULLIF((s.price)::numeric, (0)::numeric)) AS price_diff
    FROM (public."position" p
@@ -1449,6 +1452,7 @@ UNION ALL
     GREATEST(breakeven.floor_price, trunc(((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))), s.price_rounding)) AS new_stop_price,
     'sell'::text AS order_type,
     trunc(((GREATEST(breakeven.floor_price, trunc(((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))), s.price_rounding)) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit,
+    p.last_remade_at,
     p.sell_counter AS counter,
     (abs((GREATEST(breakeven.floor_price, trunc(((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))), s.price_rounding)) - (p.sell_stop_price)::numeric)) / NULLIF((s.price)::numeric, (0)::numeric)) AS price_diff
    FROM ((((public."position" p
@@ -1476,6 +1480,7 @@ UNION ALL
     GREATEST(breakeven.floor_price, trunc(((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))), s.price_rounding)) AS new_stop_price,
     'sell'::text AS order_type,
     trunc(((GREATEST(breakeven.floor_price, trunc(((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))), s.price_rounding)) - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit,
+    p.last_remade_at,
     p.sell_counter AS counter,
     (abs((GREATEST(breakeven.floor_price, trunc(((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))), s.price_rounding)) - (p.sell_stop_price)::numeric)) / NULLIF((s.price)::numeric, (0)::numeric)) AS price_diff
    FROM ((((public."position" p
@@ -1492,7 +1497,7 @@ UNION ALL
   WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.daily_sell = false) AND (p.sell_stop_price > (trunc(((s.price)::numeric * ((vol.stop_ratio + 0.01) + ((p.sell_counter)::numeric * 0.001))), s.price_rounding))::double precision) AND ((((GREATEST(breakeven.floor_price, trunc((((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))) * 0.99), s.price_rounding)) * (p.shares)::numeric) * ((1)::numeric - COALESCE((NULLIF((p.buy_fee)::numeric, (0)::numeric) / NULLIF(((p.buy_filled_price)::numeric * (p.shares)::numeric), (0)::numeric)), 0.012))) - (((p.buy_filled_price)::numeric * (p.shares)::numeric) + COALESCE((p.buy_fee)::numeric, (0)::numeric))) > (0)::numeric) AND (((((GREATEST(breakeven.floor_price, trunc((((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.001))) * 0.99), s.price_rounding)) * (p.shares)::numeric) * ((1)::numeric - COALESCE((NULLIF((p.buy_fee)::numeric, (0)::numeric) / NULLIF(((p.buy_filled_price)::numeric * (p.shares)::numeric), (0)::numeric)), 0.012))) - (((p.buy_filled_price)::numeric * (p.shares)::numeric) + COALESCE((p.buy_fee)::numeric, (0)::numeric))))::double precision > ( SELECT COALESCE(avg(profit_history.profit), (0)::double precision) AS "coalesce"
            FROM public.profit_history
           WHERE (profit_history.period_type = p.period_type))))
-  ORDER BY 12 DESC;
+  ORDER BY 11 NULLS FIRST, 13 DESC;
 
 
 --
@@ -1928,5 +1933,5 @@ CREATE TRIGGER position_audit_trg AFTER INSERT OR DELETE OR UPDATE ON public."po
 -- PostgreSQL database dump complete
 --
 
-\unrestrict fohVJoLTShtYncLy95TKCsUTSEP0fW2Tw15hBjtPpdAmhuOWSv00o10uDUZ4GTZ
+\unrestrict D0zR4wS2zCSkEa9xVAKWD4azAmxAA8uTJzci8SXtQgXaplZECkbDSQjaRDudPHX
 

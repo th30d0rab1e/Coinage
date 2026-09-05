@@ -1,13 +1,15 @@
--- price_diff is a fraction of current price (e.g. 0.05 = 5% drift), not a
--- raw dollar amount -- switched from absolute dollars because that measure
--- structurally favored expensive coins (a routine 2% buy-price adjustment on
--- a $3,000 coin always outranked a genuine 28% swing on a penny coin), which
--- meant cheap coins with real profit at stake could get starved out of ever
--- being remade. Confirmed on BLZ-USD, up 28% with its stop never trailed up
--- because CBETH-USD/PAXG-USD's routine buy adjustments kept winning on
--- absolute dollars alone. processRemakeOrders() picks exactly one candidate
--- per cycle via ORDER BY price_diff DESC, so this ranking is the only thing
--- deciding whose stale order actually gets fixed.
+-- Ordering is last_remade_at ASC NULLS FIRST, price_diff DESC: whichever
+-- order has gone longest without being touched gets fixed first (never-
+-- remade rows, NULL, count as most overdue), with price_diff only breaking
+-- ties among rows that are equally overdue. This guarantees every position
+-- cycles through eventually instead of the most-drifted one perpetually
+-- winning -- price_diff alone (even as a percentage, not a raw dollar
+-- amount) still let one position dominate indefinitely if its drift kept
+-- being the largest every cycle.
+-- last_remade_at is only stamped by processRemakeOrders() on an actual
+-- successful remake -- initial order placement (processBuyOrders() /
+-- processSellOrders()) doesn't touch it, so a brand-new order still counts
+-- as never-remade (NULLS FIRST) until it's actually been through this path.
 CREATE OR REPLACE VIEW public.vw_edit_orders AS
 SELECT p.name,
     p.period_type,
@@ -22,6 +24,7 @@ SELECT p.name,
         SELECT min(pa.low)::numeric FROM price_aggregate pa
         WHERE pa.stock_id = p.stock_id AND pa.period_type = p.period_type
     ), 0::numeric), 4) AS estimated_profit,
+    p.last_remade_at,
     p.buy_counter AS counter,
     ABS(trunc(s.price::numeric * bal.stop_mult, s.price_rounding) - p.buy_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
 FROM position p
@@ -45,6 +48,7 @@ SELECT p.name,
     trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001), s.price_rounding) AS new_stop_price,
     'sell'::text AS order_type,
     trunc((s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001) - p.buy_filled_price::numeric) * p.shares::numeric, 2) AS estimated_profit,
+    p.last_remade_at,
     p.sell_counter AS counter,
     ABS(trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001), s.price_rounding) - p.sell_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
 FROM position p
@@ -78,6 +82,7 @@ SELECT p.name,
     GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) AS new_stop_price,
     'sell'::text AS order_type,
     trunc((GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) - p.buy_filled_price::numeric) * p.shares::numeric, 2) AS estimated_profit,
+    p.last_remade_at,
     p.sell_counter AS counter,
     ABS(GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) - p.sell_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
 FROM position p
@@ -132,6 +137,7 @@ SELECT p.name,
     GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) AS new_stop_price,
     'sell'::text AS order_type,
     trunc((GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) - p.buy_filled_price::numeric) * p.shares::numeric, 2) AS estimated_profit,
+    p.last_remade_at,
     p.sell_counter AS counter,
     ABS(GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) - p.sell_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
 FROM position p
@@ -169,4 +175,4 @@ AND (
     * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
     - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0))
 ) > (SELECT COALESCE(AVG(profit), 0) FROM profit_history WHERE period_type = p.period_type)
-ORDER BY price_diff DESC;
+ORDER BY last_remade_at ASC NULLS FIRST, price_diff DESC;
