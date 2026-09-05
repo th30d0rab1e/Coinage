@@ -196,7 +196,14 @@ async function processSellOrders () {
 
 async function processRemakeOrders () {
     try {
-        const orders = await db.executeQuery(`SELECT * FROM vw_edit_orders ORDER BY price_diff DESC LIMIT 1;`)
+        // LIMIT 60 (not 1): an unaffordable buy at the very top of the queue would
+        // otherwise consume the entire cycle's remake slot on a skip, permanently
+        // blocking every candidate below it -- confirmed on MAMO-USD (perpetually
+        // #1, perpetually insufficient funds) starving BLZ-USD (#2, a real 28%
+        // gain sitting untrailed) out of ever getting a turn. The loop below still
+        // skips (continue) anything unaffordable or preview-failed, so this lets
+        // it fall through to the next candidate instead of stopping cold.
+        const orders = await db.executeQuery(`SELECT * FROM vw_edit_orders ORDER BY price_diff DESC LIMIT 60;`)
         for(let i = 0; i < orders.length; i++){
             let element = orders[i];
             const preview = await ca.previewStopLimitOrder(element.order_type, element.order_price, element.shares, element.name, element.new_stop_price)
