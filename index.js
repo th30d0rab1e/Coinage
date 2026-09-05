@@ -150,9 +150,17 @@ async function processBuyOrders () {
 
         for (i = 0; i < orders.length; i++) {
             const element = orders[i];
-            let response = await ca.createStopLimitOrder('buy', element.buy_price, element.shares, element.name, element.buy_stop_price, element.buy_order_id);
+            // Coinbase treats client_order_id as an idempotency key: reusing one
+            // already used for a since-cancelled order returns that SAME dead
+            // order back with success: true, not a genuinely new one. Confirmed
+            // live 2026-09-05 -- this is why nulling buy_coinbase_order_id on a
+            // failed/cancelled position and letting it retry kept resurrecting
+            // the exact same dead order every time. processSellOrders() already
+            // generates a fresh id per attempt; this didn't.
+            const newOrderId = crypto.randomUUID()
+            let response = await ca.createStopLimitOrder('buy', element.buy_price, element.shares, element.name, element.buy_stop_price, newOrderId);
             if(response?.success == true) {
-                await db.executeQuery(`UPDATE position SET buy_coinbase_order_id = '${response.success_response.order_id}' WHERE buy_order_id = '${element.buy_order_id}'`)
+                await db.executeQuery(`UPDATE position SET buy_order_id = '${newOrderId}', buy_coinbase_order_id = '${response.success_response.order_id}' WHERE buy_order_id = '${element.buy_order_id}'`)
                 console.log(`Buy Order Created: ${element.name} | shares: ${element.shares} | price: ${element.buy_price}`)
             } else {
                 const errMsg = (response?.error_response?.message || 'unknown').replace(/'/g, "''")
