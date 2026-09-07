@@ -75,7 +75,7 @@ FROM (
         MAX(price) OVER (PARTITION BY stock_id) AS max_price,
         AVG(price) OVER (PARTITION BY stock_id) AS avg_price
     FROM price_history
-    WHERE date_created = DATE_TRUNC('day', NOW())::DATE
+    WHERE date_created::date = DATE_TRUNC('day', NOW())::DATE
     ORDER BY stock_id
 ) s
 WHERE pa.stock_id = s.stock_id

@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict hGwxz1B7Z0eDIVVl8THpTuLqmvPxGCqEWLmI3BE5gNI51gbYwnw0QHgPw0RokXa
+\restrict lqp5RcoM2nc1n972AF9feNPBeglwLAdbwqpcQo7kfveRqOH8r4INvKZaE9MA7nk
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -26,7 +26,7 @@ SET row_security = off;
 CREATE PROCEDURE public.aggregate()
     LANGUAGE sql
     AS $$
---Delete
+
 DELETE FROM price_history
 WHERE date_created < NOW() - INTERVAL '25 hours';
 
@@ -37,9 +37,6 @@ AND period_type = 'day';
 DELETE FROM price_aggregate
 WHERE period_date < NOW() - INTERVAL '13 months'
 AND period_type = 'month';
-
-
---Insert
 
 INSERT INTO price_history(stock_id, price, date_created)
 SELECT stock_id, price, now()
@@ -87,7 +84,6 @@ AND NOT EXISTS (
 )
 GROUP BY stock_id;
 
---Update
 UPDATE price_aggregate pa
 SET
     open = s.open,
@@ -96,16 +92,16 @@ SET
     low = s.min_price,
     avg_price = s.avg_price
 FROM (
-         SELECT DISTINCT ON (stock_id)
-    stock_id,
-    FIRST_VALUE(price) OVER (PARTITION BY stock_id ORDER BY price_history_id ASC) AS open,
-    LAST_VALUE(price) OVER (PARTITION BY stock_id ORDER BY price_history_id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS close,
-    MIN(price) OVER (PARTITION BY stock_id) AS min_price,
-    MAX(price) OVER (PARTITION BY stock_id) AS max_price,
-    AVG(price) OVER (PARTITION BY stock_id) AS avg_price
-FROM price_history
-WHERE date_created = DATE_TRUNC('day', NOW())::DATE
-ORDER BY stock_id
+    SELECT DISTINCT ON (stock_id)
+        stock_id,
+        FIRST_VALUE(price) OVER (PARTITION BY stock_id ORDER BY price_history_id ASC) AS open,
+        LAST_VALUE(price) OVER (PARTITION BY stock_id ORDER BY price_history_id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS close,
+        MIN(price) OVER (PARTITION BY stock_id) AS min_price,
+        MAX(price) OVER (PARTITION BY stock_id) AS max_price,
+        AVG(price) OVER (PARTITION BY stock_id) AS avg_price
+    FROM price_history
+    WHERE date_created::date = DATE_TRUNC('day', NOW())::DATE
+    ORDER BY stock_id
 ) s
 WHERE pa.stock_id = s.stock_id
 AND pa.period_type = 'day'
@@ -157,26 +153,23 @@ WHERE pa.stock_id = s.stock_id
 AND pa.period_type = 'year'
 AND pa.period_date = DATE_TRUNC('year', NOW())::DATE;
 
-
---comparison
 INSERT INTO price_aggregate_comparison (before_id, after_id, change_percent)
-SELECT 
+SELECT
     pa_before.price_aggregate_id AS before_id,
-    pa_after.price_aggregate_id AS after_id,      
+    pa_after.price_aggregate_id AS after_id,
     ((pa_after.close - pa_before.close) / pa_before.close) * 100 AS change_percent
 FROM price_aggregate pa_before
-JOIN price_aggregate pa_after 
+JOIN price_aggregate pa_after
     ON pa_before.stock_id = pa_after.stock_id
     AND pa_before.period_type = pa_after.period_type
     AND (
         (pa_before.period_type = 'day' AND pa_after.period_date = pa_before.period_date + INTERVAL '1 day')
-        OR
-        (pa_before.period_type = 'year' AND pa_after.period_date = pa_before.period_date + INTERVAL '1 year')
-        OR
-        (pa_before.period_type = 'month' AND pa_after.period_date = pa_before.period_date + INTERVAL '1 month'))
+        OR (pa_before.period_type = 'year' AND pa_after.period_date = pa_before.period_date + INTERVAL '1 year')
+        OR (pa_before.period_type = 'month' AND pa_after.period_date = pa_before.period_date + INTERVAL '1 month')
+    )
 LEFT JOIN price_aggregate_comparison pac
     ON pa_before.price_aggregate_id = pac.before_id
-    AND pa_after.price_aggregate_id = pac.after_id 
+    AND pa_after.price_aggregate_id = pac.after_id
 WHERE pac.price_aggregate_comparison_id IS NULL;
 
 UPDATE price_aggregate_comparison pac
@@ -187,16 +180,14 @@ JOIN price_aggregate pa_after
     AND pa_before.period_type = pa_after.period_type
     AND (
         (pa_before.period_type = 'day' AND pa_after.period_date = pa_before.period_date + INTERVAL '1 day')
-        OR
-        (pa_before.period_type = 'year' AND pa_after.period_date = pa_before.period_date + INTERVAL '1 year')
-        OR
-        (pa_before.period_type = 'month' AND pa_after.period_date = pa_before.period_date + INTERVAL '1 month'))
+        OR (pa_before.period_type = 'year' AND pa_after.period_date = pa_before.period_date + INTERVAL '1 year')
+        OR (pa_before.period_type = 'month' AND pa_after.period_date = pa_before.period_date + INTERVAL '1 month')
+    )
 WHERE pac.before_id = pa_before.price_aggregate_id
 AND pac.after_id = pa_after.price_aggregate_id;
 
---totals
 INSERT INTO price_aggregate_total (stock_id, period_type, avg_change_percent)
-SELECT 
+SELECT
     pa.stock_id,
     pa.period_type,
     AVG(pac.change_percent) AS avg_change_percent
@@ -209,13 +200,13 @@ WHERE pat.price_aggregate_total_id IS NULL
 GROUP BY pa.stock_id, pa.period_type;
 
 UPDATE price_aggregate_total pat
-SET 
+SET
     avg_change_percent = x.avg_change_percent,
     std_dev = x.std_dev,
     std_dev_upper_bound = x.avg_change_percent + (2 * x.std_dev),
     std_dev_lower_bound = x.avg_change_percent - (2 * x.std_dev)
 FROM (
-    SELECT 
+    SELECT
         pa.stock_id,
         pa.period_type,
         AVG(pac.change_percent) AS avg_change_percent,
@@ -226,6 +217,7 @@ FROM (
 ) x
 WHERE pat.stock_id = x.stock_id
 AND pat.period_type = x.period_type;
+
 $$;
 
 
@@ -1279,7 +1271,7 @@ CREATE TABLE public.price_history (
     price_history_id integer NOT NULL,
     stock_id integer,
     price double precision,
-    date_created date
+    date_created timestamp without time zone
 );
 
 
@@ -1959,5 +1951,5 @@ CREATE TRIGGER position_audit_trg AFTER INSERT OR DELETE OR UPDATE ON public."po
 -- PostgreSQL database dump complete
 --
 
-\unrestrict hGwxz1B7Z0eDIVVl8THpTuLqmvPxGCqEWLmI3BE5gNI51gbYwnw0QHgPw0RokXa
+\unrestrict lqp5RcoM2nc1n972AF9feNPBeglwLAdbwqpcQo7kfveRqOH8r4INvKZaE9MA7nk
 
