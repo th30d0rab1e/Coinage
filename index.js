@@ -37,6 +37,9 @@ async function main () {
         //make sell orders
         await processSellOrders();
 
+        //cancel buy orders that triggered but ran past their limit price and are unlikely to ever fill
+        await processObseleteBuyOrders();
+
         //Remake Orders
         await processRemakeOrders();
 
@@ -199,6 +202,48 @@ async function processSellOrders () {
         }
     } catch (error) {
         console.log("processSellOrders() ERROR", error)
+    }
+}
+
+async function processObseleteBuyOrders () {
+    try {
+        // A buy stop-limit order that has triggered (price crossed the stop, so
+        // Coinbase converted it into a working limit order) but then had price
+        // run past the limit price too is stuck: a limit BUY can't fill above
+        // its own limit, so it'll sit open indefinitely unless price falls all
+        // the way back down -- meanwhile its hold ties up cash that could go
+        // toward a fresh pick. Confirmed stuck on MINA-USD and LSETH-USD for
+        // weeks (trigger_status STOP_TRIGGERED, current price 2x+ the stop).
+        // Gated on the position being at least an hour old (not on a separately
+        // tracked "since stuck" timestamp) so a coin that triggers and clears
+        // its own limit again within the hour is left alone -- reuses
+        // date_created instead of adding new state to track.
+        const orders = await db.executeQuery(`
+            SELECT p.buy_order_id, p.name, p.buy_coinbase_order_id
+            FROM position p
+            JOIN bulk_open_orders o ON o.order_id = p.buy_coinbase_order_id AND o.side = 'BUY'
+            JOIN stock s ON s.stock_id = p.stock_id
+            WHERE p.buy_coinbase_order_id IS NOT NULL
+            AND p.buy_filled_price IS NULL
+            AND p.date_created < NOW() - INTERVAL '1 hour'
+            AND o.trigger_status = 'STOP_TRIGGERED'
+            AND s.price > p.buy_price;
+        `)
+        for (let i = 0; i < orders.length; i++) {
+            const element = orders[i]
+            // Only delete the position once the cancel is confirmed -- a failed
+            // cancel can mean the order already filled, and deleting the row on
+            // top of that would silently lose a real position.
+            const cancelResponse = await ca.cancelOrder(element.buy_coinbase_order_id)
+            if (cancelResponse == true) {
+                await db.executeQuery(`DELETE FROM position WHERE buy_order_id = '${element.buy_order_id}'`)
+                console.log(`Obsolete Buy Order Cancelled: ${element.name} | order: ${element.buy_coinbase_order_id}`)
+            } else {
+                console.log(`Obsolete Buy Order Cancel FAILED: ${element.name}`, cancelResponse)
+            }
+        }
+    } catch (error) {
+        console.log("processObseleteBuyOrders() ERROR", error)
     }
 }
 
