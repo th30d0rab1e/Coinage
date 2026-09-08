@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS public.fills (
     price        double precision,
     size         double precision,
     fee          double precision,
-    trade_time   timestamp without time zone,
+    trade_time   timestamptz,
     recorded_at  timestamp without time zone NOT NULL DEFAULT now()
 );
 

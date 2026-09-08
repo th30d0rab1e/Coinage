@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS public.unmatched_fills (
     price             double precision,
     size              double precision,
     fee               double precision,
-    trade_time        timestamp without time zone,
+    trade_time        timestamptz,
     detected_at       timestamp without time zone NOT NULL DEFAULT now()
 );
 

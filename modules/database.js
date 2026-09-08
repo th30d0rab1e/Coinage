@@ -252,7 +252,7 @@ con.insertFills = async function (data) {
           , side
           , settled)
           SELECT * FROM UNNEST (
-            $1::timestamp[]
+            $1::timestamptz[]
             , $2::text[]
             , $3::text[]
             , $4::text[]

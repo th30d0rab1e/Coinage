@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS public.bulk_fills (
     bulk_fills_id integer PRIMARY KEY DEFAULT nextval('bulk_fills_bulk_fills_id_seq'),
-    created_at    timestamp without time zone,
+    created_at    timestamptz,
     trade_id      text,
     product_id    text,
     order_id      text,

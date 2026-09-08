@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict lqp5RcoM2nc1n972AF9feNPBeglwLAdbwqpcQo7kfveRqOH8r4INvKZaE9MA7nk
+\restrict uKH6sMdNPVoiMDh1NhNgB42GVRt6hcUyu2vg9h8IKkc9s7Ke7p8QRKj5cbPuhmR
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -847,7 +847,7 @@ ALTER SEQUENCE public.bulk_currency_bulk_currency_id_seq OWNED BY public.bulk_cu
 
 CREATE TABLE public.bulk_fills (
     bulk_fills_id integer NOT NULL,
-    created_at timestamp without time zone,
+    created_at timestamp with time zone,
     trade_id text,
     product_id text,
     order_id text,
@@ -1035,7 +1035,7 @@ CREATE TABLE public.fills (
     price double precision,
     size double precision,
     fee double precision,
-    trade_time timestamp without time zone,
+    trade_time timestamp with time zone,
     recorded_at timestamp without time zone DEFAULT now() NOT NULL
 );
 
@@ -1340,7 +1340,7 @@ CREATE TABLE public.unmatched_fills (
     price double precision,
     size double precision,
     fee double precision,
-    trade_time timestamp without time zone,
+    trade_time timestamp with time zone,
     detected_at timestamp without time zone DEFAULT now() NOT NULL
 );
 
@@ -1951,5 +1951,5 @@ CREATE TRIGGER position_audit_trg AFTER INSERT OR DELETE OR UPDATE ON public."po
 -- PostgreSQL database dump complete
 --
 
-\unrestrict lqp5RcoM2nc1n972AF9feNPBeglwLAdbwqpcQo7kfveRqOH8r4INvKZaE9MA7nk
+\unrestrict uKH6sMdNPVoiMDh1NhNgB42GVRt6hcUyu2vg9h8IKkc9s7Ke7p8QRKj5cbPuhmR
 
