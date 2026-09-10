@@ -11,16 +11,16 @@
 -- processSellOrders()) doesn't touch it, so a brand-new order still counts
 -- as never-remade (NULLS FIRST) until it's actually been through this path.
 --
--- A sell stop is a ratchet: a remake may only raise it, never lower it. This
--- view used to also carry a 4th branch (non-daily sell, dropped here) that
+-- Stop-limit remake ratchets (stop AND limit):
+--   BUY  STOP_UP:   new stop < live buy_stop_price AND new limit < live buy_price
+--   SELL STOP_DOWN: new stop > live sell_stop_price AND new limit > live sell_price
+-- A sell used to also carry a 4th branch (non-daily, dropped here) that
 -- deliberately loosened a stop back down whenever it drifted more than 1%
 -- above a fresh volatility-based calculation -- meant to give a tight stop
 -- room to breathe, but its actual effect was giving back already-locked-in
 -- profit on any ordinary pullback. Confirmed on BLZ-USD: peaked at a 0.01303
 -- stop (an locked $0.41), then that branch walked it back down to 0.01257
--- ($0.34) over several remakes as price merely dipped, not reversed. Buy
--- stops don't have this constraint -- there's no profit to protect on an
--- unfilled entry, so a buy remake can freely move either direction.
+-- ($0.34) over several remakes as price merely dipped, not reversed.
 CREATE OR REPLACE VIEW public.vw_edit_orders AS
 SELECT p.name,
     p.period_type,
@@ -46,6 +46,7 @@ CROSS JOIN LATERAL (
 WHERE p.buy_coinbase_order_id IS NOT NULL
 AND p.buy_filled_price IS NULL
 AND p.buy_stop_price > trunc(s.price::numeric * bal.stop_mult, s.price_rounding)::double precision
+AND p.buy_price > trunc(s.price::numeric * bal.stop_mult * 1.01, s.price_rounding)::double precision
 
 UNION ALL
 
@@ -68,6 +69,7 @@ WHERE p.sell_coinbase_order_id IS NOT NULL
 AND p.sell_filled_price IS NULL
 AND p.daily_sell = true
 AND p.sell_stop_price < trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001), s.price_rounding)::double precision
+AND p.sell_price < trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001) * 0.99, s.price_rounding)::double precision
 AND (
     trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001) * 0.99, s.price_rounding)::numeric
     * p.shares::numeric
@@ -123,6 +125,7 @@ WHERE p.sell_coinbase_order_id IS NOT NULL
 AND p.sell_filled_price IS NULL
 AND p.daily_sell = false
 AND p.sell_stop_price < GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding))::double precision
+AND p.sell_price < GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001) * 0.99, s.price_rounding))::double precision
 AND (
     GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001) * 0.99, s.price_rounding))
     * p.shares::numeric
