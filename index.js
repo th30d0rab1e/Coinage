@@ -280,7 +280,7 @@ async function processRemakeOrders () {
                 // Buy remakes especially hit INSUFFICIENT_FUND when create follows
                 // cancel in the same tick.
                 if (element.order_type === 'buy') {
-                    await new Promise(r => setTimeout(r, 300))
+                    await new Promise(r => setTimeout(r, 500))
                 }
                 const newOrderId = crypto.randomUUID()
                 let reMakeResponse = await ca.createStopLimitOrder(element.order_type, element.order_price, element.shares, element.name, element.new_stop_price, newOrderId)
