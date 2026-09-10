@@ -602,20 +602,7 @@ AND (
     * position.shares::numeric
     * (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
     - (position.buy_filled_price::numeric * position.shares::numeric + COALESCE(position.buy_fee::numeric, 0))
-) > 0
--- Also must exceed this period_type's historical average profit, same gate
--- already applied to vw_edit_orders' sell-remake branches -- but evaluated
--- at today's actual market price (stock.price), not the rock-bottom floor
--- price. The floor is always a hair above buy_filled_price by construction
--- (just enough to cover fees), so checking profit there against a real
--- average could never pass regardless of how far price has actually moved
--- -- confirmed on LINK-USD, up $0.147 at current price yet blocked because
--- its floor-price profit was $0.00002.
-AND (
-    stock.price::numeric * position.shares::numeric
-    * (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
-    - (position.buy_filled_price::numeric * position.shares::numeric + COALESCE(position.buy_fee::numeric, 0))
-) > (SELECT COALESCE(AVG(profit), 0) FROM profit_history WHERE period_type = position.period_type);
+) > 0;
 
 -- Refresh stale buy candidates: a pending buy that has never gotten a
 -- Coinbase order ID keeps its original buy_stop_price forever, since
