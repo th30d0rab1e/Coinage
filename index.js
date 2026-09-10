@@ -276,6 +276,12 @@ async function processRemakeOrders () {
             // replacement on top of that would double the position.
             let cancelResponse = await ca.cancelOrder(element.coinbase_order_id)
             if(cancelResponse == true) {
+                // Give Coinbase a moment to release the USD hold before recreating.
+                // Buy remakes especially hit INSUFFICIENT_FUND when create follows
+                // cancel in the same tick.
+                if (element.order_type === 'buy') {
+                    await new Promise(r => setTimeout(r, 300))
+                }
                 const newOrderId = crypto.randomUUID()
                 let reMakeResponse = await ca.createStopLimitOrder(element.order_type, element.order_price, element.shares, element.name, element.new_stop_price, newOrderId)
                 if(reMakeResponse?.success == true) {
