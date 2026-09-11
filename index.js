@@ -31,7 +31,12 @@ async function main () {
         //cancel buy orders 
         //await processBuyOrdersOutOfRange(pnfR)
 
-        //make buy orders
+        // When free USD is under $1, cancel the farthest open buy stops first so
+        // remakes / heal-placements have a chance at cash this cycle. Must run
+        // BEFORE processBuyOrders (which bails when available <= $1).
+        await processFarBuyCashRelease();
+
+        //make buy orders (also heals naked buys: buy_coinbase_order_id NULL)
         await processBuyOrders();
 
         //make sell orders
@@ -135,6 +140,12 @@ async function processBuyOrders () {
         // truncates it at the end, and that runs before this), so check live rather
         // than via vw_balance. If there isn't at least $1 free, don't even look at
         // the pending-buy backlog -- every one of them would just fail anyway.
+        //
+        // Naked-buy heal path: remake cancel+create can leave buy_coinbase_order_id
+        // NULL (see processRemakeOrders). thee_procedure clears error_message on
+        // unfilled buys each cycle, so those rows show up here and get a fresh
+        // client_order_id. Inventory CAP does NOT apply here — this only places
+        // already-inserted pending rows (recovery), not brand-new signals.
         const accounts = await ca.gatherBalance();
         const usd = accounts?.find(a => a.currency === 'USD');
         const available = usd ? parseFloat(usd.available_balance.value) : 0;
@@ -147,6 +158,7 @@ async function processBuyOrders () {
             SELECT p.* FROM position p
             JOIN stock s ON s.stock_id = p.stock_id
             WHERE p.buy_coinbase_order_id IS NULL AND p.error_message IS NULL
+            AND p.buy_filled_price IS NULL
             ORDER BY s.priority DESC NULLS LAST
         `)
         console.log(`Buy Orders to Process: ${orders.length}`);
@@ -184,15 +196,33 @@ async function processSellOrders () {
         for(let i = 0; i < orders.length; i++) {
             let element = orders[i];
             const newSellOrderId = crypto.randomUUID()
-            let response = await ca.createStopLimitOrder('sell', element.sell_price, element.shares, element.name, element.sell_stop_price, newSellOrderId)
+            let response
+            // Fee-floor sell_stop_price is often ABOVE market while underwater.
+            // Coinbase rejects STOP_DOWN when stop > last trade
+            // (PREVIEW_STOP_PRICE_ABOVE_LAST_TRADE_PRICE). A plain GTC limit sell
+            // at sell_price (fee breakeven, never below) rests above the market
+            // until price recovers — take-profit, not a loss-making stop.
+            // When market already clears the stop, keep the stop-limit trail.
+            const underwater = Number(element.current_price) < Number(element.sell_stop_price)
+            if (underwater) {
+                response = await ca.createLimitOrder('sell', element.sell_price, element.shares, element.name, newSellOrderId)
+                if(response?.success == true) {
+                    await db.executeQuery(`UPDATE position SET sell_coinbase_order_id = '${response.success_response.order_id}', sell_order_id = '${newSellOrderId}', error_message = NULL WHERE buy_order_id = '${element.buy_order_id}'`)
+                    console.log(`Sell Limit Created (underwater TP): ${element.name} | shares: ${element.shares} | limit: ${element.sell_price} | market: ${element.current_price}`)
+                } else {
+                    const errMsg = (response?.error_response?.message || 'unknown').replace(/'/g, "''")
+                    await db.executeQuery(`UPDATE position SET error_message = '${errMsg}' WHERE buy_order_id = '${element.buy_order_id}'`)
+                    console.log(`Sell Limit FAILED: ${element.name}`, response)
+                }
+                continue
+            }
+            response = await ca.createStopLimitOrder('sell', element.sell_price, element.shares, element.name, element.sell_stop_price, newSellOrderId)
             if(response?.success == true) {
                 await db.executeQuery(`UPDATE position SET sell_coinbase_order_id = '${response.success_response.order_id}', sell_order_id = '${newSellOrderId}', error_message = NULL WHERE buy_order_id = '${element.buy_order_id}'`)
                 console.log(`Sell Order Created: ${element.name} | shares: ${element.shares} | price: ${element.sell_price}`)
             } else if(response?.error_response?.preview_failure_reason === 'PREVIEW_STOP_PRICE_ABOVE_LAST_TRADE_PRICE') {
-                // Underwater: the floored stop (>= buy_filled_price) sits above current
-                // market, so Coinbase rejects it. Do not substitute a lower, loss-making
-                // price — leave the position unprotected and retry with fresh preview
-                // data next cycle until price recovers enough for the floor to clear.
+                // Race: market dipped under the stop between our check and Coinbase's
+                // preview. Do not lower the floor — next cycle will use the limit-TP path.
                 console.log(`Sell Order deferred (underwater): ${element.name} | current: ${element.current_price} | floor: ${element.sell_stop_price}`)
             } else {
                 const errMsg = (response?.error_response?.message || 'unknown').replace(/'/g, "''")
@@ -247,6 +277,55 @@ async function processObseleteBuyOrders () {
     }
 }
 
+
+async function processFarBuyCashRelease () {
+    try {
+        // Problem: ~$1 tickets sit in open STOP_UP buys, free USD often <$1, so
+        // processBuyOrders never heals naked rows and remake recreates race on
+        // hold lag. Policy: if live free USD is not above $1, cancel up to
+        // FAR_BUY_CANCEL_LIMIT open buy stops that are farthest above market
+        // (largest (buy_stop_price - price) / price). Null buy_coinbase_order_id
+        // so thee_procedure can refresh stop/limit toward market and
+        // processBuyOrders can re-place later — do NOT delete the position.
+        const FAR_BUY_CANCEL_LIMIT = 3
+        const accounts = await ca.gatherBalance();
+        const usd = accounts?.find(a => a.currency === 'USD');
+        const available = usd ? parseFloat(usd.available_balance.value) : 0;
+        if (available > 1) {
+            return;
+        }
+        const orders = await db.executeQuery(`
+            SELECT p.buy_order_id, p.name, p.buy_coinbase_order_id, p.buy_stop_price, s.price AS market,
+                (p.buy_stop_price::numeric - s.price::numeric) / NULLIF(s.price::numeric, 0) AS gap_pct
+            FROM position p
+            JOIN stock s ON s.stock_id = p.stock_id
+            WHERE p.buy_coinbase_order_id IS NOT NULL
+            AND p.buy_filled_price IS NULL
+            AND p.buy_stop_price > s.price
+            ORDER BY gap_pct DESC NULLS LAST
+            LIMIT ${FAR_BUY_CANCEL_LIMIT}
+        `)
+        if (!orders.length) {
+            console.log(`processFarBuyCashRelease() skipped: only $${available.toFixed(2)} free but no far buy stops`)
+            return
+        }
+        console.log(`processFarBuyCashRelease(): $${available.toFixed(2)} free — canceling ${orders.length} farthest buy stop(s)`)
+        for (let i = 0; i < orders.length; i++) {
+            const element = orders[i]
+            const cancelResponse = await ca.cancelOrder(element.buy_coinbase_order_id)
+            if (cancelResponse == true) {
+                // Leave error_message NULL so processBuyOrders can heal once cash returns.
+                await db.executeQuery(`UPDATE position SET buy_coinbase_order_id = NULL, error_message = NULL WHERE buy_order_id = '${element.buy_order_id}'`)
+                console.log(`Far Buy Cancelled: ${element.name} | gap: ${(Number(element.gap_pct)*100).toFixed(1)}% | stop: ${element.buy_stop_price} | mkt: ${element.market}`)
+            } else {
+                console.log(`Far Buy Cancel FAILED: ${element.name}`, cancelResponse)
+            }
+        }
+    } catch (error) {
+        console.log("processFarBuyCashRelease() ERROR", error)
+    }
+}
+
 async function processRemakeOrders () {
     try {
         // No LIMIT: an unaffordable/skipped candidate anywhere in the list would
@@ -278,12 +357,24 @@ async function processRemakeOrders () {
             if(cancelResponse == true) {
                 // Give Coinbase a moment to release the USD hold before recreating.
                 // Buy remakes especially hit INSUFFICIENT_FUND when create follows
-                // cancel in the same tick.
+                // cancel in the same tick (confirmed MON/ETC/BCH overnight).
                 if (element.order_type === 'buy') {
                     await new Promise(r => setTimeout(r, 500))
                 }
-                const newOrderId = crypto.randomUUID()
+                let newOrderId = crypto.randomUUID()
                 let reMakeResponse = await ca.createStopLimitOrder(element.order_type, element.order_price, element.shares, element.name, element.new_stop_price, newOrderId)
+                // One retry only: flat wait bumps (300→500) helped most cases but
+                // bursts of back-to-back remakes still race the hold release.
+                // Retrying once after another 500ms covers the lag without
+                // sleeping on every successful remake.
+                const insuff = reMakeResponse?.error_response?.error === 'INSUFFICIENT_FUND'
+                    || reMakeResponse?.error_response?.preview_failure_reason === 'PREVIEW_INSUFFICIENT_FUND'
+                if (reMakeResponse?.success != true && insuff && element.order_type === 'buy') {
+                    console.log(`Remake Create INSUFFICIENT_FUND — retry once: ${element.name}`)
+                    await new Promise(r => setTimeout(r, 500))
+                    newOrderId = crypto.randomUUID()
+                    reMakeResponse = await ca.createStopLimitOrder(element.order_type, element.order_price, element.shares, element.name, element.new_stop_price, newOrderId)
+                }
                 if(reMakeResponse?.success == true) {
                     if(element.order_type === 'buy') {
                         await db.executeQuery(`UPDATE position SET buy_order_id = '${newOrderId}', buy_coinbase_order_id = '${reMakeResponse.success_response.order_id}', buy_stop_price = ${element.new_stop_price}, buy_price = ${element.order_price}, buy_counter = buy_counter + 1, last_remade_at = NOW(), error_message = NULL WHERE buy_order_id = '${element.buy_order_id}'`)
@@ -292,10 +383,14 @@ async function processRemakeOrders () {
                     }
                     console.log(`Remake OK: ${element.name} ${element.order_type} | shares: ${element.shares} | new stop: ${element.new_stop_price} | est profit: ${element.estimated_profit} | counter: ${element.counter + 1}`)
                 } else {
-                    const errMsg = (reMakeResponse?.error_response?.message || 'unknown').replace(/'/g, "''")
+                    // Null the live id so we do not pretend the canceled order still
+                    // exists. Leave error_message NULL on buys: thee_procedure already
+                    // clears errors on unfilled buys, and processBuyOrders heals when
+                    // free USD > $1 (after far-buy cash release if needed).
                     if(element.order_type === 'buy') {
-                        await db.executeQuery(`UPDATE position SET buy_coinbase_order_id = NULL, error_message = '${errMsg}' WHERE buy_order_id = '${element.buy_order_id}'`)
+                        await db.executeQuery(`UPDATE position SET buy_coinbase_order_id = NULL, error_message = NULL WHERE buy_order_id = '${element.buy_order_id}'`)
                     } else {
+                        const errMsg = (reMakeResponse?.error_response?.message || 'unknown').replace(/'/g, "''")
                         await db.executeQuery(`UPDATE position SET sell_coinbase_order_id = NULL, error_message = '${errMsg}' WHERE buy_order_id = '${element.buy_order_id}'`)
                     }
                     console.log(`Remake Create FAILED: ${element.name} ${element.order_type}`, reMakeResponse)

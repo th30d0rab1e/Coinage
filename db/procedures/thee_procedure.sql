@@ -91,12 +91,20 @@ AND NOT EXISTS (
 
 -- Orphan sell recovery: re-link any Coinbase SELL order to a position that lost its sell_coinbase_order_id.
 -- Uses DISTINCT ON (o.order_id) so each Coinbase order is only matched to one position row.
+-- Orphan sell recovery also matches limit_limit_gtc: processSellOrders places
+-- plain GTC limit sells (fee-floor take-profits) while underwater, which are
+-- not stop_limit_stop_limit_gtc. Size still comes from whichever config is present.
 WITH orphan_match AS (
     SELECT DISTINCT ON (o.order_id) p.buy_order_id AS pos_key, o.order_id
     FROM position p
     JOIN bulk_open_orders o ON o.side = 'SELL'
         AND o.product_id = p.name
-        AND ABS((o.order_configuration->'stop_limit_stop_limit_gtc'->>'base_size')::numeric - p.shares::numeric) < 0.0001
+        AND ABS(
+            COALESCE(
+                (o.order_configuration->'stop_limit_stop_limit_gtc'->>'base_size')::numeric,
+                (o.order_configuration->'limit_limit_gtc'->>'base_size')::numeric
+            ) - p.shares::numeric
+        ) < 0.0001
         AND NOT EXISTS (SELECT 1 FROM position p2 WHERE p2.sell_coinbase_order_id = o.order_id)
     WHERE p.buy_filled_price IS NOT NULL
     AND p.sell_filled_price IS NULL
@@ -155,6 +163,15 @@ AND (
         AND existing.sell_filled_price IS NULL
     )
 )
+-- Inventory cap: stop inserting brand-new buy signals when too many filled
+-- positions are still open (no sell fill yet). Remakes, sell arming, and
+-- processBuyOrders healing of naked pending rows are unaffected — those do
+-- not INSERT here. Threshold lives in config.max_open_positions (default 60).
+AND (
+    SELECT COUNT(*) FROM position open_pos
+    WHERE open_pos.buy_filled_price IS NOT NULL
+    AND open_pos.sell_filled_price IS NULL
+) < COALESCE((SELECT value::int FROM config WHERE key = 'max_open_positions'), 60)
 ORDER BY s.priority DESC NULLS LAST
 LIMIT 1;
 
@@ -201,6 +218,15 @@ AND NOT EXISTS (
     AND existing.buy_order_id IS NOT NULL
     AND existing.buy_filled_price IS NULL
 )
+-- Inventory cap: stop inserting brand-new buy signals when too many filled
+-- positions are still open (no sell fill yet). Remakes, sell arming, and
+-- processBuyOrders healing of naked pending rows are unaffected — those do
+-- not INSERT here. Threshold lives in config.max_open_positions (default 60).
+AND (
+    SELECT COUNT(*) FROM position open_pos
+    WHERE open_pos.buy_filled_price IS NOT NULL
+    AND open_pos.sell_filled_price IS NULL
+) < COALESCE((SELECT value::int FROM config WHERE key = 'max_open_positions'), 60)
 ORDER BY s.priority DESC NULLS LAST
 LIMIT 1;
 
