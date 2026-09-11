@@ -227,10 +227,13 @@ ca.findOpenOrderByClientId = async function (productId, clientOrderId) {
 
 ca.createLimitOrder = async function (side, price, shares, name, orderID) {
     try {
+        // Coinbase's side enum is BUY/SELL only — lowercase "sell" returns
+        // proto invalid value (confirmed 2026-09-10 when underwater TP sells
+        // all failed as Sell Limit FAILED undefined). Match createStopLimitOrder.
         let data = JSON.stringify({
             "client_order_id": orderID,
             "product_id": name,
-            "side": side,
+            "side": side.toUpperCase(),
             "order_configuration": {
               "limit_limit_gtc": {
                 //"quote_size": USD,
@@ -242,20 +245,27 @@ ca.createLimitOrder = async function (side, price, shares, name, orderID) {
           });
 
         const result = await getApiCall('POST', '/api/v3/brokerage/orders', '', data);
+        if (result.data?.success) return result.data;
 
-        console.log('Order created!', result.data)
-        
+        // Same verify-on-failure pattern as createStopLimitOrder: a reported
+        // failure can still mean the order exists under this client_order_id.
+        console.log(`createLimitOrder() FAILED: ${name}`, result.data, `-- verifying via open orders`)
+        const existing = await ca.findOpenOrderByClientId(name, orderID)
+        if (existing) {
+            console.log(`createLimitOrder() verified order actually exists: ${name} ${existing.order_id}`)
+            return { success: true, success_response: { order_id: existing.order_id } }
+        }
         return result.data;
 
     } catch (error) {
-        if (error?.response?.data){
-            console.log("createBuyOrder() ERROR response.data", error.response.data, side, price, shares, name, orderID);
-        } else if (error?.data) {
-            console.log("createBuyOrder() ERROR data", error.data, side, price, shares, name, orderID);
-        } else {
-            console.log("createBuyOrder() ERROR else", error, side, price, shares, name, orderID)
+        const errData = error?.response?.data || error?.data || error
+        console.log(`createLimitOrder() ERROR: ${name}`, errData, `-- verifying via open orders`)
+        const existing = await ca.findOpenOrderByClientId(name, orderID)
+        if (existing) {
+            console.log(`createLimitOrder() verified order actually exists despite error: ${name} ${existing.order_id}`)
+            return { success: true, success_response: { order_id: existing.order_id } }
         }
-        
+        return { success: false, error_response: { message: errData?.message || errData?.error_details || String(errData) } }
     }
 } 
 
