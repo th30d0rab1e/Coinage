@@ -7,7 +7,7 @@
 cron: 17 * * * *
 durable: true
 prompt:
-You are monitoring a Coinbase trading bot. Working directory: /Volumes/2TBSSD/theodorecrossX/Library/Mobile Documents/com~apple~CloudDocs/Coinbase tedTosterone
+You are monitoring a Coinbase trading bot. Working directory: /Volumes/2TBSSD/theodorecrossX/Coinbase tedTosterone
 
 Run all of these checks:
 
@@ -29,7 +29,7 @@ Then apply these rules:
 cron: 3 8 * * *
 durable: true
 prompt:
-You are generating a daily report for a Coinbase trading bot. Working directory: /Volumes/2TBSSD/theodorecrossX/Library/Mobile Documents/com~apple~CloudDocs/Coinbase tedTosterone
+You are generating a daily report for a Coinbase trading bot. Working directory: /Volumes/2TBSSD/theodorecrossX/Coinbase tedTosterone
 
 Run these queries:
 
