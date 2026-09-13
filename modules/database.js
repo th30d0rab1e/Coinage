@@ -84,9 +84,16 @@ con.insertCurrency = async function (data) {
       if(data.length > 0) {
           const id = data.map(obj => obj.uuid)
           const currency = data.map(obj => obj.currency)
-          const balance = data.map(obj => parseFloat(obj.available_balance.value))
+          // balance must be the TRUE total (available + held by open orders),
+          // not a duplicate of available_balance -- confirmed live 2026-09-13
+          // on MAMO-USD: available_balance showed 0 while hold showed 228.8,
+          // so anything computing portfolio value off "balance" alone (e.g.
+          // an ROI report) silently missed every coin currently reserved by
+          // a live sell order, undercounting total holdings by ~$97 out of
+          // ~$101 in this account at the time.
           const hold = data.map(obj => parseFloat(obj.hold.value))
           const available = data.map(obj => parseFloat(obj.available_balance.value))
+          const balance = data.map((obj, i) => available[i] + hold[i])
           const profile_id = data.map(obj => obj.retail_portfolio_id)
           const trading_enabled = data.map(obj => obj.active.toString())
           const AccountID = data.map(obj => obj.uuid)
