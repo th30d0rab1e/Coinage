@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 582mIzch8dKlyw8pRauRHQXP7l0FSVaEqonadIW9fPEjeT51LpZanfRCQb8vri1
+\restrict HHdKPntCZVA8hF8a9IVgNclTocEm8VTnSoQnkhQGcCdTvrYIrUzuXOD8nQD482o
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -327,6 +327,14 @@ LEFT JOIN stock s ON bs.id = s.name
 WHERE s.stock_id IS NULL
 AND bs.id LIKE '%-USD';
 
+-- trading_disabled is copied from Coinbase's own products feed (bulk_stock,
+-- refreshed every cycle) and checked before ever picking a coin as a fresh
+-- buy candidate below -- confirmed RNDR-USD and MKR-USD both come back
+-- status: "delisted", trading_disabled: true, and were being retried as buy
+-- candidates every cycle regardless, failing every time with
+-- PERMISSION_DENIED. A coin whose product_id disappears from Coinbase's
+-- catalog entirely (confirmed on LRC-USD) doesn't need this guard --
+-- without a bulk_stock row at all, it was already never a candidate.
 UPDATE stock
 SET price = bs.price::DOUBLE PRECISION,
     share_rounding = CASE
@@ -342,7 +350,8 @@ SET price = bs.price::DOUBLE PRECISION,
     max_shares = (bs.json->>'base_max_size')::double precision,
     min_shares = (bs.json->>'base_min_size')::double precision,
     max_price = (bs.json->>'quote_max_size')::double precision,
-    min_price = (bs.json->>'quote_min_size')::double precision
+    min_price = (bs.json->>'quote_min_size')::double precision,
+    trading_disabled = (bs.json->>'trading_disabled')::boolean
 FROM bulk_stock bs
 WHERE stock.name = bs.id
 AND bs.id LIKE '%-USD'
@@ -464,6 +473,7 @@ AND b.available > 1.00
 AND s.period_type = 'year'
 AND p.buy_order_id IS NULL
 AND historical_avg_change_percent > 0
+AND stock.trading_disabled IS NOT TRUE
 AND (
     NOT EXISTS (
         SELECT 1 FROM position existing
@@ -529,6 +539,7 @@ WHERE b.name = 'USD'
 AND b.available > 1.00
 AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
 AND TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) < held.last_filled_price
+AND s.trading_disabled IS NOT TRUE
 AND NOT EXISTS (
     SELECT 1 FROM position existing
     WHERE existing.stock_id = held.stock_id
@@ -776,7 +787,8 @@ CREATE TABLE public.stock (
     min_price double precision,
     max_price double precision,
     share_rounding integer,
-    price_rounding integer
+    price_rounding integer,
+    trading_disabled boolean
 );
 
 
@@ -1963,5 +1975,5 @@ CREATE TRIGGER position_audit_trg AFTER INSERT OR DELETE OR UPDATE ON public."po
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 582mIzch8dKlyw8pRauRHQXP7l0FSVaEqonadIW9fPEjeT51LpZanfRCQb8vri1
+\unrestrict HHdKPntCZVA8hF8a9IVgNclTocEm8VTnSoQnkhQGcCdTvrYIrUzuXOD8nQD482o
 

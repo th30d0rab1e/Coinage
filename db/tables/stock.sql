@@ -12,5 +12,6 @@ CREATE TABLE IF NOT EXISTS public.stock (
     min_price            double precision,
     max_price            double precision,
     share_rounding       integer,
-    price_rounding       integer
+    price_rounding       integer,
+    trading_disabled     boolean
 );
