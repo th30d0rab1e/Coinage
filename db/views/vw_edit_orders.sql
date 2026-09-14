@@ -11,16 +11,30 @@
 -- processSellOrders()) doesn't touch it, so a brand-new order still counts
 -- as never-remade (NULLS FIRST) until it's actually been through this path.
 --
--- Stop-limit remake ratchets (stop AND limit):
---   BUY  STOP_UP:   new stop < live buy_stop_price AND new limit < live buy_price
---   SELL STOP_DOWN: new stop > live sell_stop_price AND new limit > live sell_price
--- A sell used to also carry a 4th branch (non-daily, dropped here) that
--- deliberately loosened a stop back down whenever it drifted more than 1%
--- above a fresh volatility-based calculation -- meant to give a tight stop
--- room to breathe, but its actual effect was giving back already-locked-in
--- profit on any ordinary pullback. Confirmed on BLZ-USD: peaked at a 0.01303
--- stop (an locked $0.41), then that branch walked it back down to 0.01257
--- ($0.34) over several remakes as price merely dipped, not reversed.
+-- SELL limit price is frozen at p.sell_price and never recomputed here --
+-- only new_stop_price changes on a sell remake. sell_price is set exactly
+-- once, in thee_procedure()'s "Initial sell stop" block, from the
+-- position's own settled buy_filled_price/buy_fee (the correct fee-adjusted
+-- breakeven floor, or better). A limit sell can never fill worse than its
+-- limit, so once that limit is genuinely correct, freezing it makes a
+-- below-cost sale structurally impossible regardless of what any later
+-- remake or daily-profit pass computes. Before this, the limit was
+-- recomputed fresh off live price on every remake (guarded only by a
+-- "new limit > live sell_price" ratchet) -- confirmed on PUMP-USD: a
+-- separate code path (processDailyProfit()) independently recomputed its
+-- own floor from what should have been the same settled buy data and got
+-- 0.003699 instead of the correct 0.003782, producing a real -$0.02 loss
+-- on a position the no-loss rule was supposed to make impossible to lose
+-- on. Freezing the limit at the one value already proven correct removes
+-- every later recomputation opportunity for that kind of drift to matter.
+-- (Separately: a sell used to also carry a 4th branch, non-daily, dropped
+-- here, that deliberately loosened a stop back down whenever it drifted
+-- more than 1% above a fresh volatility-based calculation -- meant to give
+-- a tight stop room to breathe, but its actual effect was giving back
+-- already-locked-in profit on any ordinary pullback. Confirmed on BLZ-USD:
+-- peaked at a 0.01303 stop (locked $0.41), then that branch walked it back
+-- down to 0.01257 ($0.34) over several remakes as price merely dipped, not
+-- reversed.)
 CREATE OR REPLACE VIEW public.vw_edit_orders AS
 SELECT p.name,
     p.period_type,
@@ -52,32 +66,31 @@ UNION ALL
 
 SELECT p.name,
     p.period_type,
-    trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001) * 0.99, s.price_rounding) AS order_price,
+    p.sell_price AS order_price,
     s.price AS price_now,
     p.buy_order_id,
     p.sell_coinbase_order_id AS coinbase_order_id,
     p.shares,
-    trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001), s.price_rounding) AS new_stop_price,
+    GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001), s.price_rounding)) AS new_stop_price,
     'sell'::text AS order_type,
-    trunc((s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001) - p.buy_filled_price::numeric) * p.shares::numeric, 2) AS estimated_profit,
+    trunc((p.sell_price::numeric - p.buy_filled_price::numeric) * p.shares::numeric, 2) AS estimated_profit,
     p.last_remade_at,
     p.sell_counter AS counter,
-    ABS(trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001), s.price_rounding) - p.sell_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
+    ABS(GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001), s.price_rounding)) - p.sell_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
 FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
 WHERE p.sell_coinbase_order_id IS NOT NULL
 AND p.sell_filled_price IS NULL
 AND p.daily_sell = true
-AND p.sell_stop_price < trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001), s.price_rounding)::double precision
-AND p.sell_price < trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001) * 0.99, s.price_rounding)::double precision
+AND p.sell_stop_price < GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001), s.price_rounding))::double precision
 AND (
-    trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001) * 0.99, s.price_rounding)::numeric
+    p.sell_price::numeric
     * p.shares::numeric
     * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
     - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0))
 ) > 0
 AND (
-    trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.001) * 0.99, s.price_rounding)::numeric
+    p.sell_price::numeric
     * p.shares::numeric
     * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
     - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0))
@@ -87,17 +100,17 @@ UNION ALL
 
 SELECT p.name,
     p.period_type,
-    GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001) * 0.99, s.price_rounding)) AS order_price,
+    p.sell_price AS order_price,
     s.price AS price_now,
     p.buy_order_id,
     p.sell_coinbase_order_id AS coinbase_order_id,
     p.shares,
-    GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) AS new_stop_price,
+    GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) AS new_stop_price,
     'sell'::text AS order_type,
-    trunc((GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) - p.buy_filled_price::numeric) * p.shares::numeric, 2) AS estimated_profit,
+    trunc((p.sell_price::numeric - p.buy_filled_price::numeric) * p.shares::numeric, 2) AS estimated_profit,
     p.last_remade_at,
     p.sell_counter AS counter,
-    ABS(GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) - p.sell_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
+    ABS(GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding)) - p.sell_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
 FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
 JOIN price_aggregate_total pat ON p.stock_id = pat.stock_id AND p.period_type = pat.period_type
@@ -109,31 +122,18 @@ CROSS JOIN LATERAL (
         ELSE NULL::numeric
     END AS stop_ratio
 ) vol
--- Floor at a breakeven price, not raw buy_filled_price: profit also has to
--- cover both fees, so the floor is buy_filled_price grossed up by this
--- position's own realized buy-side fee rate (used as the sell-fee
--- estimate), falling back to 1.2% if the buy fee is unknown.
-CROSS JOIN LATERAL (
-    SELECT CEIL(
-        (p.buy_filled_price::numeric
-            * (1 + COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
-            / (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012)))
-        * POWER(10::numeric, s.price_rounding::int)
-    ) / POWER(10::numeric, s.price_rounding::int) AS floor_price
-) breakeven
 WHERE p.sell_coinbase_order_id IS NOT NULL
 AND p.sell_filled_price IS NULL
 AND p.daily_sell = false
-AND p.sell_stop_price < GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding))::double precision
-AND p.sell_price < GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001) * 0.99, s.price_rounding))::double precision
+AND p.sell_stop_price < GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001), s.price_rounding))::double precision
 AND (
-    GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001) * 0.99, s.price_rounding))
+    p.sell_price::numeric
     * p.shares::numeric
     * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
     - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0))
 ) > 0
 AND (
-    GREATEST(breakeven.floor_price, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.001) * 0.99, s.price_rounding))
+    p.sell_price::numeric
     * p.shares::numeric
     * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
     - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0))

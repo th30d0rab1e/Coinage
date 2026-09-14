@@ -379,7 +379,11 @@ async function processRemakeOrders () {
                     if(element.order_type === 'buy') {
                         await db.executeQuery(`UPDATE position SET buy_order_id = '${newOrderId}', buy_coinbase_order_id = '${reMakeResponse.success_response.order_id}', buy_stop_price = ${element.new_stop_price}, buy_price = ${element.order_price}, buy_counter = buy_counter + 1, last_remade_at = NOW(), error_message = NULL WHERE buy_order_id = '${element.buy_order_id}'`)
                     } else {
-                        await db.executeQuery(`UPDATE position SET sell_order_id = '${newOrderId}', sell_coinbase_order_id = '${reMakeResponse.success_response.order_id}', sell_stop_price = ${element.new_stop_price}, sell_price = ${element.order_price}, sell_counter = sell_counter + 1, last_remade_at = NOW(), error_message = NULL WHERE buy_order_id = '${element.buy_order_id}'`)
+                        // sell_price intentionally absent: it's frozen (see
+                        // vw_edit_orders.sql), and element.order_price is
+                        // always that same already-set value -- only
+                        // sell_stop_price ever moves on a sell remake.
+                        await db.executeQuery(`UPDATE position SET sell_order_id = '${newOrderId}', sell_coinbase_order_id = '${reMakeResponse.success_response.order_id}', sell_stop_price = ${element.new_stop_price}, sell_counter = sell_counter + 1, last_remade_at = NOW(), error_message = NULL WHERE buy_order_id = '${element.buy_order_id}'`)
                     }
                     console.log(`Remake OK: ${element.name} ${element.order_type} | shares: ${element.shares} | new stop: ${element.new_stop_price} | est profit: ${element.estimated_profit} | counter: ${element.counter + 1}`)
                 } else {
@@ -586,30 +590,36 @@ async function processDailyProfit () {
             return
         }
 
-        // Best open position that already clears its fee-adjusted breakeven floor at
-        // current price. Comparing against the account's historical average profit
-        // (instead of against breakeven) let this force a sale whenever a position was
-        // merely "less bad than usual" — and since losing trades pull the average down,
-        // that bar kept getting easier to clear. Genuine breakeven is the only bar that
-        // can't decay like that.
+        // Best open position that already clears its own frozen sell_price (the
+        // fee-adjusted breakeven floor or better, set exactly once in
+        // thee_procedure()'s "Initial sell stop" block from this position's
+        // settled buy_filled_price/buy_fee) at current price. Comparing against
+        // the account's historical average profit (instead of against
+        // breakeven) let this force a sale whenever a position was merely
+        // "less bad than usual" — and since losing trades pull the average
+        // down, that bar kept getting easier to clear. Genuine breakeven is
+        // the only bar that can't decay like that.
+        //
+        // Deliberately does NOT recompute its own breakeven floor here anymore
+        // -- it used to, independently, via the same CEIL(...) formula, and on
+        // 2026-09-13 that recomputation produced 0.003699 for PUMP-USD instead
+        // of the correct 0.003782 (verified directly against the same
+        // formula with the position's final settled data), producing a real
+        // -$0.02 loss on a trade the no-loss rule was supposed to make
+        // impossible to lose on. p.sell_price is the one place that value is
+        // already correct; reusing it here instead of recomputing removes the
+        // only other place that number could silently drift.
         const best = await db.executeQuery(`
-            SELECT p.*, s.price AS current_price, s.price_rounding, breakeven.floor_price,
+            SELECT p.*, s.price AS current_price, s.price_rounding,
                 ROUND(((s.price - p.buy_filled_price) * p.shares - COALESCE(p.buy_fee, 0))::numeric, 4) AS est_profit_now,
                 ROUND(((s.price - p.buy_filled_price) / NULLIF(p.buy_filled_price, 0) * 100)::numeric, 4) AS pct_gain
             FROM position p
             JOIN stock s ON p.stock_id = s.stock_id
-            CROSS JOIN LATERAL (
-                SELECT CEIL(
-                    (p.buy_filled_price::numeric
-                        * (1 + COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
-                        / (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012)))
-                    * POWER(10::numeric, s.price_rounding::int)
-                ) / POWER(10::numeric, s.price_rounding::int) AS floor_price
-            ) breakeven
             WHERE p.buy_filled_price IS NOT NULL
               AND p.sell_filled_price IS NULL
               AND p.daily_sell = false
-              AND s.price::numeric >= breakeven.floor_price
+              AND p.sell_price IS NOT NULL
+              AND s.price::numeric >= p.sell_price::numeric
             ORDER BY pct_gain DESC
             LIMIT 1
         `)
@@ -619,18 +629,16 @@ async function processDailyProfit () {
         }
 
         const pos = best[0]
-        const floorPrice = parseFloat(pos.floor_price)
+        const floorPrice = parseFloat(pos.sell_price)
 
-        // Tight stop: 1% below current price, limit 1% below stop — but never below the
-        // breakeven floor. The old version discounted from current_price with nothing
-        // tying the actual order back to the price the profitability check above used,
-        // so a position that looked fine at current_price could still be sold at a loss
-        // by the time these two 1% cuts were applied.
+        // Tight stop: 1% below current price, but never below the frozen limit
+        // (floorPrice) -- the limit itself is NOT recomputed here (see comment
+        // above); only the stop moves.
         const pr = parseInt(pos.price_rounding)
         const factor = Math.pow(10, pr)
         const currentPrice = parseFloat(pos.current_price)
         const stopPrice = Math.max(floorPrice, Math.trunc(currentPrice * 0.99 * factor) / factor)
-        const limitPrice = Math.max(floorPrice, Math.trunc(stopPrice * 0.99 * factor) / factor)
+        const limitPrice = floorPrice
 
         const preview = await ca.previewStopLimitOrder('sell', limitPrice, pos.shares, pos.name, stopPrice)
         if (!preview.ok) {
@@ -656,12 +664,15 @@ async function processDailyProfit () {
         const newOrderId = crypto.randomUUID()
         const response = await ca.createStopLimitOrder('sell', limitPrice, pos.shares, pos.name, stopPrice, newOrderId)
         if (response?.success === true) {
+            // sell_price is deliberately absent from this SET: it's frozen at
+            // whatever thee_procedure()'s "Initial sell stop" block already set
+            // it to, and limitPrice above is always exactly that same value --
+            // only sell_stop_price ever changes here.
             await db.executeQuery(`
                 UPDATE position
                 SET sell_order_id = '${newOrderId}',
                     sell_coinbase_order_id = '${response.success_response.order_id}',
                     sell_stop_price = ${stopPrice},
-                    sell_price = ${limitPrice},
                     daily_sell = true,
                     error_message = NULL
                 WHERE buy_order_id = '${pos.buy_order_id}'
