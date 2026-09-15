@@ -194,25 +194,15 @@ async function processSellOrders () {
             let element = orders[i];
             const newSellOrderId = crypto.randomUUID()
             let response
-            // Fee-floor sell_stop_price is often ABOVE market while underwater.
-            // Coinbase rejects STOP_DOWN when stop > last trade
-            // (PREVIEW_STOP_PRICE_ABOVE_LAST_TRADE_PRICE). A plain GTC limit sell
-            // at sell_price (fee breakeven, never below) rests above the market
-            // until price recovers — take-profit, not a loss-making stop.
-            // When market already clears the stop, keep the stop-limit trail.
-            const underwater = Number(element.current_price) < Number(element.sell_stop_price)
-            if (underwater) {
-                response = await ca.createLimitOrder('sell', element.sell_price, element.shares, element.name, newSellOrderId)
-                if(response?.success == true) {
-                    await db.executeQuery(`UPDATE position SET sell_coinbase_order_id = '${response.success_response.order_id}', sell_order_id = '${newSellOrderId}', error_message = NULL WHERE buy_order_id = '${element.buy_order_id}'`)
-                    console.log(`Sell Limit Created (underwater TP): ${element.name} | shares: ${element.shares} | limit: ${element.sell_price} | market: ${element.current_price}`)
-                } else {
-                    const errMsg = (response?.error_response?.message || 'unknown').replace(/'/g, "''")
-                    await db.executeQuery(`UPDATE position SET error_message = '${errMsg}' WHERE buy_order_id = '${element.buy_order_id}'`)
-                    console.log(`Sell Limit FAILED: ${element.name}`, response)
-                }
-                continue
-            }
+            // Always a stop-limit order, underwater or not -- no plain-limit
+            // fallback (a resting GTC limit isn't a stop-limit order, per the
+            // user's explicit rule for this). When the fee-floor
+            // sell_stop_price sits above market (underwater), Coinbase rejects
+            // the STOP_DOWN preview (PREVIEW_STOP_PRICE_ABOVE_LAST_TRADE_PRICE)
+            // -- handled below by leaving the position unprotected and
+            // retrying next cycle, per thee_procedure.sql's "Initial sell
+            // stop" comment: never respond to that rejection by substituting
+            // a lower (loss-making) price.
             response = await ca.createStopLimitOrder('sell', element.sell_price, element.shares, element.name, element.sell_stop_price, newSellOrderId)
             if(response?.success == true) {
                 await db.executeQuery(`UPDATE position SET sell_coinbase_order_id = '${response.success_response.order_id}', sell_order_id = '${newSellOrderId}', error_message = NULL WHERE buy_order_id = '${element.buy_order_id}'`)
