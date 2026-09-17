@@ -134,11 +134,25 @@ WHERE p.buy_order_id = om.pos_key;
 -- Always recorded as period_type 'day' (the existing $1-size bucket), even
 -- though the signal driving the pick is the year row. One new position per
 -- cycle.
+-- Clip size: $1 for a brand-new day position on this coin; if this INSERT
+-- is instead an add while open day rows already exist (price below the
+-- lowest filled buy), use $N where N = open_count + 1 (2nd order $2, 3rd
+-- $3, ...). Open = any buy still live (sell not filled). available must
+-- cover that clip, not a hard-coded $1.
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
 SELECT s.stock_id, s.name,
     TRUNC((s.close::numeric * 1.05 * 1.01), stock.price_rounding::integer) AS buy_price,
     TRUNC((s.close::numeric * 1.05),        stock.price_rounding::integer) AS buy_stop_price,
-    TRUNC((1.00 / s.close)::numeric, stock.share_rounding::integer) AS shares,
+    TRUNC((
+        (
+            SELECT COUNT(*)::numeric
+            FROM position open_sz
+            WHERE open_sz.stock_id = s.stock_id
+            AND open_sz.period_type = 'day'
+            AND open_sz.buy_order_id IS NOT NULL
+            AND open_sz.sell_filled_price IS NULL
+        ) + 1
+    ) / s.close::numeric, stock.share_rounding::integer) AS shares,
     NOW() AS date_created,
     gen_random_uuid(),
     'day'
@@ -151,7 +165,14 @@ LEFT JOIN position p ON p.stock_id = s.stock_id
     AND p.buy_filled_price IS NULL
 WHERE b.name = 'USD'
 AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
-AND b.available > 1.00
+AND b.available > (
+    SELECT COUNT(*)::numeric
+    FROM position open_sz
+    WHERE open_sz.stock_id = s.stock_id
+    AND open_sz.period_type = 'day'
+    AND open_sz.buy_order_id IS NOT NULL
+    AND open_sz.sell_filled_price IS NULL
+) + 1
 AND s.period_type = 'year'
 AND p.buy_order_id IS NULL
 AND historical_avg_change_percent > 0
@@ -185,24 +206,40 @@ AND (
 ORDER BY s.priority DESC NULLS LAST
 LIMIT 1;
 
--- Buy again (always $1) if current price has dropped below the MOST
--- RECENT already-filled price for a stock+period (not the lowest ever --
+-- Buy again if current price has dropped below the MOST RECENT
+-- already-filled price for a stock+period (not the lowest ever --
 -- anchored on whichever fill actually happened last, so this can
 -- re-trigger even after a good fill if price has since moved against
 -- the latest one). Anchored on position itself, not vw_signal — purely
 -- "average down further," no recommendation conditions involved.
--- Only triggers off a coin whose buy is actually filled, and only if
+-- Clip size scales with depth: $N for the Nth open buy on that
+-- stock+period (1 open filled → next is $2; 2 open → next is $3). Open
+-- means buy_order_id set and sell not filled. available must exceed that
+-- clip. Only triggers off a coin whose buy is actually filled, and only if
 -- there's no other buy order currently open/pending for that same
 -- stock+period. When multiple held coins qualify in the same cycle,
 -- ranked by stock.priority descending (same year-basis priority marker the
 -- new-position buy uses) so the highest-priority coin gets the
--- average-down dollar first. One new position per cycle.
+-- average-down clip first. One new position per cycle.
 WITH held AS (
     SELECT DISTINCT ON (stock_id, period_type)
         stock_id, period_type, buy_filled_price AS last_filled_price
     FROM position
     WHERE buy_filled_price IS NOT NULL
     ORDER BY stock_id, period_type, buy_filled_date DESC
+),
+sized AS (
+    SELECT
+        h.*,
+        (
+            SELECT COUNT(*)::numeric
+            FROM position op
+            WHERE op.stock_id = h.stock_id
+            AND op.period_type = h.period_type
+            AND op.buy_order_id IS NOT NULL
+            AND op.sell_filled_price IS NULL
+        ) + 1 AS clip_usd
+    FROM held h
 )
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
 SELECT
@@ -210,22 +247,22 @@ SELECT
     s.name,
     TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) AS buy_price,
     TRUNC(s.price::numeric * 1.01,  s.price_rounding::integer) AS buy_stop_price,
-    TRUNC((1.00 / s.price)::numeric, s.share_rounding::integer) AS shares,
+    TRUNC((sized.clip_usd / s.price::numeric), s.share_rounding::integer) AS shares,
     NOW() AS date_created,
     gen_random_uuid(),
-    held.period_type
-FROM held
-JOIN stock s ON s.stock_id = held.stock_id
+    sized.period_type
+FROM sized
+JOIN stock s ON s.stock_id = sized.stock_id
 CROSS JOIN vw_balance b
 WHERE b.name = 'USD'
-AND b.available > 1.00
+AND b.available > sized.clip_usd
 AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
-AND TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) < held.last_filled_price
+AND TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) < sized.last_filled_price
 AND s.trading_disabled IS NOT TRUE
 AND NOT EXISTS (
     SELECT 1 FROM position existing
-    WHERE existing.stock_id = held.stock_id
-    AND existing.period_type = held.period_type
+    WHERE existing.stock_id = sized.stock_id
+    AND existing.period_type = sized.period_type
     AND existing.buy_order_id IS NOT NULL
     AND existing.buy_filled_price IS NULL
 )
