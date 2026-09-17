@@ -145,11 +145,14 @@ SELECT s.stock_id, s.name,
     TRUNC((s.close::numeric * 1.05),        stock.price_rounding::integer) AS buy_stop_price,
     TRUNC((
         (
+            -- Order count = live unfilled open buys only (not filled bags).
+            -- Next clip is $N where N = that count + 1 (1 open buy → this one is $2).
             SELECT COUNT(*)::numeric
             FROM position open_sz
             WHERE open_sz.stock_id = s.stock_id
             AND open_sz.period_type = 'day'
             AND open_sz.buy_order_id IS NOT NULL
+            AND open_sz.buy_filled_price IS NULL
             AND open_sz.sell_filled_price IS NULL
         ) + 1
     ) / s.close::numeric, stock.share_rounding::integer) AS shares,
@@ -171,6 +174,7 @@ AND b.available > (
     WHERE open_sz.stock_id = s.stock_id
     AND open_sz.period_type = 'day'
     AND open_sz.buy_order_id IS NOT NULL
+    AND open_sz.buy_filled_price IS NULL
     AND open_sz.sell_filled_price IS NULL
 ) + 1
 AND s.period_type = 'year'
@@ -212,10 +216,9 @@ LIMIT 1;
 -- re-trigger even after a good fill if price has since moved against
 -- the latest one). Anchored on position itself, not vw_signal — purely
 -- "average down further," no recommendation conditions involved.
--- Clip size scales with depth: $N for the Nth open buy on that
--- stock+period (1 open filled → next is $2; 2 open → next is $3). Open
--- means buy_order_id set and sell not filled. available must exceed that
--- clip. Only triggers off a coin whose buy is actually filled, and only if
+-- Clip size = $N from unfilled open buy ORDER count on that
+-- stock+period (0 open buys → $1; 1 open buy → this new one is $2).
+-- Filled bags do not count. available must exceed that clip. Only triggers off a coin whose buy is actually filled, and only if
 -- there's no other buy order currently open/pending for that same
 -- stock+period. When multiple held coins qualify in the same cycle,
 -- ranked by stock.priority descending (same year-basis priority marker the
@@ -231,12 +234,16 @@ WITH held AS (
 sized AS (
     SELECT
         h.*,
+        -- $N from open (unfilled) buy order count only — filled inventory
+        -- does not inflate the clip. With at most one pending buy per coin,
+        -- this is usually $1 unless multiple open buys are allowed.
         (
             SELECT COUNT(*)::numeric
             FROM position op
             WHERE op.stock_id = h.stock_id
             AND op.period_type = h.period_type
             AND op.buy_order_id IS NOT NULL
+            AND op.buy_filled_price IS NULL
             AND op.sell_filled_price IS NULL
         ) + 1 AS clip_usd
     FROM held h
