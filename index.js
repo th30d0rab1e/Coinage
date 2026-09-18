@@ -31,6 +31,11 @@ async function main () {
         //cancel buy orders 
         //await processBuyOrdersOutOfRange(pnfR)
 
+        // Read-only book snapshots first so buy gates can use fresh imbalance
+        // (and so thee_procedure's next cycle can ORDER BY it). Still no
+        // place/cancel inside the logger itself.
+        await processBookSnapshots();
+
         // When free USD is under $1, cancel the farthest open buy stops first so
         // remakes / heal-placements have a chance at cash this cycle. Must run
         // BEFORE processBuyOrders (which bails when available <= $1).
@@ -48,9 +53,6 @@ async function main () {
         //Remake Orders
         await processRemakeOrders();
 
-        // Read-only: log near-mid order-book imbalance for open fills.
-        // Does not place, cancel, or change any orders.
-        await processBookSnapshots();
 
     } catch (error) {
         console.log("main", error)
@@ -166,6 +168,30 @@ async function processBuyOrders () {
 
         for (i = 0; i < orders.length; i++) {
             const element = orders[i];
+            // Live L2 gate before create — skip this cycle (leave row pending,
+            // no error_message) so a bad book can clear without blocking forever.
+            try {
+                const book = await ca.getProductBook(element.name, 20)
+                const metrics = computeBookMetrics(book)
+                const clipNotional = Number(element.buy_price) * Number(element.shares)
+                if (metrics) {
+                    if (metrics.imbalance < BOOK_SKIP_IMBALANCE) {
+                        console.log(`Buy Order deferred (ask-heavy book): ${element.name} | imbalance: ${metrics.imbalance.toFixed(3)}`)
+                        continue
+                    }
+                    if (metrics.spreadPct > BOOK_MAX_SPREAD_PCT) {
+                        console.log(`Buy Order deferred (wide spread): ${element.name} | spread: ${metrics.spreadPct.toFixed(3)}%`)
+                        continue
+                    }
+                    if (clipNotional > 0 && metrics.nearAskUsd < clipNotional * BOOK_MIN_ASK_NOTIONAL_MULT) {
+                        console.log(`Buy Order deferred (thin ask): ${element.name} | nearAskUsd: ${metrics.nearAskUsd.toFixed(2)} | clip: ${clipNotional.toFixed(2)}`)
+                        continue
+                    }
+                }
+            } catch (bookErr) {
+                console.log(`Buy Order book-check ERROR ${element.name}`, bookErr?.message || bookErr)
+                // Fail open: still attempt place if the book call blips.
+            }
             // Coinbase treats client_order_id as an idempotency key: reusing one
             // already used for a since-cancelled order returns that SAME dead
             // order back with success: true, not a genuinely new one. Confirmed
@@ -402,15 +428,50 @@ async function processRemakeOrders () {
 }
 
 
-// Read-only order-book logger. Fetches Coinbase L2 for each distinct open
-// filled product, computes a near-mid imbalance, and stores a row in
-// book_snapshot. No buys/sells/cancels/remakes — observation only.
+
+// Shared near-mid book metrics for logging and buy gates.
+// imbalance in [-1,1]: +bid-heavy, -ask-heavy. bandPct default 0.5%.
+function computeBookMetrics (book, bandPct = 0.005) {
+    const bids = (book?.bids || []).map(x => ({ p: Number(x.price), s: Number(x.size) }))
+        .filter(x => Number.isFinite(x.p) && Number.isFinite(x.s))
+    const asks = (book?.asks || []).map(x => ({ p: Number(x.price), s: Number(x.size) }))
+        .filter(x => Number.isFinite(x.p) && Number.isFinite(x.s))
+    if (!bids.length || !asks.length) return null
+    const bestBid = bids[0].p
+    const bestAsk = asks[0].p
+    const mid = (bestBid + bestAsk) / 2
+    if (!(mid > 0)) return null
+    const band = mid * bandPct
+    const nearBidUsd = bids.filter(b => b.p >= mid - band)
+        .reduce((sum, lvl) => sum + lvl.p * lvl.s, 0)
+    const nearAskUsd = asks.filter(a => a.p <= mid + band)
+        .reduce((sum, lvl) => sum + lvl.p * lvl.s, 0)
+    if (!Number.isFinite(nearBidUsd) || !Number.isFinite(nearAskUsd)) return null
+    const denom = nearBidUsd + nearAskUsd
+    const imbalance = denom > 0 ? (nearBidUsd - nearAskUsd) / denom : 0
+    const spreadPct = ((bestAsk - bestBid) / mid) * 100
+    return {
+        bestBid, bestAsk, mid, spreadPct, nearBidUsd, nearAskUsd,
+        imbalance, bandPct, bidLevels: bids.length, askLevels: asks.length
+    }
+}
+
+// Buy gates from live L2 (same thresholds as offered in chat):
+// - Skip place when imbalance < -0.4 (ask-heavy)
+// - Skip place when spread is wide OR near ask notional is thin vs this clip
+// Prefer (+0.2) is handled in thee_procedure ORDER BY, not here.
+const BOOK_SKIP_IMBALANCE = -0.4
+const BOOK_MAX_SPREAD_PCT = 0.75
+const BOOK_MIN_ASK_NOTIONAL_MULT = 5 // near_ask_usd must be >= 5x clip notional
+
+// Read-only order-book logger + food for next-cycle SQL prefer.
+// Logs open fills AND pending buys. No place/cancel here.
 async function processBookSnapshots () {
     try {
         const rows = await db.executeQuery(`
             SELECT DISTINCT ON (p.name) p.name, p.stock_id
             FROM position p
-            WHERE p.buy_filled_price IS NOT NULL
+            WHERE p.buy_order_id IS NOT NULL
             AND p.sell_filled_price IS NULL
             ORDER BY p.name
         `)
@@ -418,32 +479,13 @@ async function processBookSnapshots () {
             console.log('Book snapshots: 0 products')
             return
         }
-        // Cap per cycle so a fat book cannot burn the whole minute on L2 calls
-        // (private API already throttled to ~10/sec in coinbaseAuth).
         const MAX_PER_CYCLE = 40
         const targets = rows.slice(0, MAX_PER_CYCLE)
-        const bandPct = 0.005 // 0.5% around mid
         let logged = 0
         for (const row of targets) {
             const book = await ca.getProductBook(row.name, 20)
-            const bids = (book?.bids || []).map(x => ({ p: Number(x.price), s: Number(x.size) }))
-                .filter(x => Number.isFinite(x.p) && Number.isFinite(x.s))
-            const asks = (book?.asks || []).map(x => ({ p: Number(x.price), s: Number(x.size) }))
-                .filter(x => Number.isFinite(x.p) && Number.isFinite(x.s))
-            if (!bids.length || !asks.length) continue
-            const bestBid = bids[0].p
-            const bestAsk = asks[0].p
-            const mid = (bestBid + bestAsk) / 2
-            if (!(mid > 0)) continue
-            const band = mid * bandPct
-            const nearBidUsd = bids.filter(b => b.p >= mid - band)
-                .reduce((sum, lvl) => sum + lvl.p * lvl.s, 0)
-            const nearAskUsd = asks.filter(a => a.p <= mid + band)
-                .reduce((sum, lvl) => sum + lvl.p * lvl.s, 0)
-            if (!Number.isFinite(nearBidUsd) || !Number.isFinite(nearAskUsd)) continue
-            const denom = nearBidUsd + nearAskUsd
-            const imbalance = denom > 0 ? (nearBidUsd - nearAskUsd) / denom : 0
-            const spreadPct = ((bestAsk - bestBid) / mid) * 100
+            const m = computeBookMetrics(book)
+            if (!m) continue
             await db.executeQuery(`
                 INSERT INTO book_snapshot (
                     stock_id, name, best_bid, best_ask, mid, spread_pct,
@@ -452,20 +494,20 @@ async function processBookSnapshots () {
                 ) VALUES (
                     ${Number(row.stock_id)},
                     '${String(row.name).replace(/'/g, "''")}',
-                    ${bestBid}, ${bestAsk}, ${mid}, ${spreadPct},
-                    ${nearBidUsd}, ${nearAskUsd}, ${imbalance}, ${bandPct},
-                    ${bids.length}, ${asks.length}, NOW()
+                    ${m.bestBid}, ${m.bestAsk}, ${m.mid}, ${m.spreadPct},
+                    ${m.nearBidUsd}, ${m.nearAskUsd}, ${m.imbalance}, ${m.bandPct},
+                    ${m.bidLevels}, ${m.askLevels}, NOW()
                 )
             `)
             logged++
         }
-        // Keep ~48h of history (same spirit as price ticks, not forever).
         await db.executeQuery(`DELETE FROM book_snapshot WHERE date_created < NOW() - INTERVAL '48 hours'`)
-        console.log(`Book snapshots: ${logged}/${targets.length} logged (open-fill products, cap ${MAX_PER_CYCLE})`)
+        console.log(`Book snapshots: ${logged}/${targets.length} logged (cap ${MAX_PER_CYCLE})`)
     } catch (error) {
         console.log('processBookSnapshots() ERROR', error)
     }
 }
+
 
 async function processPriceData () {
     try{

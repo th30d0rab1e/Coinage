@@ -163,6 +163,13 @@ LEFT JOIN position p ON p.stock_id = s.stock_id
     AND p.period_type = 'day'
     AND p.buy_order_id IS NOT NULL
     AND p.buy_filled_price IS NULL
+LEFT JOIN LATERAL (
+    SELECT bs.imbalance
+    FROM book_snapshot bs
+    WHERE bs.name = s.name
+    ORDER BY bs.date_created DESC
+    LIMIT 1
+) book ON TRUE
 WHERE b.name = 'USD'
 AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
 AND b.available > (
@@ -203,7 +210,13 @@ AND (
     WHERE open_pos.buy_filled_price IS NOT NULL
     AND open_pos.sell_filled_price IS NULL
 ) < COALESCE((SELECT value::int FROM config WHERE key = 'max_open_positions'), 60)
-ORDER BY s.priority DESC NULLS LAST
+-- Book gate: do not insert a new/add day buy when the latest L2 snapshot is
+-- ask-heavy. Prefer bid-heavy (+0.2) via ORDER BY below. NULL snapshot = allow.
+AND (book.imbalance IS NULL OR book.imbalance > -0.4)
+ORDER BY
+    CASE WHEN book.imbalance IS NOT NULL AND book.imbalance > 0.2 THEN 0 ELSE 1 END,
+    book.imbalance DESC NULLS LAST,
+    s.priority DESC NULLS LAST
 LIMIT 1;
 
 -- Buy again if current price has dropped below the MOST RECENT
@@ -254,6 +267,13 @@ SELECT
 FROM sized
 JOIN stock s ON s.stock_id = sized.stock_id
 CROSS JOIN vw_balance b
+LEFT JOIN LATERAL (
+    SELECT bs.imbalance
+    FROM book_snapshot bs
+    WHERE bs.name = s.name
+    ORDER BY bs.date_created DESC
+    LIMIT 1
+) book ON TRUE
 WHERE b.name = 'USD'
 AND b.available > sized.clip_usd
 AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
@@ -275,7 +295,11 @@ AND (
     WHERE open_pos.buy_filled_price IS NOT NULL
     AND open_pos.sell_filled_price IS NULL
 ) < COALESCE((SELECT value::int FROM config WHERE key = 'max_open_positions'), 60)
-ORDER BY s.priority DESC NULLS LAST
+AND (book.imbalance IS NULL OR book.imbalance > -0.4)
+ORDER BY
+    CASE WHEN book.imbalance IS NOT NULL AND book.imbalance > 0.2 THEN 0 ELSE 1 END,
+    book.imbalance DESC NULLS LAST,
+    s.priority DESC NULLS LAST
 LIMIT 1;
 
 -- Initial sell stop, floored at a breakeven price unconditionally — a
