@@ -526,4 +526,21 @@ ca.createTransfer = async function (amount, fromAccountId, toAccountId) {
 
 
 
+
+// Read-only L2 book for pressure logging (not used to place/cancel orders).
+ca.getProductBook = async function (productId, limit = 20) {
+    try {
+        const response = await getApiCall(
+            'GET',
+            '/api/v3/brokerage/product_book',
+            `?product_id=${encodeURIComponent(productId)}&limit=${limit}`,
+            null
+        )
+        return response?.data?.pricebook || response?.data || null
+    } catch (error) {
+        console.log('getProductBook()', productId, error?.response?.status, error?.response?.data || error.message)
+        return null
+    }
+}
+
 module.exports = ca;

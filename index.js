@@ -48,6 +48,10 @@ async function main () {
         //Remake Orders
         await processRemakeOrders();
 
+        // Read-only: log near-mid order-book imbalance for open fills.
+        // Does not place, cancel, or change any orders.
+        await processBookSnapshots();
+
     } catch (error) {
         console.log("main", error)
     } finally {
@@ -394,6 +398,71 @@ async function processRemakeOrders () {
         }
     } catch (error) {
         console.log("processRemakeOrders() ERROR", error)
+    }
+}
+
+
+// Read-only order-book logger. Fetches Coinbase L2 for each distinct open
+// filled product, computes a near-mid imbalance, and stores a row in
+// book_snapshot. No buys/sells/cancels/remakes — observation only.
+async function processBookSnapshots () {
+    try {
+        const rows = await db.executeQuery(`
+            SELECT DISTINCT ON (p.name) p.name, p.stock_id
+            FROM position p
+            WHERE p.buy_filled_price IS NOT NULL
+            AND p.sell_filled_price IS NULL
+            ORDER BY p.name
+        `)
+        if (!rows?.length) {
+            console.log('Book snapshots: 0 products')
+            return
+        }
+        // Cap per cycle so a fat book cannot burn the whole minute on L2 calls
+        // (private API already throttled to ~10/sec in coinbaseAuth).
+        const MAX_PER_CYCLE = 40
+        const targets = rows.slice(0, MAX_PER_CYCLE)
+        const bandPct = 0.005 // 0.5% around mid
+        let logged = 0
+        for (const row of targets) {
+            const book = await ca.getProductBook(row.name, 20)
+            const bids = (book?.bids || []).map(x => ({ p: Number(x.price), s: Number(x.size) }))
+                .filter(x => Number.isFinite(x.p) && Number.isFinite(x.s))
+            const asks = (book?.asks || []).map(x => ({ p: Number(x.price), s: Number(x.size) }))
+                .filter(x => Number.isFinite(x.p) && Number.isFinite(x.s))
+            if (!bids.length || !asks.length) continue
+            const bestBid = bids[0].p
+            const bestAsk = asks[0].p
+            const mid = (bestBid + bestAsk) / 2
+            if (!(mid > 0)) continue
+            const band = mid * bandPct
+            const nearBidUsd = bids.filter(b => b.p >= mid - band)
+                .reduce((a, b) => a + b.p * b.s, 0)
+            const nearAskUsd = asks.filter(a => a.p <= mid + band)
+                .reduce((a, b) => a + b.p * b.s, 0)
+            const denom = nearBidUsd + nearAskUsd
+            const imbalance = denom > 0 ? (nearBidUsd - nearAskUsd) / denom : 0
+            const spreadPct = ((bestAsk - bestBid) / mid) * 100
+            await db.executeQuery(`
+                INSERT INTO book_snapshot (
+                    stock_id, name, best_bid, best_ask, mid, spread_pct,
+                    near_bid_usd, near_ask_usd, imbalance, band_pct,
+                    bid_levels, ask_levels, date_created
+                ) VALUES (
+                    ${Number(row.stock_id)},
+                    '${String(row.name).replace(/'/g, "''")}',
+                    ${bestBid}, ${bestAsk}, ${mid}, ${spreadPct},
+                    ${nearBidUsd}, ${nearAskUsd}, ${imbalance}, ${bandPct},
+                    ${bids.length}, ${asks.length}, NOW()
+                )
+            `)
+            logged++
+        }
+        // Keep ~48h of history (same spirit as price ticks, not forever).
+        await db.executeQuery(`DELETE FROM book_snapshot WHERE date_created < NOW() - INTERVAL '48 hours'`)
+        console.log(`Book snapshots: ${logged}/${targets.length} logged (open-fill products, cap ${MAX_PER_CYCLE})`)
+    } catch (error) {
+        console.log('processBookSnapshots() ERROR', error)
     }
 }
 
