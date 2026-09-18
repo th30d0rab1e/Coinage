@@ -437,9 +437,10 @@ async function processBookSnapshots () {
             if (!(mid > 0)) continue
             const band = mid * bandPct
             const nearBidUsd = bids.filter(b => b.p >= mid - band)
-                .reduce((a, b) => a + b.p * b.s, 0)
+                .reduce((sum, lvl) => sum + lvl.p * lvl.s, 0)
             const nearAskUsd = asks.filter(a => a.p <= mid + band)
-                .reduce((a, b) => a + b.p * b.s, 0)
+                .reduce((sum, lvl) => sum + lvl.p * lvl.s, 0)
+            if (!Number.isFinite(nearBidUsd) || !Number.isFinite(nearAskUsd)) continue
             const denom = nearBidUsd + nearAskUsd
             const imbalance = denom > 0 ? (nearBidUsd - nearAskUsd) / denom : 0
             const spreadPct = ((bestAsk - bestBid) / mid) * 100
