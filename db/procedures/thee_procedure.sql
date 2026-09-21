@@ -189,7 +189,7 @@ AND b.available > (
 ) + 1
 AND s.period_type = 'year'
 AND p.buy_order_id IS NULL
-AND historical_avg_change_percent > 0
+AND s.historical_avg_change_percent > 0
 AND d.current_change_percent < d.historical_avg_change_percent
 AND stock.trading_disabled IS NOT TRUE
 AND (
