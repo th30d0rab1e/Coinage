@@ -170,6 +170,13 @@ LEFT JOIN LATERAL (
     ORDER BY bs.date_created DESC
     LIMIT 1
 ) book ON TRUE
+-- Day row of vw_signal: today's close-vs-yesterday % vs this coin's
+-- average historical day-over-day %. Keeps the year-basis priority pick
+-- (s.period_type = 'year') but blocks chase entries on hot days (e.g.
+-- MSOL up hard today while year signal still says BUY).
+JOIN vw_signal d
+  ON d.stock_id = s.stock_id
+ AND d.period_type = 'day'
 WHERE b.name = 'USD'
 AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
 AND b.available > (
@@ -183,6 +190,7 @@ AND b.available > (
 AND s.period_type = 'year'
 AND p.buy_order_id IS NULL
 AND historical_avg_change_percent > 0
+AND d.current_change_percent < d.historical_avg_change_percent
 AND stock.trading_disabled IS NOT TRUE
 AND (
     NOT EXISTS (
