@@ -1,0 +1,4 @@
+.venv/
+*.log
+coinage_interactive.html
+algo_price_orders.png
