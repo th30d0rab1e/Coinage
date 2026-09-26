@@ -162,6 +162,8 @@ async function processBuyOrders () {
             JOIN stock s ON s.stock_id = p.stock_id
             WHERE p.buy_coinbase_order_id IS NULL AND p.error_message IS NULL
             AND p.buy_filled_price IS NULL
+            -- 2026-09-25: never try to place on a delisted / trading-disabled coin
+            AND s.trading_disabled IS NOT TRUE
             ORDER BY s.priority DESC NULLS LAST
         `)
         console.log(`Buy Orders to Process: ${orders.length}`);
@@ -208,6 +210,16 @@ async function processBuyOrders () {
                 const errMsg = (response?.error_response?.message || 'unknown').replace(/'/g, "''")
                 await db.executeQuery(`UPDATE position SET error_message = '${errMsg}' WHERE buy_order_id = '${element.buy_order_id}'`)
                 console.log(`Buy Order FAILED: ${element.name}`, response)
+                // 2026-09-25: 'Invalid product_id' means the product no longer exists
+                // on Coinbase (delisted, e.g. LRC-USD) -- retrying can never succeed.
+                // Flag the coin so nothing picks it again, and drop this planned row.
+                // The DELETE is guarded so it can only remove a row that never
+                // filled and has no live Coinbase order (nothing real is lost).
+                if (response?.error_response?.message === 'Invalid product_id') {
+                    await db.executeQuery(`UPDATE stock SET trading_disabled = TRUE WHERE stock_id = ${Number(element.stock_id)}`)
+                    await db.executeQuery(`DELETE FROM position WHERE buy_order_id = '${element.buy_order_id}' AND buy_filled_price IS NULL AND buy_coinbase_order_id IS NULL`)
+                    console.log(`Delisted coin disabled, planned buy removed: ${element.name}`)
+                }
             }
         }
 

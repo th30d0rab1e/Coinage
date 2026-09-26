@@ -39,6 +39,24 @@ WHERE stock.name = bs.id
 AND bs.id LIKE '%-USD'
 AND bs.price != '';
 
+-- 2026-09-25: flag coins that have vanished from Coinbase's product catalog.
+-- The UPDATE above only touches stocks that still appear in bulk_stock, so a
+-- coin removed from the catalog entirely (LRC-USD) kept trading_disabled NULL
+-- and a frozen price forever -- the comment above assumed "not in the catalog"
+-- meant "never a candidate", but its already-inserted planned buy row was
+-- still retried every cycle, failing with 'Invalid product_id' (18,987 audit
+-- rows on position 787). Marking it disabled lets processBuyOrders and both
+-- INSERT gates skip it. Guarded on bulk_stock actually being populated
+-- (> 100 -USD products; normally ~400) so a failed/empty fetchProducts()
+-- can't mass-disable every coin. Self-healing: if a coin comes back, the
+-- UPDATE above resets trading_disabled from Coinbase's own flag next cycle.
+UPDATE stock
+SET trading_disabled = TRUE
+WHERE stock.name LIKE '%-USD'
+AND stock.trading_disabled IS NOT TRUE
+AND NOT EXISTS (SELECT 1 FROM bulk_stock bs WHERE bs.id = stock.name)
+AND (SELECT COUNT(*) FROM bulk_stock WHERE id LIKE '%-USD') > 100;
+
 -- Snapshot each stock's year-basis signal priority onto the stock row itself,
 -- as a priority marker for what to buy -- vw_signal's priority isn't
 -- otherwise persisted anywhere outside the view.
@@ -410,10 +428,15 @@ AND position.buy_filled_price IS NULL
 AND stock.price::numeric >= position.buy_stop_price::numeric;
 
 -- Clear error_message on unfilled buy positions instead of deleting them.
+-- 2026-09-25: except permanent rejections. Clearing 'Invalid product_id'
+-- every cycle made processBuyOrders retry a delisted coin (LRC-USD) forever;
+-- that error can never succeed on retry, so it is left in place and the row
+-- stays out of processBuyOrders' `error_message IS NULL` queue.
 UPDATE position SET error_message = NULL
 WHERE error_message IS NOT NULL
 AND buy_coinbase_order_id IS NULL
-AND buy_filled_price IS NULL;
+AND buy_filled_price IS NULL
+AND error_message NOT IN ('Invalid product_id');
 
 -- Step 1: match fills for either side of a position (buy or sell).
 -- Deliberately does not compute profit here -- that happens fresh in Step 2
