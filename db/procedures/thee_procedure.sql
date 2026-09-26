@@ -143,6 +143,27 @@ SET sell_coinbase_order_id = om.order_id
 FROM orphan_match om
 WHERE p.buy_order_id = om.pos_key;
 
+-- 2026-09-25: expire stale planned buys. A planned row that never got a
+-- Coinbase order (buy_coinbase_order_id NULL, never filled) sits in
+-- processBuyOrders' queue forever, failing INSUFFICIENT_FUND every cycle
+-- (USDS-USD had been planned since 8/13) and -- via the cash-backlog gate
+-- below -- blocking new picks. Delete it once its last activity (created,
+-- remade, placed, or released) is older than config.pending_buy_ttl_hours
+-- (default 24). The signal logic simply re-picks the coin later if it's
+-- still attractive. Never touches a row with a live Coinbase order: the
+-- NULL buy_coinbase_order_id check plus a match on client_order_id in the
+-- current open-orders snapshot (covers an order whose id was nulled while
+-- still live). The position_audit trigger logs each DELETE.
+DELETE FROM position p
+WHERE p.buy_coinbase_order_id IS NULL
+AND p.buy_filled_price IS NULL
+AND p.sell_coinbase_order_id IS NULL
+AND GREATEST(p.date_created, p.last_remade_at, p.buy_placed_at, p.buy_released_at)
+    < NOW() - make_interval(hours => COALESCE((SELECT value::int FROM config WHERE key = 'pending_buy_ttl_hours'), 24))
+AND NOT EXISTS (
+    SELECT 1 FROM bulk_open_orders o WHERE o.client_order_id = p.buy_order_id
+);
+
 -- New position: $1 into the highest year-basis-priority coin not already
 -- held, gated only on the coin's year-basis trend being positive -- no
 -- day-timing signal (recommendation / current-vs-average dip) and no
@@ -197,7 +218,17 @@ JOIN vw_signal d
  AND d.period_type = 'day'
 WHERE b.name = 'USD'
 AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
-AND b.available > (
+-- 2026-09-25 cash-backlog gate: free USD minus what is already promised to
+-- planned buys that have no live order yet. Previously only free USD was
+-- compared to the clip, so every brief cash bump (e.g. a far-buy release)
+-- inserted another planned row that then failed INSUFFICIENT_FUND forever.
+AND b.available
+    - COALESCE((SELECT SUM(pb.shares * pb.buy_price)::numeric
+                FROM position pb JOIN stock sb ON sb.stock_id = pb.stock_id
+                WHERE pb.buy_coinbase_order_id IS NULL
+                AND pb.buy_filled_price IS NULL
+                AND sb.trading_disabled IS NOT TRUE), 0)
+  > (
     SELECT COUNT(*)::numeric
     FROM position open_sz
     WHERE open_sz.stock_id = s.stock_id
@@ -301,7 +332,16 @@ LEFT JOIN LATERAL (
     LIMIT 1
 ) book ON TRUE
 WHERE b.name = 'USD'
-AND b.available > sized.clip_usd
+-- 2026-09-25 cash-backlog gate (same as the new-position insert above):
+-- don't add another planned buy the free cash can't cover once the
+-- existing no-order planned rows are funded.
+AND b.available
+    - COALESCE((SELECT SUM(pb.shares * pb.buy_price)::numeric
+                FROM position pb JOIN stock sb ON sb.stock_id = pb.stock_id
+                WHERE pb.buy_coinbase_order_id IS NULL
+                AND pb.buy_filled_price IS NULL
+                AND sb.trading_disabled IS NOT TRUE), 0)
+  > sized.clip_usd
 AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
 AND TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) < sized.last_filled_price
 AND s.trading_disabled IS NOT TRUE
