@@ -164,6 +164,11 @@ async function processBuyOrders () {
             AND p.buy_filled_price IS NULL
             -- 2026-09-25: never try to place on a delisted / trading-disabled coin
             AND s.trading_disabled IS NOT TRUE
+            -- 2026-09-25: cooldown -- a row processFarBuyCashRelease just cancelled
+            -- to free cash is not re-placed for 30 min, so the freed cash actually
+            -- reaches the higher-priority row it was released for (previously the
+            -- same ETC/TRB/ATOM orders were re-placed the very next minute).
+            AND (p.buy_released_at IS NULL OR p.buy_released_at < NOW() - INTERVAL '30 minutes')
             ORDER BY s.priority DESC NULLS LAST
         `)
         console.log(`Buy Orders to Process: ${orders.length}`);
@@ -204,7 +209,8 @@ async function processBuyOrders () {
             const newOrderId = crypto.randomUUID()
             let response = await ca.createStopLimitOrder('buy', element.buy_price, element.shares, element.name, element.buy_stop_price, newOrderId);
             if(response?.success == true) {
-                await db.executeQuery(`UPDATE position SET buy_order_id = '${newOrderId}', buy_coinbase_order_id = '${response.success_response.order_id}' WHERE buy_order_id = '${element.buy_order_id}'`)
+                // buy_placed_at (2026-09-25): order age, so far-release won't cancel a fresh order
+                await db.executeQuery(`UPDATE position SET buy_order_id = '${newOrderId}', buy_coinbase_order_id = '${response.success_response.order_id}', buy_placed_at = NOW() WHERE buy_order_id = '${element.buy_order_id}'`)
                 console.log(`Buy Order Created: ${element.name} | shares: ${element.shares} | price: ${element.buy_price}`)
             } else {
                 const errMsg = (response?.error_response?.message || 'unknown').replace(/'/g, "''")
@@ -323,29 +329,91 @@ async function processFarBuyCashRelease () {
         if (available > 1) {
             return;
         }
+        // ---- 2026-09-25 loop fix ------------------------------------------
+        // Every planned buy is priced 5% above market (thee_procedure), so every
+        // live buy always looked "far" and this cancelled 3 orders every time
+        // cash was low -- then processBuyOrders re-placed the SAME orders the next
+        // minute (they were the highest-priority pending rows), an endless
+        // cancel/re-place loop with no benefit. Now we only release cash when:
+        //   1. there is a beneficiary: a pending row with no live order (not in
+        //      its own 30-min cooldown) that processBuyOrders would place;
+        //   2. each victim has LOWER priority than that beneficiary (a genuine
+        //      swap toward something better, never a lateral churn);
+        //   3. each victim order is at least 30 min old (buy_placed_at);
+        //   4. free cash + the victims' holds would actually cover the
+        //      beneficiary's clip (otherwise the cancel achieves nothing).
+        const FAR_BUY_MIN_AGE_MIN = 30
+        const FEE_PAD = 1.012   // clip/hold estimate incl. ~1.2% taker fee
+        const beneficiaries = await db.executeQuery(`
+            -- pending buys with no live order, same eligibility/order as processBuyOrders
+            SELECT p.buy_order_id, p.name, COALESCE(s.priority, 0)::numeric AS priority,
+                   (p.shares * p.buy_price)::numeric * ${FEE_PAD} AS clip
+            FROM position p
+            JOIN stock s ON s.stock_id = p.stock_id
+            -- latest L2 snapshot (processBookSnapshots runs just before this)
+            LEFT JOIN LATERAL (
+                SELECT bs.imbalance, bs.spread_pct, bs.near_ask_usd
+                FROM book_snapshot bs
+                WHERE bs.name = p.name AND bs.date_created > NOW() - INTERVAL '10 minutes'
+                ORDER BY bs.date_created DESC
+                LIMIT 1
+            ) book ON TRUE
+            WHERE p.buy_coinbase_order_id IS NULL
+            AND p.buy_filled_price IS NULL
+            AND s.trading_disabled IS NOT TRUE
+            AND (p.error_message IS NULL OR p.error_message NOT IN ('Invalid product_id'))
+            AND (p.buy_released_at IS NULL OR p.buy_released_at < NOW() - INTERVAL '30 minutes')
+            -- same book gates processBuyOrders applies before placing; a row it
+            -- would just defer (e.g. DEXT's chronic wide spread) is not a real
+            -- beneficiary -- releasing cash for it would hand the cash to some
+            -- lower-priority row instead. No snapshot = allow (processBuyOrders
+            -- also fails open).
+            AND (book.imbalance  IS NULL OR book.imbalance >= ${BOOK_SKIP_IMBALANCE})
+            AND (book.spread_pct IS NULL OR book.spread_pct <= ${BOOK_MAX_SPREAD_PCT})
+            AND (book.near_ask_usd IS NULL OR book.near_ask_usd >= (p.shares * p.buy_price) * ${BOOK_MIN_ASK_NOTIONAL_MULT})
+            ORDER BY s.priority DESC NULLS LAST
+            LIMIT 1
+        `)
+        if (!beneficiaries.length) {
+            console.log(`processFarBuyCashRelease() skipped: $${available.toFixed(2)} free but no pending buy would use released cash`)
+            return
+        }
+        const best = beneficiaries[0]
         const orders = await db.executeQuery(`
             SELECT p.buy_order_id, p.name, p.buy_coinbase_order_id, p.buy_stop_price, s.price AS market,
-                (p.buy_stop_price::numeric - s.price::numeric) / NULLIF(s.price::numeric, 0) AS gap_pct
+                (p.buy_stop_price::numeric - s.price::numeric) / NULLIF(s.price::numeric, 0) AS gap_pct,
+                (p.shares * p.buy_price)::numeric * ${FEE_PAD} AS hold_est
             FROM position p
             JOIN stock s ON s.stock_id = p.stock_id
             WHERE p.buy_coinbase_order_id IS NOT NULL
             AND p.buy_filled_price IS NULL
             AND p.buy_stop_price > s.price
+            -- only swap for something better than the order being cancelled
+            AND COALESCE(s.priority, 0)::numeric < ${Number(best.priority)}
+            -- never cancel a fresh order (NULL = placed before this column existed)
+            AND (p.buy_placed_at IS NULL OR p.buy_placed_at < NOW() - INTERVAL '${FAR_BUY_MIN_AGE_MIN} minutes')
             ORDER BY gap_pct DESC NULLS LAST
             LIMIT ${FAR_BUY_CANCEL_LIMIT}
         `)
         if (!orders.length) {
-            console.log(`processFarBuyCashRelease() skipped: only $${available.toFixed(2)} free but no far buy stops`)
+            console.log(`processFarBuyCashRelease() skipped: $${available.toFixed(2)} free, no older/lower-priority buy stop to swap for ${best.name}`)
             return
         }
+        const freeable = orders.reduce((sum, o) => sum + Number(o.hold_est), 0)
+        if (available + freeable < Number(best.clip)) {
+            console.log(`processFarBuyCashRelease() skipped: releasing $${freeable.toFixed(2)} still can't cover ${best.name} clip $${Number(best.clip).toFixed(2)}`)
+            return
+        }
+        // --------------------------------------------------------------------
         console.log(`processFarBuyCashRelease(): $${available.toFixed(2)} free — canceling ${orders.length} farthest buy stop(s)`)
         for (let i = 0; i < orders.length; i++) {
             const element = orders[i]
             const cancelResponse = await ca.cancelOrder(element.buy_coinbase_order_id)
             if (cancelResponse == true) {
                 // Leave error_message NULL so processBuyOrders can heal once cash returns.
-                await db.executeQuery(`UPDATE position SET buy_coinbase_order_id = NULL, error_message = NULL WHERE buy_order_id = '${element.buy_order_id}'`)
-                console.log(`Far Buy Cancelled: ${element.name} | gap: ${(Number(element.gap_pct)*100).toFixed(1)}% | stop: ${element.buy_stop_price} | mkt: ${element.market}`)
+                // buy_released_at (2026-09-25) starts the 30-min re-place cooldown.
+                await db.executeQuery(`UPDATE position SET buy_coinbase_order_id = NULL, error_message = NULL, buy_released_at = NOW() WHERE buy_order_id = '${element.buy_order_id}'`)
+                console.log(`Far Buy Cancelled: ${element.name} | gap: ${(Number(element.gap_pct)*100).toFixed(1)}% | stop: ${element.buy_stop_price} | mkt: ${element.market} | for: ${best.name}`)
             } else {
                 console.log(`Far Buy Cancel FAILED: ${element.name}`, cancelResponse)
             }
@@ -406,7 +474,7 @@ async function processRemakeOrders () {
                 }
                 if(reMakeResponse?.success == true) {
                     if(element.order_type === 'buy') {
-                        await db.executeQuery(`UPDATE position SET buy_order_id = '${newOrderId}', buy_coinbase_order_id = '${reMakeResponse.success_response.order_id}', buy_stop_price = ${element.new_stop_price}, buy_price = ${element.order_price}, buy_counter = buy_counter + 1, last_remade_at = NOW(), error_message = NULL WHERE buy_order_id = '${element.buy_order_id}'`)
+                        await db.executeQuery(`UPDATE position SET buy_order_id = '${newOrderId}', buy_coinbase_order_id = '${reMakeResponse.success_response.order_id}', buy_stop_price = ${element.new_stop_price}, buy_price = ${element.order_price}, buy_counter = buy_counter + 1, last_remade_at = NOW(), buy_placed_at = NOW(), error_message = NULL WHERE buy_order_id = '${element.buy_order_id}'`)
                     } else {
                         // sell_price intentionally absent: it's frozen (see
                         // vw_edit_orders.sql), and element.order_price is

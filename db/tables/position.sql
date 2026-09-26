@@ -21,5 +21,10 @@ CREATE TABLE IF NOT EXISTS public.position (
     daily_sell             boolean NOT NULL DEFAULT false,
     sell_counter           integer NOT NULL DEFAULT 0,
     buy_counter            integer NOT NULL DEFAULT 0,
-    last_remade_at         timestamp without time zone
+    last_remade_at         timestamp without time zone,
+    -- 2026-09-25 (migrations/2026-09-25_buy_placed_released_at.sql):
+    -- when the current buy order was created/remade, and when far-buy cash
+    -- release last cancelled it. Used to stop the place/cancel loop.
+    buy_placed_at          timestamp without time zone,
+    buy_released_at        timestamp without time zone
 );
