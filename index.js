@@ -236,7 +236,12 @@ async function processBuyOrders () {
 
 async function processSellOrders () {
     try {
-        const orders = await db.executeQuery(`SELECT p.*, s.price AS current_price, s.price_rounding FROM position p JOIN stock s ON p.stock_id = s.stock_id WHERE p.buy_filled_price IS NOT NULL AND p.sell_coinbase_order_id IS NULL AND p.sell_price IS NOT NULL;`)
+        // Skip underwater bags: when the current price is at or below the fee-floor
+        // stop, Coinbase rejects a STOP_DOWN stop-limit
+        // (PREVIEW_STOP_PRICE_ABOVE_LAST_TRADE_PRICE), so trying only burns two API
+        // calls per bag and floods the log. A NULL price still goes through so
+        // missing price data never leaves a bag without a sell attempt.
+        const orders = await db.executeQuery(`SELECT p.*, s.price AS current_price, s.price_rounding FROM position p JOIN stock s ON p.stock_id = s.stock_id WHERE p.buy_filled_price IS NOT NULL AND p.sell_coinbase_order_id IS NULL AND p.sell_price IS NOT NULL AND (s.price IS NULL OR s.price > p.sell_stop_price);`)
         console.log(`Sell Orders to Process: ${orders.length}`);
         for(let i = 0; i < orders.length; i++) {
             let element = orders[i];
