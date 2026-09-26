@@ -415,25 +415,77 @@ WHERE error_message IS NOT NULL
 AND buy_coinbase_order_id IS NULL
 AND buy_filled_price IS NULL;
 
--- Step 1: match fills for either side of a position (buy or sell) against
--- this cycle's bulk_fills. Deliberately does not compute profit here — that
--- happens fresh in Step 2 from position's own stored columns, decoupled
--- from this statement, so a NULL fee here can never silently block the
--- close-out the way it used to (buy_fee NULL -> profit NULL -> position
--- stuck forever with no way back in).
--- Also retries fee alone even after the price is already filled in: Coinbase
--- can return a fill with price known but commission not yet settled, and
--- without this the fee would stay NULL forever since nothing else ever
--- rechecks a row once buy_filled_price/sell_filled_price is no longer NULL.
+-- Step 1: match fills for either side of a position (buy or sell).
+-- Deliberately does not compute profit here -- that happens fresh in Step 2
+-- from position's own stored columns, decoupled from this statement, so a
+-- NULL fee here can never silently block the close-out the way it used to.
+--
+-- 2026-09-25 rewrite (was: UPDATE ... FROM bulk_fills with `bf.fee > 0`):
+--  * Source is the permanent `fills` ledger (archived from bulk_fills at the
+--    top of this procedure), not bulk_fills. bulk_fills only holds Coinbase's
+--    recent-fills window, so a fill whose fee/price wasn't captured in that
+--    window (e.g. PAX 468/578) could never be matched again.
+--  * Aggregated per order: an order can fill in several partial fills, and
+--    UPDATE ... FROM bulk_fills picked ONE arbitrary fill row -- so price was
+--    one partial's price and fee was one partial's fee (understated, e.g.
+--    MAMO 568 fee 0.00043 vs 0.00188 actual). Now price = size-weighted VWAP
+--    across all fills of the order, fee = SUM of all their commissions.
+--  * A zero fee is accepted. Coinbase charges $0 on some maker fills (PAX),
+--    and the old `fee > 0` test left sell_fee NULL forever, so Step 2 never
+--    recorded the close and Step 3 never deleted the row. Because Coinbase
+--    can briefly report commission 0 before it settles, a 0 fee is only
+--    accepted once the order's last fill is > 15 minutes old.
+--  * The fee is finalized only once the order is fully filled (filled size
+--    covers position.shares), so a first partial fill can't lock in a
+--    partial fee. Fallback: if the order's last fill is > 1 day old, accept
+--    whatever filled (a partially-filled-then-cancelled order must not
+--    block the close-out forever).
+--  * Filled price keeps refreshing to the latest VWAP until the fee is
+--    finalized (i.e. while partial fills are still arriving);
+--    buy_filled_date is still stamped only on the first match.
+--  * Buy and sell aggregates are joined separately (fb / fs) so a position
+--    whose buy and sell orders both have fills is updated deterministically
+--    in one pass instead of depending on which join row Postgres picks.
+WITH f AS (
+    SELECT order_id,
+           SUM(price * size) / NULLIF(SUM(size), 0) AS vwap,        -- size-weighted avg price over partial fills
+           SUM(size)                                AS filled_size, -- total base filled so far
+           SUM(fee)                                 AS fee,         -- total commission across partial fills
+           MAX(trade_time)                          AS last_fill    -- most recent partial fill
+    FROM fills
+    GROUP BY order_id
+),
+m AS (
+    SELECT p.position_id,
+           fb.vwap AS b_vwap, fs.vwap AS s_vwap,
+           -- buy fee is final when: fully filled AND (fee > 0 OR fill settled > 15 min),
+           -- or the order simply stopped filling > 1 day ago
+           CASE WHEN fb.order_id IS NOT NULL AND (
+                    (fb.filled_size >= p.shares::numeric * 0.999
+                        AND (fb.fee > 0 OR fb.last_fill < NOW() - INTERVAL '15 minutes'))
+                    OR fb.last_fill < NOW() - INTERVAL '1 day')
+                THEN fb.fee END AS b_fee_final,
+           -- same rule for the sell side
+           CASE WHEN fs.order_id IS NOT NULL AND (
+                    (fs.filled_size >= p.shares::numeric * 0.999
+                        AND (fs.fee > 0 OR fs.last_fill < NOW() - INTERVAL '15 minutes'))
+                    OR fs.last_fill < NOW() - INTERVAL '1 day')
+                THEN fs.fee END AS s_fee_final
+    FROM position p
+    LEFT JOIN f fb ON fb.order_id = p.buy_coinbase_order_id
+    LEFT JOIN f fs ON fs.order_id = p.sell_coinbase_order_id
+    -- only rows that still have something to fill in
+    WHERE (fb.order_id IS NOT NULL AND (p.buy_filled_price  IS NULL OR p.buy_fee  IS NULL))
+       OR (fs.order_id IS NOT NULL AND (p.sell_filled_price IS NULL OR p.sell_fee IS NULL))
+)
 UPDATE position
-SET buy_filled_price  = CASE WHEN position.buy_filled_price IS NULL AND bf.order_id = position.buy_coinbase_order_id THEN bf.price ELSE position.buy_filled_price END,
-    buy_fee            = CASE WHEN position.buy_fee IS NULL AND bf.order_id = position.buy_coinbase_order_id AND bf.fee > 0 THEN bf.fee ELSE position.buy_fee END,
-    buy_filled_date    = CASE WHEN position.buy_filled_price IS NULL AND bf.order_id = position.buy_coinbase_order_id THEN NOW() ELSE position.buy_filled_date END,
-    sell_filled_price  = CASE WHEN position.sell_filled_price IS NULL AND bf.order_id = position.sell_coinbase_order_id THEN bf.price ELSE position.sell_filled_price END,
-    sell_fee           = CASE WHEN position.sell_fee IS NULL AND bf.order_id = position.sell_coinbase_order_id AND bf.fee > 0 THEN bf.fee ELSE position.sell_fee END
-FROM bulk_fills bf
-WHERE (bf.order_id = position.buy_coinbase_order_id AND (position.buy_filled_price IS NULL OR position.buy_fee IS NULL))
-   OR (bf.order_id = position.sell_coinbase_order_id AND (position.sell_filled_price IS NULL OR position.sell_fee IS NULL));
+SET buy_filled_price  = CASE WHEN m.b_vwap IS NOT NULL AND position.buy_fee  IS NULL THEN m.b_vwap ELSE position.buy_filled_price END,
+    buy_filled_date   = CASE WHEN m.b_vwap IS NOT NULL AND position.buy_filled_price IS NULL THEN NOW() ELSE position.buy_filled_date END,
+    buy_fee           = COALESCE(position.buy_fee,  m.b_fee_final),
+    sell_filled_price = CASE WHEN m.s_vwap IS NOT NULL AND position.sell_fee IS NULL THEN m.s_vwap ELSE position.sell_filled_price END,
+    sell_fee          = COALESCE(position.sell_fee, m.s_fee_final)
+FROM m
+WHERE position.position_id = m.position_id;
 
 -- Step 2: record any fully bought-and-sold position into profit_history,
 -- computing profit fresh from position's current buy/sell price and fee
