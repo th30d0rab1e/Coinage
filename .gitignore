@@ -2,3 +2,6 @@ node_modules/
 outputLog.txt
 modules/config.js
 .claude/
+
+# local DB backups (pg_dump) -- never commit
+backups/
