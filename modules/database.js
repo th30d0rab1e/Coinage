@@ -286,7 +286,10 @@ con.insertFills = async function (data) {
 
 con.fetchNextHistorical = async function () {
   try {
-    let query = `SELECT stock_id, name, COALESCE(historical_last_date, NOW()::DATE) as end_date, COALESCE(historical_last_date, NOW()::DATE) - INTERVAL '350 days' AS start_date FROM stock order by historical_finished, RANDOM() limit 1;`
+    // Skip delisted coins (trading_disabled): Coinbase answers 'ProductID is
+    // invalid' for their candles, so picking one just wastes this minute's
+    // backfill slot and logs an error.
+    let query = `SELECT stock_id, name, COALESCE(historical_last_date, NOW()::DATE) as end_date, COALESCE(historical_last_date, NOW()::DATE) - INTERVAL '350 days' AS start_date FROM stock WHERE trading_disabled IS NOT TRUE order by historical_finished, RANDOM() limit 1;`
     let results = await con.query(query);
     return results.rows;
     console.log(results)
