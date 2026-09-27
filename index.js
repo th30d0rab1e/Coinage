@@ -53,6 +53,12 @@ async function main () {
         //Remake Orders
         await processRemakeOrders();
 
+        // Re-take the open-orders copy AFTER all place/cancel/re-place calls,
+        // so bulk_open_orders (and vw_position_order_balance_audit) matches what
+        // position now points at between runs. Without this, every re-place shows
+        // up as a fake ghost + orphan pair until the next run. Costs 1 API call.
+        await processOpenOrders();
+
 
     } catch (error) {
         console.log("main", error)
@@ -87,6 +93,12 @@ async function processNewFills () {
 async function processOpenOrders () {
     try {
         let results = await ca.gatherOrders();
+        // gatherOrders() returns undefined on an API error (e.g. the 502 at 4:23 AM CT 9/26).
+        // Log it clearly and keep last run's copy instead of crashing at results.length.
+        if (!Array.isArray(results)) {
+            console.log("processOpenOrders() ERROR: gatherOrders returned no data; bulk_open_orders left stale");
+            return;
+        }
         let buyCount = 0, sellCount = 0, buyAmount = 0, sellAmount = 0;
         for (let i = 0; i < results.length; i++) {
             const element = results[i];
