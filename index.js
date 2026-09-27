@@ -185,8 +185,27 @@ async function processBuyOrders () {
         `)
         console.log(`Buy Orders to Process: ${orders.length}`);
 
+        // 2026-09-27 affordability gate: the $1 check above and the cash-backlog
+        // gate in thee_procedure only stop NEW planned rows from being inserted;
+        // nothing checked whether each already-planned row fits in free cash, so
+        // e.g. MON 1003 (234 @ ~$6.41) was sent every minute and Coinbase rejected
+        // it INSUFFICIENT_FUND (~90 log lines/hour). Compare each row's cost plus
+        // fee pad against AVAILABLE USD (available_balance excludes cash already
+        // held by other open buy orders) and skip it this cycle if it doesn't fit.
+        // The row is left as-is (not deleted, no error_message) so it places once
+        // cash frees up, or expires via thee_procedure's 24h TTL. cashLeft is
+        // decremented after each successful create so later rows in the same run
+        // don't count the same dollars twice.
+        const BUY_FEE_PAD = 1.012   // same ~1.2% taker-fee pad as processFarBuyCashRelease
+        let cashLeft = available
+
         for (i = 0; i < orders.length; i++) {
             const element = orders[i];
+            const cost = Number(element.buy_price) * Number(element.shares) * BUY_FEE_PAD
+            if (cost > cashLeft) {
+                console.log(`Skip buy ${element.name}: cost $${cost.toFixed(2)} > available $${cashLeft.toFixed(2)}`)
+                continue
+            }
             // Live L2 gate before create — skip this cycle (leave row pending,
             // no error_message) so a bad book can clear without blocking forever.
             try {
@@ -224,6 +243,8 @@ async function processBuyOrders () {
                 // buy_placed_at (2026-09-25): order age, so far-release won't cancel a fresh order
                 await db.executeQuery(`UPDATE position SET buy_order_id = '${newOrderId}', buy_coinbase_order_id = '${response.success_response.order_id}', buy_placed_at = NOW() WHERE buy_order_id = '${element.buy_order_id}'`)
                 console.log(`Buy Order Created: ${element.name} | shares: ${element.shares} | price: ${element.buy_price}`)
+                // this order's hold now comes out of free USD for the rest of the loop
+                cashLeft -= cost
             } else {
                 const errMsg = (response?.error_response?.message || 'unknown').replace(/'/g, "''")
                 await db.executeQuery(`UPDATE position SET error_message = '${errMsg}' WHERE buy_order_id = '${element.buy_order_id}'`)
