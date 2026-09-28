@@ -181,6 +181,12 @@ async function processBuyOrders () {
             -- reaches the higher-priority row it was released for (previously the
             -- same ETC/TRB/ATOM orders were re-placed the very next minute).
             AND (p.buy_released_at IS NULL OR p.buy_released_at < NOW() - INTERVAL '30 minutes')
+            -- 2026-09-27: only place a buy while price is below its trigger. A
+            -- bounce-buy (stop) must sit above current price or Coinbase rejects
+            -- it. When thee_procedure's add-on cap puts a trigger below the
+            -- current price, the row waits here until price drops under it
+            -- instead of being rejected every minute.
+            AND s.price < p.buy_stop_price
             ORDER BY s.priority DESC NULLS LAST
         `)
         console.log(`Buy Orders to Process: ${orders.length}`);
@@ -401,6 +407,9 @@ async function processFarBuyCashRelease () {
             AND s.trading_disabled IS NOT TRUE
             AND (p.error_message IS NULL OR p.error_message NOT IN ('Invalid product_id'))
             AND (p.buy_released_at IS NULL OR p.buy_released_at < NOW() - INTERVAL '30 minutes')
+            -- 2026-09-27: same price gate as processBuyOrders -- a capped add-on
+            -- buy waiting for price to drop is not a real beneficiary yet.
+            AND s.price < p.buy_stop_price
             -- same book gates processBuyOrders applies before placing; a row it
             -- would just defer (e.g. DEXT's chronic wide spread) is not a real
             -- beneficiary -- releasing cash for it would hand the cash to some

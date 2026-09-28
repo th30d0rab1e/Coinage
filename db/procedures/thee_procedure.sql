@@ -467,6 +467,30 @@ AND position.buy_coinbase_order_id IS NULL
 AND position.buy_filled_price IS NULL
 AND stock.price::numeric >= position.buy_stop_price::numeric;
 
+-- 2026-09-27 add-on buy cap: a buy on a coin you already hold must never be
+-- priced above your cheapest open bag. Plans are set 5% above market and the
+-- reset step just above can raise them again, so OCEAN bag 939 filled at
+-- 0.1718 even though bag 926 was bought at 0.1695. This caps the trigger at
+-- config.add_buy_cap_ratio (default 0.99 = 1% below) times the cheapest open
+-- bag, with the limit 1% above that trigger (0.99 * 1.01 = 0.9999, still
+-- below the bag). Only buys not yet sent to Coinbase are touched; live orders
+-- are only ever lowered by the remake step. processBuyOrders then waits to
+-- place a capped buy until price is below its trigger.
+UPDATE position p
+SET buy_stop_price = TRUNC(c.min_fill * cap.ratio,        s.price_rounding::integer),
+    buy_price      = TRUNC(c.min_fill * cap.ratio * 1.01, s.price_rounding::integer)
+FROM stock s,
+     (SELECT stock_id, MIN(buy_filled_price)::numeric AS min_fill
+      FROM position
+      WHERE buy_filled_price IS NOT NULL AND sell_filled_price IS NULL
+      GROUP BY stock_id) c,
+     (SELECT COALESCE((SELECT value::numeric FROM config WHERE key = 'add_buy_cap_ratio'), 0.99) AS ratio) cap
+WHERE p.stock_id = s.stock_id
+AND c.stock_id = p.stock_id
+AND p.buy_coinbase_order_id IS NULL
+AND p.buy_filled_price IS NULL
+AND p.buy_stop_price::numeric > c.min_fill * cap.ratio;
+
 -- Clear error_message on unfilled buy positions instead of deleting them.
 -- 2026-09-25: except permanent rejections. Clearing 'Invalid product_id'
 -- every cycle made processBuyOrders retry a delisted coin (LRC-USD) forever;
