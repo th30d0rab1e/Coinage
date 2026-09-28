@@ -40,6 +40,46 @@
 -- peaked at a 0.01303 stop (locked $0.41), then that branch walked it back
 -- down to 0.01257 ($0.34) over several remakes as price merely dipped, not
 -- reversed.)
+--
+-- 2026-09-28 -- two fixes to the SELL branches only (buy branch untouched):
+--
+-- FIX 1 (profit gate used the OLD limit): the sell WHERE clause gated a
+-- remake on net profit computed at p.sell_price -- the frozen original
+-- limit, which never changes. So a bag whose original limit nets less than
+-- the period's average profit_history.profit (~$0.02 for 'day') could NEVER
+-- be remade upward, no matter how far price rose. Confirmed on PUMP-USD
+-- (position 1033): limit 0.004566 nets ~$0.015 (< $0.020 avg), price had
+-- run to ~0.00492 (would net ~$0.09 at a new stop) and the stop sat stuck
+-- at 0.004612. The gate (both the > 0 and the > avg checks) and
+-- estimated_profit are now computed at the NEW stop price this branch
+-- would actually place (ns.new_stop below, after FIX 2's cap).
+-- Why the stop and not the limit: index.js processRemakeOrders() sends
+-- order_price (= frozen p.sell_price) as the limit and new_stop_price as
+-- the stop, unchanged. Once the stop triggers, the limit sell fills at the
+-- market (~the stop), with p.sell_price only as the worst-case floor.
+-- That floor was already set at breakeven-or-better by thee_procedure()
+-- and is still never recomputed here, so no-loss protection is unchanged.
+-- estimated_profit is now the same fee-adjusted NET figure the gate uses
+-- (it used to be gross (sell_price - buy_filled_price) * shares).
+--
+-- FIX 2 (spike cap -- stop must stay below market): new_stop_price was
+-- GREATEST(sell_price, trunc(price * (ratio + counter*0.005))). With
+-- sell_counter climbing, ratio + counter*0.005 can reach >= 1.0, putting a
+-- sell STOP at/above the live price; Coinbase then cancels it ("Price
+-- protection point was breached") -- confirmed on PAX-USD (position 566).
+-- It is now capped at trunc(price * 0.995, price_rounding), i.e. always at
+-- least 0.5% under the live price:
+--   LEAST(GREATEST(sell_price, trunc(price*(ratio+counter*0.005))),
+--         trunc(price*0.995))
+-- The capped value is computed ONCE per branch in a CROSS JOIN LATERAL
+-- (ns.new_stop) and reused everywhere -- new_stop_price, price_diff, the
+-- "sell_stop_price < new stop" ratchet, and the profit gate -- so they can
+-- never disagree. Because the cap can pull the stop below the frozen limit
+-- when price sits under sell_price/0.995, an extra guard
+-- (ns.new_stop >= p.sell_price) keeps a stop from ever being placed below
+-- its own limit (the ratchet already implies this whenever the current
+-- stop is >= sell_price, which thee_procedure guarantees; this just makes
+-- it explicit).
 CREATE OR REPLACE VIEW public.vw_edit_orders AS
 SELECT p.name,
     p.period_type,
@@ -69,53 +109,75 @@ AND p.buy_price > trunc(s.price::numeric * bal.stop_mult * 1.01, s.price_roundin
 
 UNION ALL
 
+-- SELL branch 1 of 2: daily_sell = true, fixed 0.99 base ratio.
 SELECT p.name,
     p.period_type,
+    -- Limit stays frozen (see header). Only the stop moves.
     p.sell_price AS order_price,
     s.price AS price_now,
     p.buy_order_id,
     p.sell_coinbase_order_id AS coinbase_order_id,
     p.shares,
-    GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.005), s.price_rounding)) AS new_stop_price,
+    -- FIX 2: capped new stop (computed once in the "ns" lateral below).
+    ns.new_stop AS new_stop_price,
     'sell'::text AS order_type,
-    trunc((p.sell_price::numeric - p.buy_filled_price::numeric) * p.shares::numeric, 2) AS estimated_profit,
+    -- FIX 1: net profit at the NEW stop (was gross at the old frozen limit).
+    trunc(pr.net_at_new_stop, 2) AS estimated_profit,
     p.last_remade_at,
     p.sell_counter AS counter,
-    ABS(GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.005), s.price_rounding)) - p.sell_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
+    ABS(ns.new_stop - p.sell_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
 FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
+-- FIX 2: the one place the new stop is calculated for this branch.
+-- Old: GREATEST(sell_price, trunc(price * (0.99 + counter*0.005)))
+-- New: same, but LEAST'd against trunc(price * 0.995) so the stop is
+--      always at least 0.5% under market (never at/above -> no Coinbase
+--      "Price protection point was breached" cancel).
+CROSS JOIN LATERAL (
+    SELECT LEAST(
+        GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.005), s.price_rounding)),
+        trunc(s.price::numeric * 0.995, s.price_rounding)
+    ) AS new_stop
+) ns
+-- FIX 1: fee-adjusted net profit if the order sells at the NEW stop
+-- (previously computed at p.sell_price, the frozen old limit). Sell fee is
+-- assumed at the same rate as the buy fee (0.012 fallback when unknown).
+CROSS JOIN LATERAL (
+    SELECT ns.new_stop
+        * p.shares::numeric
+        * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
+        - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0)) AS net_at_new_stop
+) pr
 WHERE p.sell_coinbase_order_id IS NOT NULL
 AND p.sell_filled_price IS NULL
 AND p.daily_sell = true
-AND p.sell_stop_price < GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (0.99 + p.sell_counter::numeric * 0.005), s.price_rounding))::double precision
-AND (
-    p.sell_price::numeric
-    * p.shares::numeric
-    * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
-    - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0))
-) > 0
-AND (
-    p.sell_price::numeric
-    * p.shares::numeric
-    * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
-    - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0))
-) > (SELECT COALESCE(AVG(profit), 0) FROM profit_history WHERE period_type = p.period_type)
+-- Ratchet: only ever move the stop UP (now against the capped value).
+AND p.sell_stop_price < ns.new_stop::double precision
+-- FIX 2 guard: never place a stop below its own frozen limit.
+AND ns.new_stop >= p.sell_price::numeric
+-- FIX 1: profit gate at the NEW stop, not the old limit.
+AND pr.net_at_new_stop > 0
+AND pr.net_at_new_stop > (SELECT COALESCE(AVG(profit), 0) FROM profit_history WHERE period_type = p.period_type)
 
 UNION ALL
 
+-- SELL branch 2 of 2: daily_sell = false, volatility-based base ratio.
 SELECT p.name,
     p.period_type,
+    -- Limit stays frozen (see header). Only the stop moves.
     p.sell_price AS order_price,
     s.price AS price_now,
     p.buy_order_id,
     p.sell_coinbase_order_id AS coinbase_order_id,
     p.shares,
-    GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.005), s.price_rounding)) AS new_stop_price,
+    -- FIX 2: capped new stop (computed once in the "ns" lateral below).
+    ns.new_stop AS new_stop_price,
     'sell'::text AS order_type,
-    trunc((p.sell_price::numeric - p.buy_filled_price::numeric) * p.shares::numeric, 2) AS estimated_profit,
+    -- FIX 1: net profit at the NEW stop (was gross at the old frozen limit).
+    trunc(pr.net_at_new_stop, 2) AS estimated_profit,
     p.last_remade_at,
     p.sell_counter AS counter,
-    ABS(GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.005), s.price_rounding)) - p.sell_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
+    ABS(ns.new_stop - p.sell_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
 FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
 JOIN price_aggregate_total pat ON p.stock_id = pat.stock_id AND p.period_type = pat.period_type
@@ -127,20 +189,33 @@ CROSS JOIN LATERAL (
         ELSE NULL::numeric
     END AS stop_ratio
 ) vol
+-- FIX 2: the one place the new stop is calculated for this branch.
+-- Old: GREATEST(sell_price, trunc(price * (stop_ratio + counter*0.005)))
+-- New: same, but LEAST'd against trunc(price * 0.995) so the stop is
+--      always at least 0.5% under market (never at/above -> no Coinbase
+--      "Price protection point was breached" cancel, as on PAX-USD 566).
+CROSS JOIN LATERAL (
+    SELECT LEAST(
+        GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.005), s.price_rounding)),
+        trunc(s.price::numeric * 0.995, s.price_rounding)
+    ) AS new_stop
+) ns
+-- FIX 1: fee-adjusted net profit if the order sells at the NEW stop
+-- (previously computed at p.sell_price, the frozen old limit).
+CROSS JOIN LATERAL (
+    SELECT ns.new_stop
+        * p.shares::numeric
+        * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
+        - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0)) AS net_at_new_stop
+) pr
 WHERE p.sell_coinbase_order_id IS NOT NULL
 AND p.sell_filled_price IS NULL
 AND p.daily_sell = false
-AND p.sell_stop_price < GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.005), s.price_rounding))::double precision
-AND (
-    p.sell_price::numeric
-    * p.shares::numeric
-    * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
-    - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0))
-) > 0
-AND (
-    p.sell_price::numeric
-    * p.shares::numeric
-    * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
-    - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0))
-) > (SELECT COALESCE(AVG(profit), 0) FROM profit_history WHERE period_type = p.period_type)
+-- Ratchet: only ever move the stop UP (now against the capped value).
+AND p.sell_stop_price < ns.new_stop::double precision
+-- FIX 2 guard: never place a stop below its own frozen limit.
+AND ns.new_stop >= p.sell_price::numeric
+-- FIX 1: profit gate at the NEW stop, not the old limit.
+AND pr.net_at_new_stop > 0
+AND pr.net_at_new_stop > (SELECT COALESCE(AVG(profit), 0) FROM profit_history WHERE period_type = p.period_type)
 ORDER BY last_remade_at ASC NULLS FIRST, price_diff DESC;
