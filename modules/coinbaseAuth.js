@@ -1,6 +1,10 @@
 //const db = require('/Users/theodorecross/Coinbase tedTosterone/modules/database.js')
-const config = require('./config.js')
-const { sign } = require('jsonwebtoken');
+// The tedTosterone portfolio is being deleted. Its ES256 key still sits in
+// modules/config.js, but a CDP key only sees its own portfolio, so signing
+// with that key would fail once the portfolio is gone. Crypto requests now
+// sign as the Default (Primary) portfolio: the same Ed25519 key equityAuth
+// loads from outside the repo. This module does not load config.js.
+const equityAuth = require('./equityAuth.js')
 const crypto = require('crypto');
 const axios = require('axios');
 let ca = {};
@@ -31,42 +35,12 @@ async function determineWait () {
 
 async function tokenate(method, path) {
     try {
-        //console.log(method, path)
-       // Your credentials
-        const key_name = config.key_name;
-        const key_secret = config.key_secret
-
-        // Request details
-        const request_method = method;
-        const request_path = path;
-        const algorithm = 'ES256';
-
-        // Construct the URI for the JWT (method + path)
-        const uri = `${request_method} api.coinbase.com${request_path}`;
-        //console.log(uri)
-
-        // Generate the JWT
-        const token = sign(
-        {
-            iss: 'coinbase-cloud', // Correct issuer for Coinbase Cloud
-            nbf: Math.floor(Date.now() / 1000), // Not before
-            exp: Math.floor(Date.now() / 1000) + 60, // Expires in 2 minutes
-            sub: key_name, // Subject (your API key name)
-            aud: ['advanced-trade'], // Audience for Advanced Trade
-            uri: uri // URI for the request
-        },
-        key_secret,
-        {
-            algorithm: algorithm,
-            header: {
-            kid: key_name, // Key ID
-            nonce: crypto.randomBytes(16).toString('hex') // Random nonce
-            }
-        }
-        );
-
-        //console.log('JWT:', token);
-        return token;
+        // Same signer as equity ETFs: node crypto EdDSA. The jwt library rejects EdDSA.
+        // signRequest reads the Default portfolio key file and builds the
+        // advanced-trade JWT. Every crypto read and order in this module goes
+        // through getApiCall -> tokenate, so they all sign as Default / Primary.
+        // The secret stays in the key file outside this repo.
+        return equityAuth.signRequest(method, path)
     } catch (error) {
         console.log("tokenate()", error)
     }

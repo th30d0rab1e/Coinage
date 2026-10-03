@@ -1,8 +1,10 @@
-// Equity ETFs use a separate Coinbase API key from crypto.
-// modules/config.js stays the ES256 key that trades spot. This key is Ed25519
-// and lives outside the repo (mode 600) so it is never committed.
+// Default (Primary) portfolio key. Ed25519, stored outside the repo (mode 600)
+// so the secret is never committed. Crypto (coinbaseAuth via signRequest) and
+// equity ETFs both sign with this key. The tedTosterone portfolio is going
+// away; modules/config.js still holds that old ES256 key and is not used here.
 // Default path is the mini user's home: ~/.coinage-equity-key.json
 // (on this machine that is /Volumes/2TBSSD/theodorecrossX, not /Users/theodorecross).
+// EQUITY_KEY_PATH overrides that path.
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
@@ -13,8 +15,9 @@ const KEY_PATH = process.env.EQUITY_KEY_PATH || path.join(os.homedir(), '.coinag
 // BLOX, used only to read equity_product_details (session / full-close). Not an order.
 const SESSION_PRODUCT_ID = 'b00c6138f30e9f64073251d311d38324de73a36acfd22867427b293adc143d3c'
 
-// Equity orders can only spend this portfolio. The crypto portfolio
-// (tedTosterone) is never read and never transferred from.
+// Default (Primary) portfolio. This Ed25519 key is bound to this uuid, so
+// crypto requests signed with signRequest see Default, not tedTosterone.
+// Equity code passes this id when it reads that portfolio's breakdown.
 const DEFAULT_PORTFOLIO_ID = '54a3cffc-9b34-5ee3-973a-5dc323f6bb1d'
 
 let cachedKey
@@ -233,6 +236,9 @@ async function defaultUsdAvailable() {
 module.exports = {
     KEY_PATH,
     DEFAULT_PORTFOLIO_ID,
+    // coinbaseAuth.tokenate calls this so crypto signs as Default / Primary
+    // (Ed25519) instead of the tedTosterone ES256 key in config.js.
+    signRequest: signJwt,
     interpretEquitySession,
     equitySession,
     isClosedMarket,
