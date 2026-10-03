@@ -233,8 +233,6 @@ async function defaultUsdAvailable() {
 module.exports = {
     KEY_PATH,
     DEFAULT_PORTFOLIO_ID,
-    // Shared with coinbaseAuth. Crypto now lives on Default, and that key is Ed25519.
-    signRequest: signJwt,
     interpretEquitySession,
     equitySession,
     isClosedMarket,

@@ -1,8 +1,8 @@
 -- 2026-10-03: daily equity ETF buys (BLOX, TOPW, CHPY, TSLW).
 -- One market buy of quote_usd (default $1) per enabled row per Chicago day,
 -- and only while the normal equity session is open. A closed session must
--- not reserve cash and must not block crypto. "Already bought today" is a
--- fills row (BUY, Chicago date of trade_time), not a second table.
+-- not reserve cash and must not block crypto. Closed-market rejects are
+-- recorded in etf_buy with filled = false so they do not count as the buy.
 -- Idempotent: safe to re-run. Seed does not overwrite quote_usd / enabled
 -- if the row already exists.
 
@@ -22,9 +22,29 @@ COMMENT ON COLUMN public.etf.product_id IS
 COMMENT ON COLUMN public.etf.quote_usd IS
     'Maximum quote USD for that day''s market buy. Default $1.';
 
--- etf_buy used to live here. It was removed: a buy already happened today
--- when fills has a BUY whose trade_time is today's America/Chicago date.
--- See 2026-10-03_drop_etf_buy.sql. Do not recreate etf_buy.
+-- Attempts. filled = true is the only "already bought today" marker.
+-- closed_session rejects stay filled = false so Monday can still buy.
+CREATE TABLE IF NOT EXISTS public.etf_buy (
+    etf_buy_id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ticker            text NOT NULL REFERENCES public.etf (ticker),
+    chicago_date      date NOT NULL,
+    quote_usd         numeric NOT NULL,
+    filled            boolean NOT NULL DEFAULT false,
+    closed_session    boolean NOT NULL DEFAULT false,
+    coinbase_order_id text,
+    client_order_id   text,
+    error_message     text,
+    created_at        timestamp without time zone NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS etf_buy_filled_day_idx
+    ON public.etf_buy (ticker, chicago_date)
+    WHERE filled;
+
+COMMENT ON TABLE public.etf_buy IS
+    'ETF buy attempts. Only filled = true blocks another buy that Chicago date.';
+COMMENT ON COLUMN public.etf_buy.closed_session IS
+    'Closed-market reject (queueing unavailable / UNTRADABLE). Does not count as today''s buy.';
 
 -- Absent or not 'true' means closed: do not reserve cash.
 INSERT INTO public.config (key, value) VALUES ('equity_session_open', 'false')
@@ -40,5 +60,27 @@ INSERT INTO public.etf (ticker, product_id, quote_usd, enabled) VALUES
     ('TSLW', 'c14a9c069c5b045e2fbff2f79d2cd08884a1ebec246add36b1f34261f0970d8d', 1, true)
 ON CONFLICT (ticker) DO NOTHING;
 
--- Reserve view is defined in 2026-10-03_etf_default_portfolio_only.sql.
--- It stays 0. ETF buys spend Default portfolio USD and do not hold crypto cash.
+-- USD held back from new crypto buys only while the session flag is true
+-- and that ticker has no filled etf_buy for the Chicago date.
+CREATE OR REPLACE VIEW public.vw_etf_cash_reserve AS
+SELECT COALESCE(
+    CASE
+        WHEN (SELECT value FROM public.config WHERE key = 'equity_session_open') = 'true'
+        THEN (
+            SELECT SUM(e.quote_usd)
+            FROM public.etf e
+            WHERE e.enabled
+            AND NOT EXISTS (
+                SELECT 1
+                FROM public.etf_buy b
+                WHERE b.ticker = e.ticker
+                  AND b.chicago_date = (timezone('America/Chicago', now()))::date
+                  AND b.filled
+            )
+        )
+        ELSE 0
+    END
+, 0)::numeric AS reserve_usd;
+
+COMMENT ON VIEW public.vw_etf_cash_reserve IS
+    'Unfilled ETF quote USD to keep away from new crypto buys. 0 when the equity session is closed.';
