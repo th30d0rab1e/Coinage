@@ -13,6 +13,10 @@ const KEY_PATH = process.env.EQUITY_KEY_PATH || path.join(os.homedir(), '.coinag
 // BLOX, used only to read equity_product_details (session / full-close). Not an order.
 const SESSION_PRODUCT_ID = 'b00c6138f30e9f64073251d311d38324de73a36acfd22867427b293adc143d3c'
 
+// Equity orders can only spend this portfolio. The crypto portfolio
+// (tedTosterone) is never read and never transferred from.
+const DEFAULT_PORTFOLIO_ID = '54a3cffc-9b34-5ee3-973a-5dc323f6bb1d'
+
 let cachedKey
 
 function loadKey() {
@@ -193,11 +197,46 @@ async function readFill(orderId) {
     }
 }
 
+
+// Spendable USD in the Default portfolio only. That breakdown lists more
+// than one USD row (fiat, derivatives cash, prediction-markets cash). The
+// first row is not the trading wallet, so sum available_to_trade_fiat on
+// every USD row. Cash on hold and cash that cannot trade (available 0)
+// stays out. A non-200 does not fall back to the crypto key: if Default
+// cannot be read, the caller skips the ETF buy.
+async function defaultUsdAvailable() {
+    try {
+        const response = await equityRequest(
+            'GET',
+            `/api/v3/brokerage/portfolios/${DEFAULT_PORTFOLIO_ID}`,
+            '?currency=USD'
+        )
+        if (response.status !== 200) {
+            return { ok: false, available: 0, reason: `HTTP ${response.status}` }
+        }
+        const positions = response.data?.breakdown?.spot_positions || []
+        let available = 0
+        for (const pos of positions) {
+            if (pos.asset !== 'USD') continue
+            const n = Number(pos.available_to_trade_fiat)
+            if (!Number.isFinite(n)) {
+                return { ok: false, available: 0, reason: 'USD available missing' }
+            }
+            available += n
+        }
+        return { ok: true, available }
+    } catch (error) {
+        return { ok: false, available: 0, reason: error?.message || 'request failed' }
+    }
+}
+
 module.exports = {
     KEY_PATH,
+    DEFAULT_PORTFOLIO_ID,
     interpretEquitySession,
     equitySession,
     isClosedMarket,
     createMarketBuy,
     readFill,
+    defaultUsdAvailable,
 }

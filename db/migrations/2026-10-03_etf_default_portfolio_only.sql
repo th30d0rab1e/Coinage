@@ -1,3 +1,6 @@
+-- 2026-10-03: ETF dollars are not reserved from the crypto portfolio.
+-- Default (equity key) funds the $1 buys. If it is short, the buy is skipped.
+-- Replaces vw_etf_cash_reserve so it can no longer subtract from crypto plans.
 -- Crypto does not reserve cash for equity ETFs. The $1 buys (BLOX, TSLW,
 -- TOPW, CHPY) spend only available USD in the Default portfolio, and only
 -- while the equity session is open. If Default is short, that buy is skipped.

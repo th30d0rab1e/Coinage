@@ -3,7 +3,7 @@ var db = require('./modules/database.js')
 const crypto = require('crypto')
 var equity = require('./modules/equityAuth.js')
 // Set each run before thee_procedure. False means the equity session is
-// closed: do not buy ETFs and do not reserve cash from crypto.
+// closed: do not buy ETFs. Crypto cash is never reserved or transferred.
 let equitySessionOpen = false
 main()
 
@@ -21,10 +21,9 @@ async function main () {
 
         await Promise.all([pnc, pnb, pnf, poo, ppd]);
 
-        // Equity session before thee_procedure so new crypto plans can hold
-        // back today's unfilled ETF dollars. A closed session (weekend full
-        // close, holiday, or a failed check) leaves the flag false and crypto
-        // proceeds unchanged. This does not place an order.
+        // Equity session before the buy pass. A closed session (weekend full
+        // close, holiday, or a failed check) leaves the flag false: no ETF
+        // order. Crypto plans do not read this flag. This does not place an order.
         await refreshEquitySession();
 
         //call thee procedure (now sees fresh bulk_open_orders, bulk_fills, bulk_currency)
@@ -170,8 +169,8 @@ function chicagoToday() {
 }
 
 // Read BLOX equity_product_details and store config.equity_session_open.
-// thee_procedure subtracts vw_etf_cash_reserve only when this is 'true'.
-// Closed (including weekend full close) stays 'false': no cash reserved.
+// Closed (including weekend full close) stays 'false': no ETF order.
+// Crypto planning does not use this flag and does not reserve ETF dollars.
 async function refreshEquitySession() {
     try {
         const session = await equity.equitySession()
@@ -215,22 +214,26 @@ async function recordEtfAttempt(row) {
     )
 }
 
-// One market buy of etf.quote_usd per enabled ticker per Chicago day, using
-// the equity key (not the crypto ES256 key). Runs before crypto placement
-// so sell-proceeds cash fills still-unfilled ETF buys first.
-// Returns { available, reserve }:
-//   available -- USD left after fills this run
-//   reserve   -- quote still owed to unfilled ETFs; 0 if the session is closed
-// A closed-market reject is recorded filled=false and does not count, and
-// it clears the reserve so crypto is not blocked.
-async function processEquityEtfBuys(available) {
-    if (!equitySessionOpen) {
-        return { available, reserve: 0 }
-    }
+// One market buy of etf.quote_usd per enabled ticker per Chicago day.
+// Spends only available USD in the Default portfolio (equity Ed25519 key).
+// Does not read tedTosterone USD, does not transfer, and does not change
+// what crypto may spend. If Default cannot cover this ticker's quote, skip
+// it. A closed session returns before any order. A closed-market reject is
+// recorded filled=false and does not count as today's buy.
+async function processEquityEtfBuys() {
+    if (!equitySessionOpen) return
     const today = chicagoToday()
-    let cash = available
-    let reserve = 0
+    let cash = 0
     try {
+        // Why here: equity orders can only spend Default, so the cash check
+        // has to be that portfolio's available USD, not the crypto balance.
+        const bal = await equity.defaultUsdAvailable()
+        if (!bal.ok) {
+            console.log(`ETF buys skipped: Default USD unreadable (${bal.reason})`)
+            return
+        }
+        cash = bal.available
+        console.log(`ETF Default USD available: $${cash.toFixed(2)}`)
         const result = await db.query(
             `SELECT e.ticker, e.product_id, e.quote_usd
              FROM etf e
@@ -249,11 +252,10 @@ async function processEquityEtfBuys(available) {
         for (const row of rows) {
             if (!equitySessionOpen) break
             const quote = Number(row.quote_usd)
-            // Never send more than this row's quote_usd, and never a partial
-            // that would be a different size. Wait until free USD covers it.
+            // Full quote only. Short Default cash skips this ticker. Nothing
+            // is pulled from the crypto portfolio to cover the difference.
             if (!(cash >= quote) || !(quote > 0)) {
-                reserve += quote > 0 ? quote : 0
-                console.log(`ETF buy waiting for cash: ${row.ticker} needs $${quote.toFixed(2)}, have $${cash.toFixed(2)}`)
+                console.log(`ETF buy skipped: ${row.ticker} needs $${quote.toFixed(2)} Default USD, have $${cash.toFixed(2)}`)
                 continue
             }
             const clientOrderId = crypto.randomUUID()
@@ -270,11 +272,10 @@ async function processEquityEtfBuys(available) {
                     errorMessage: message,
                 })
                 equitySessionOpen = false
-                reserve = 0
                 await db.query(
                     `UPDATE config SET value = 'false' WHERE key = 'equity_session_open'`
                 )
-                console.log(`ETF session closed on ${row.ticker} (${message}); not today's buy, crypto not blocked`)
+                console.log(`ETF session closed on ${row.ticker} (${message}); not today's buy`)
                 break
             }
             if (response?.success === true) {
@@ -293,7 +294,6 @@ async function processEquityEtfBuys(available) {
                         errorMessage: 'order queueing is not available',
                     })
                     equitySessionOpen = false
-                    reserve = 0
                     await db.query(
                         `UPDATE config SET value = 'false' WHERE key = 'equity_session_open'`
                     )
@@ -315,10 +315,10 @@ async function processEquityEtfBuys(available) {
                     errorMessage: filled ? null : `not filled (status ${fill.status || 'unknown'})`,
                 })
                 if (filled) {
+                    // Later tickers in this run must not reuse dollars just spent.
                     cash -= quote
                     console.log(`ETF buy filled: ${row.ticker} $${quote.toFixed(2)}`)
                 } else {
-                    reserve += quote
                     console.log(`ETF buy not filled, will retry: ${row.ticker} status ${fill.status}`)
                 }
             } else {
@@ -332,19 +332,13 @@ async function processEquityEtfBuys(available) {
                     clientOrderId,
                     errorMessage: message,
                 })
-                reserve += quote
                 console.log(`ETF buy FAILED: ${row.ticker} ${message}`)
             }
         }
     } catch (error) {
         console.log('processEquityEtfBuys() ERROR', error?.message || error)
-        // Don't stall crypto on an ETF bookkeeping error, and don't pretend
-        // the session is reserving cash we failed to measure.
-        return { available, reserve: 0 }
+        // Crypto placement below is independent of this failure.
     }
-    // cash, not the pre-run balance: an earlier ticker may already have filled.
-    if (!equitySessionOpen) return { available: cash, reserve: 0 }
-    return { available: cash, reserve }
 }
 
 async function processBuyOrders () {
@@ -354,11 +348,10 @@ async function processBuyOrders () {
         // than via vw_balance. If there isn't at least $1 free, don't even look at
         // the pending-buy backlog -- every one of them would just fail anyway.
         //
-        // Equity ETFs run first. When the session is open, dollars still owed
-        // to today's unfilled ETF buys are subtracted before the crypto gate
-        // so sell proceeds hit ETFs before a new crypto buy. When the session
-        // is closed, reserve is 0 and this gate is unchanged.
-        //
+        // Daily ETF buys spend Default USD only. They run here so a closed
+        // session no-ops, and they do not change the crypto cash figure below.
+        await processEquityEtfBuys()
+
         // Naked-buy heal path: remake cancel+create can leave buy_coinbase_order_id
         // NULL (see processRemakeOrders). thee_procedure clears error_message on
         // unfilled buys each cycle, so those rows show up here and get a fresh
@@ -366,13 +359,9 @@ async function processBuyOrders () {
         // already-inserted pending rows (recovery), not brand-new signals.
         const accounts = await ca.gatherBalance();
         const usd = accounts?.find(a => a.currency === 'USD');
-        let available = usd ? parseFloat(usd.available_balance.value) : 0;
-        const etfCash = await processEquityEtfBuys(available)
-        available = etfCash.available
-        const cryptoAvailable = available - etfCash.reserve
-        if (!(cryptoAvailable > 1)) {
-            const held = etfCash.reserve > 0 ? ` after $${etfCash.reserve.toFixed(2)} ETF reserve` : ''
-            console.log(`processBuyOrders() skipped: only $${cryptoAvailable.toFixed(2)} available${held}`);
+        const available = usd ? parseFloat(usd.available_balance.value) : 0;
+        if (!(available > 1)) {
+            console.log(`processBuyOrders() skipped: only $${available.toFixed(2)} available`);
             return;
         }
 
@@ -410,7 +399,7 @@ async function processBuyOrders () {
         // decremented after each successful create so later rows in the same run
         // don't count the same dollars twice.
         const BUY_FEE_PAD = 1.012   // same ~1.2% taker-fee pad as processFarBuyCashRelease
-        let cashLeft = cryptoAvailable
+        let cashLeft = available
 
         for (i = 0; i < orders.length; i++) {
             const element = orders[i];
