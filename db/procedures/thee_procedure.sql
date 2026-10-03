@@ -619,6 +619,14 @@ AND EXISTS (
     WHERE ph.buy_coinbase_order_id = p.buy_coinbase_order_id AND ph.sell_fills_id = p.sell_coinbase_order_id
 );
 
+-- Once the position row is gone, its audit history goes with it. The DELETE
+-- trigger's snapshot is included, on purpose.
+DELETE FROM position_audit AS pa
+USING position_audit AS a
+LEFT JOIN position AS p ON p.position_id = a.position_id
+WHERE pa.audit_id = a.audit_id
+  AND p.position_id IS NULL;
+
 -- Prune position_audit records older than a month.
 DELETE FROM position_audit WHERE changed_at < NOW() - INTERVAL '1 month';
 
