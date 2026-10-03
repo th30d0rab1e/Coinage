@@ -1,8 +1,9 @@
--- 2026-10-03: Coinbase portfolios, plus a nullable portfolio uuid on the
--- tables that will eventually say which portfolio a fill, position, or
--- cash row came from. Existing rows stay null. Nothing is backfilled.
--- Idempotent. The local portfolio table is untouched: its integer
--- portfolio_id is not a Coinbase uuid, so these columns do not reference it.
+-- 2026-10-03: Coinbase portfolios, plus a nullable local portfolio_id on
+-- fills, position, and balance. portfolio_id is portfolio.portfolio_id
+-- (integer identity), not the Coinbase uuid. The uuid column is the API
+-- field. Existing fills and positions stay null. Nothing is backfilled.
+-- Idempotent. 2026-10-03_portfolio_id_local.sql corrects a first version
+-- that pointed these foreign keys at bulk_portfolio.uuid.
 
 CREATE TABLE IF NOT EXISTS public.bulk_portfolio (
     uuid            text PRIMARY KEY,
@@ -10,13 +11,17 @@ CREATE TABLE IF NOT EXISTS public.bulk_portfolio (
     type            text,
     deleted         boolean,
     subaccount_uuid text,
+    -- Local portfolio.portfolio_id. Not the Coinbase uuid (that is uuid).
+    portfolio_id    integer REFERENCES public.portfolio (portfolio_id),
     loaded_at       timestamp without time zone NOT NULL DEFAULT NOW()
 );
 
 COMMENT ON TABLE public.bulk_portfolio IS
     'Coinbase List Portfolios snapshot. Not the local portfolio table.';
 COMMENT ON COLUMN public.bulk_portfolio.uuid IS
-    'API field uuid. Coinbase portfolio id and primary key.';
+    'API field uuid. The Coinbase portfolio id. Not portfolio.portfolio_id.';
+COMMENT ON COLUMN public.bulk_portfolio.portfolio_id IS
+    'Local portfolio.portfolio_id for this Coinbase portfolio. Not the Coinbase uuid.';
 COMMENT ON COLUMN public.bulk_portfolio.name IS
     'API field name. Display name returned by List Portfolios.';
 COMMENT ON COLUMN public.bulk_portfolio.type IS
@@ -30,13 +35,13 @@ COMMENT ON COLUMN public.bulk_portfolio.loaded_at IS
 
 -- Coinbase portfolio uuid. Nullable so rows that predate this column stay valid.
 -- Not backfilled. Foreign key is safe because every existing value is null.
-ALTER TABLE public.fills ADD COLUMN IF NOT EXISTS portfolio_id text;
-ALTER TABLE public.position ADD COLUMN IF NOT EXISTS portfolio_id text;
+ALTER TABLE public.fills ADD COLUMN IF NOT EXISTS portfolio_id integer;
+ALTER TABLE public.position ADD COLUMN IF NOT EXISTS portfolio_id integer;
 
 COMMENT ON COLUMN public.fills.portfolio_id IS
-    'Coinbase portfolio uuid (bulk_portfolio.uuid), not local portfolio.portfolio_id. Null on older fills; not backfilled.';
+    'Local portfolio.portfolio_id, not the Coinbase portfolio uuid. Null on older fills; not backfilled.';
 COMMENT ON COLUMN public.position.portfolio_id IS
-    'Coinbase portfolio uuid (bulk_portfolio.uuid), not local portfolio.portfolio_id. Null on older positions; not backfilled.';
+    'Local portfolio.portfolio_id, not the Coinbase portfolio uuid. Null on older positions; not backfilled.';
 
 DO $$
 BEGIN
@@ -45,21 +50,21 @@ BEGIN
     ) THEN
         ALTER TABLE public.fills
             ADD CONSTRAINT fills_portfolio_id_fkey
-            FOREIGN KEY (portfolio_id) REFERENCES public.bulk_portfolio (uuid);
+            FOREIGN KEY (portfolio_id) REFERENCES public.portfolio (portfolio_id);
     END IF;
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint WHERE conname = 'position_portfolio_id_fkey'
     ) THEN
         ALTER TABLE public.position
             ADD CONSTRAINT position_portfolio_id_fkey
-            FOREIGN KEY (portfolio_id) REFERENCES public.bulk_portfolio (uuid);
+            FOREIGN KEY (portfolio_id) REFERENCES public.portfolio (portfolio_id);
     END IF;
 END $$;
 
 -- No relation named balance existed (vw_balance is a view and is not replaced).
 CREATE TABLE IF NOT EXISTS public.balance (
     balance_id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    portfolio_id text,
+    portfolio_id integer,
     currency     text,
     available    double precision,
     hold         double precision,
@@ -67,14 +72,14 @@ CREATE TABLE IF NOT EXISTS public.balance (
     updated_at   timestamp without time zone
 );
 
-ALTER TABLE public.balance ADD COLUMN IF NOT EXISTS portfolio_id text;
+ALTER TABLE public.balance ADD COLUMN IF NOT EXISTS portfolio_id integer;
 
 COMMENT ON TABLE public.balance IS
     'Cash by currency. Not vw_balance, which is a priced view of bulk_currency.';
 COMMENT ON COLUMN public.balance.balance_id IS
     'Surrogate key. Identity so inserts do not have to supply it.';
 COMMENT ON COLUMN public.balance.portfolio_id IS
-    'Coinbase portfolio uuid (bulk_portfolio.uuid), not local portfolio.portfolio_id. Null until a load sets it.';
+    'Local portfolio.portfolio_id, not the Coinbase portfolio uuid. Null until a load sets it.';
 COMMENT ON COLUMN public.balance.currency IS
     'Asset code, same meaning as bulk_currency.currency (USD, USDC, a coin).';
 COMMENT ON COLUMN public.balance.available IS
@@ -93,7 +98,7 @@ BEGIN
     ) THEN
         ALTER TABLE public.balance
             ADD CONSTRAINT balance_portfolio_id_fkey
-            FOREIGN KEY (portfolio_id) REFERENCES public.bulk_portfolio (uuid);
+            FOREIGN KEY (portfolio_id) REFERENCES public.portfolio (portfolio_id);
     END IF;
 END $$;
 

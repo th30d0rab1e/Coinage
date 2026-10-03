@@ -3,7 +3,7 @@
 -- not this table. Columns match the cash fields bulk_currency already stores.
 CREATE TABLE IF NOT EXISTS public.balance (
     balance_id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    portfolio_id text REFERENCES public.bulk_portfolio (uuid),
+    portfolio_id integer REFERENCES public.portfolio (portfolio_id),
     currency     text,
     available    double precision,
     hold         double precision,
@@ -16,7 +16,7 @@ COMMENT ON TABLE public.balance IS
 COMMENT ON COLUMN public.balance.balance_id IS
     'Surrogate key. Identity so inserts do not have to supply it.';
 COMMENT ON COLUMN public.balance.portfolio_id IS
-    'Coinbase portfolio uuid (bulk_portfolio.uuid), not local portfolio.portfolio_id. Null until a load sets it.';
+    'Local portfolio.portfolio_id, not the Coinbase portfolio uuid. Null until a load sets it.';
 COMMENT ON COLUMN public.balance.currency IS
     'Asset code, same meaning as bulk_currency.currency (USD, USDC, a coin).';
 COMMENT ON COLUMN public.balance.available IS
