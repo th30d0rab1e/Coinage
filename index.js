@@ -196,30 +196,15 @@ async function refreshEquitySession() {
     }
 }
 
-async function recordEtfAttempt(row) {
-    await db.query(
-        `INSERT INTO etf_buy
-            (ticker, chicago_date, quote_usd, filled, closed_session, coinbase_order_id, client_order_id, error_message)
-         VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8)`,
-        [
-            row.ticker,
-            row.chicagoDate,
-            row.quoteUsd,
-            row.filled,
-            row.closedSession,
-            row.coinbaseOrderId || null,
-            row.clientOrderId || null,
-            row.errorMessage || null,
-        ]
-    )
-}
-
 // One market buy of etf.quote_usd per enabled ticker per Chicago day.
-// Spends only available USD in the Default portfolio (equity Ed25519 key).
-// Does not read tedTosterone USD, does not transfer, and does not change
-// what crypto may spend. If Default cannot cover this ticker's quote, skip
-// it. A closed session returns before any order. A closed-market reject is
-// recorded filled=false and does not count as today's buy.
+// Spends only available USD in the Default portfolio (equity Ed25519 key,
+// hardcoded 54a3cffc-9b34-5ee3-973a-5dc323f6bb1d). Does not read tedTosterone
+// USD, does not transfer, and does not change what crypto may spend. If
+// Default cannot cover this ticker's quote, skip it. A closed session
+// returns before any order.
+// Already bought today means fills has a BUY for that product whose
+// trade_time falls on today's America/Chicago date. fills is the record of
+// a real buy. etf_buy is gone and is not replaced.
 async function processEquityEtfBuys() {
     if (!equitySessionOpen) return
     const today = chicagoToday()
@@ -239,10 +224,20 @@ async function processEquityEtfBuys() {
              FROM etf e
              WHERE e.enabled
              AND NOT EXISTS (
-                 SELECT 1 FROM etf_buy b
-                 WHERE b.ticker = e.ticker
-                   AND b.chicago_date = $1::date
-                   AND b.filled
+                 -- fills is the ledger of a real buy. etf_buy was dropped
+                 -- and is not a second place to look. Today is the Chicago
+                 -- calendar date of trade_time, the same day chicago_date was.
+                 -- Crypto rows store product_id as TICKER-USD. ETF orders use
+                 -- the 64-hex etf.product_id. Match the hex id, the ticker,
+                 -- and TICKER-USD so the check follows whichever form fills has.
+                 SELECT 1 FROM fills f
+                 WHERE UPPER(f.side) = 'BUY'
+                   AND (
+                       f.product_id = e.product_id
+                       OR f.product_id = e.ticker
+                       OR f.product_id = e.ticker || '-USD'
+                   )
+                   AND (timezone('America/Chicago', f.trade_time))::date = $1::date
              )
              ORDER BY e.ticker`,
             [today]
@@ -262,15 +257,6 @@ async function processEquityEtfBuys() {
             const response = await equity.createMarketBuy(row.product_id, quote, clientOrderId)
             if (equity.isClosedMarket(response)) {
                 const message = response?.error_response?.message || 'equity session closed'
-                await recordEtfAttempt({
-                    ticker: row.ticker,
-                    chicagoDate: today,
-                    quoteUsd: quote,
-                    filled: false,
-                    closedSession: true,
-                    clientOrderId,
-                    errorMessage: message,
-                })
                 equitySessionOpen = false
                 await db.query(
                     `UPDATE config SET value = 'false' WHERE key = 'equity_session_open'`
@@ -283,16 +269,6 @@ async function processEquityEtfBuys() {
                 const fill = await equity.readFill(orderId)
                 const closedFill = equity.isClosedMarket(fill.raw || fill)
                 if (closedFill) {
-                    await recordEtfAttempt({
-                        ticker: row.ticker,
-                        chicagoDate: today,
-                        quoteUsd: quote,
-                        filled: false,
-                        closedSession: true,
-                        coinbaseOrderId: orderId,
-                        clientOrderId,
-                        errorMessage: 'order queueing is not available',
-                    })
                     equitySessionOpen = false
                     await db.query(
                         `UPDATE config SET value = 'false' WHERE key = 'equity_session_open'`
@@ -300,20 +276,9 @@ async function processEquityEtfBuys() {
                     console.log(`ETF session closed after accept ${row.ticker}; not today's buy`)
                     break
                 }
-                // Any fill counts as today's buy so we do not send another
-                // quote_usd. A zero fill does not, and will retry later.
-                // If the fill GET failed, count it anyway rather than exceed quote_usd.
+                // A real fill is what makes the next cycle's fills check skip
+                // this ticker. A zero fill does not, and will retry later.
                 const filled = fill.unknown || fill.filledSize > 0 || fill.filledQuote > 0
-                await recordEtfAttempt({
-                    ticker: row.ticker,
-                    chicagoDate: today,
-                    quoteUsd: quote,
-                    filled,
-                    closedSession: false,
-                    coinbaseOrderId: orderId,
-                    clientOrderId,
-                    errorMessage: filled ? null : `not filled (status ${fill.status || 'unknown'})`,
-                })
                 if (filled) {
                     // Later tickers in this run must not reuse dollars just spent.
                     cash -= quote
@@ -323,15 +288,6 @@ async function processEquityEtfBuys() {
                 }
             } else {
                 const message = response?.error_response?.message || 'unknown'
-                await recordEtfAttempt({
-                    ticker: row.ticker,
-                    chicagoDate: today,
-                    quoteUsd: quote,
-                    filled: false,
-                    closedSession: false,
-                    clientOrderId,
-                    errorMessage: message,
-                })
                 console.log(`ETF buy FAILED: ${row.ticker} ${message}`)
             }
         }
