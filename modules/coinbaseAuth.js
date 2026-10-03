@@ -1,5 +1,5 @@
 //const db = require('/Users/theodorecross/Coinbase tedTosterone/modules/database.js')
-const config = require('./config.js')
+const equityAuth = require('./equityAuth.js')
 const { sign } = require('jsonwebtoken');
 const crypto = require('crypto');
 const axios = require('axios');
@@ -31,42 +31,11 @@ async function determineWait () {
 
 async function tokenate(method, path) {
     try {
-        //console.log(method, path)
-       // Your credentials
-        const key_name = config.key_name;
-        const key_secret = config.key_secret
-
-        // Request details
-        const request_method = method;
-        const request_path = path;
-        const algorithm = 'ES256';
-
-        // Construct the URI for the JWT (method + path)
-        const uri = `${request_method} api.coinbase.com${request_path}`;
-        //console.log(uri)
-
-        // Generate the JWT
-        const token = sign(
-        {
-            iss: 'coinbase-cloud', // Correct issuer for Coinbase Cloud
-            nbf: Math.floor(Date.now() / 1000), // Not before
-            exp: Math.floor(Date.now() / 1000) + 60, // Expires in 2 minutes
-            sub: key_name, // Subject (your API key name)
-            aud: ['advanced-trade'], // Audience for Advanced Trade
-            uri: uri // URI for the request
-        },
-        key_secret,
-        {
-            algorithm: algorithm,
-            header: {
-            kid: key_name, // Key ID
-            nonce: crypto.randomBytes(16).toString('hex') // Random nonce
-            }
-        }
-        );
-
-        //console.log('JWT:', token);
-        return token;
+        // Crypto holdings were moved onto Default. config.js is still the
+        // tedTosterone key, and a CDP key cannot see the other portfolio.
+        // Every read and order from this module signs with the Default key.
+        // The secret stays in the equity key file, outside the repo.
+        return equityAuth.signRequest(method, path)
     } catch (error) {
         console.log("tokenate()", error)
     }
