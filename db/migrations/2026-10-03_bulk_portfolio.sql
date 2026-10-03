@@ -108,10 +108,7 @@ ALTER TABLE public.account ADD COLUMN IF NOT EXISTS email text;
 COMMENT ON COLUMN public.account.email IS
     'Email for this account. Nullable so the original row did not need a value.';
 
--- One row for this address. Re-running does not insert a second one.
--- date_created is left null: the column is nullable and has no default to override.
-INSERT INTO public.account (email)
-SELECT 'darthtlc@gmail.com'
-WHERE NOT EXISTS (
-    SELECT 1 FROM public.account WHERE email = 'darthtlc@gmail.com'
-);
+-- The darthtlc row was added, then removed on purpose. Re-running must not recreate it.
+-- Only that email is deleted. Account 1 has a null email, so it is not matched.
+DELETE FROM public.account
+WHERE email = 'darthtlc@gmail.com';
