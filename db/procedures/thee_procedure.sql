@@ -222,12 +222,18 @@ AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
 -- planned buys that have no live order yet. Previously only free USD was
 -- compared to the clip, so every brief cash bump (e.g. a far-buy release)
 -- inserted another planned row that then failed INSUFFICIENT_FUND forever.
+-- 2026-10-03: while the equity session is open, hold back unfilled
+-- daily ETF quote (vw_etf_cash_reserve) so a cash bump funds today's
+-- $1 ETF buys before a new crypto plan. The view is 0 when the session
+-- is closed, so weekends and "order queueing is not available" do not
+-- reserve cash and do not block these inserts.
 AND b.available
     - COALESCE((SELECT SUM(pb.shares * pb.buy_price)::numeric
                 FROM position pb JOIN stock sb ON sb.stock_id = pb.stock_id
                 WHERE pb.buy_coinbase_order_id IS NULL
                 AND pb.buy_filled_price IS NULL
                 AND sb.trading_disabled IS NOT TRUE), 0)
+    - COALESCE((SELECT reserve_usd FROM vw_etf_cash_reserve), 0)
   > (
     SELECT COUNT(*)::numeric
     FROM position open_sz
@@ -335,12 +341,18 @@ WHERE b.name = 'USD'
 -- 2026-09-25 cash-backlog gate (same as the new-position insert above):
 -- don't add another planned buy the free cash can't cover once the
 -- existing no-order planned rows are funded.
+-- 2026-10-03: while the equity session is open, hold back unfilled
+-- daily ETF quote (vw_etf_cash_reserve) so a cash bump funds today's
+-- $1 ETF buys before a new crypto plan. The view is 0 when the session
+-- is closed, so weekends and "order queueing is not available" do not
+-- reserve cash and do not block these inserts.
 AND b.available
     - COALESCE((SELECT SUM(pb.shares * pb.buy_price)::numeric
                 FROM position pb JOIN stock sb ON sb.stock_id = pb.stock_id
                 WHERE pb.buy_coinbase_order_id IS NULL
                 AND pb.buy_filled_price IS NULL
                 AND sb.trading_disabled IS NOT TRUE), 0)
+    - COALESCE((SELECT reserve_usd FROM vw_etf_cash_reserve), 0)
   > sized.clip_usd
 AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
 AND TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) < sized.last_filled_price

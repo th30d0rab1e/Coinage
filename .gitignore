@@ -5,3 +5,6 @@ modules/config.js
 
 # local DB backups (pg_dump) -- never commit
 backups/
+
+# equity Ed25519 key lives in the user home; never commit a copy
+.coinage-equity-key.json
