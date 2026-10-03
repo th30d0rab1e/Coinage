@@ -425,10 +425,17 @@ SET sell_stop_price = GREATEST(
     )
 FROM stock
 JOIN price_aggregate_total pat ON stock.stock_id = pat.stock_id
+JOIN vw_signal d
+  ON d.stock_id = stock.stock_id
+ AND d.period_type = 'day'
 WHERE position.stock_id = stock.stock_id
 AND pat.period_type = position.period_type
 AND position.buy_filled_price IS NOT NULL
 AND position.sell_price IS NULL
+-- Sell stays unpriced until today is stronger than this coin's usual day,
+-- the mirror of the buy dip filter (current day change below the day
+-- average). The sell price is still written only once.
+AND d.current_change_percent > d.historical_avg_change_percent
 -- Estimated profit, from buy_filled_price and buy_fee alone: at the
 -- fee-adjusted floor price (same CEIL(...) breakeven formula as above),
 -- proceeds after an estimated sell fee (same buy-side fee rate, falling
