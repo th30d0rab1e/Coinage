@@ -141,11 +141,11 @@ CROSS JOIN LATERAL (
 ) ns
 -- FIX 1: fee-adjusted net profit if the order sells at the NEW stop
 -- (previously computed at p.sell_price, the frozen old limit). Sell fee is
--- assumed at the same rate as the buy fee (0.012 fallback when unknown).
+-- assumed at the same rate as the buy fee (config.fee_percent / 100 when unknown).
 CROSS JOIN LATERAL (
     SELECT ns.new_stop
         * p.shares::numeric
-        * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
+        * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
         - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0)) AS net_at_new_stop
 ) pr
 WHERE p.sell_coinbase_order_id IS NOT NULL
@@ -205,7 +205,7 @@ CROSS JOIN LATERAL (
 CROSS JOIN LATERAL (
     SELECT ns.new_stop
         * p.shares::numeric
-        * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), 0.012))
+        * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
         - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0)) AS net_at_new_stop
 ) pr
 WHERE p.sell_coinbase_order_id IS NOT NULL

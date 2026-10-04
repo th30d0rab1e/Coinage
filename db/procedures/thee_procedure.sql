@@ -77,6 +77,43 @@ SELECT bf.order_id, bf.trade_id, bf.product_id, bf.side, bf.price, bf.size, bf.f
 FROM bulk_fills bf
 ON CONFLICT (trade_id) DO NOTHING;
 
+-- Learn the taker fee from the single latest fill, not an average.
+-- fee_percent is a percent with 2 decimal places: 0.90 means 0.90 percent,
+-- not a 0.009 rate. Rounding the raw rate (fee / notional) to 2 decimals
+-- would collapse 0.90 and 0.50 into 0.01, so the stored number is percent.
+-- Sits here, just after the fills archive and before any buy/sell pricing,
+-- so this cycle's fill is already in the ledger. A null or zero result
+-- does not insert a row and does not wipe a value already stored.
+INSERT INTO config (key, value)
+SELECT 'fee_percent', learned.pct
+FROM (
+    SELECT ROUND(((fee / NULLIF(price * size, 0)) * 100)::numeric, 2)::text AS pct
+    FROM fills
+    WHERE fee > 0
+      AND price > 0
+      AND size > 0
+    ORDER BY trade_time DESC
+    LIMIT 1
+) learned
+WHERE learned.pct IS NOT NULL
+  AND learned.pct::numeric <> 0
+ON CONFLICT (key) DO NOTHING;
+
+UPDATE config
+SET value = learned.pct
+FROM (
+    SELECT ROUND(((fee / NULLIF(price * size, 0)) * 100)::numeric, 2)::text AS pct
+    FROM fills
+    WHERE fee > 0
+      AND price > 0
+      AND size > 0
+    ORDER BY trade_time DESC
+    LIMIT 1
+) learned
+WHERE config.key = 'fee_percent'
+  AND learned.pct IS NOT NULL
+  AND learned.pct::numeric <> 0;
+
 -- Recover orphaned buy orders: open on Coinbase but missing from position table.
 -- Skip if an unfilled buy position already exists for that coin + period_type.
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, buy_coinbase_order_id, period_type)
@@ -391,7 +428,8 @@ LIMIT 1;
 -- still loses both fees. This expression solves for the sell price where
 -- post-fee proceeds exactly cover total cost, using this position's own
 -- realized buy-side fee rate as the estimate for the sell-side fee
--- (falling back to 1.2% if the buy fee is unknown). LATERAL can't be used
+-- (falling back to config.fee_percent / 100 when the buy fee is unknown).
+-- LATERAL can't be used
 -- here since UPDATE's target table isn't a FROM-list item it can see, so
 -- the formula is inlined directly instead of computed once via a join.
 -- When underwater this floor makes the stop land above current market,
@@ -413,8 +451,8 @@ UPDATE position
 SET sell_stop_price = GREATEST(
         CEIL(
             (position.buy_filled_price::numeric
-                * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
-                / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012)))
+                * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
+                / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100)))
                 * (1 + COALESCE((SELECT value::numeric FROM config WHERE key = 'sell_net_cushion'), 0.015))
                 * 1.01
             * POWER(10::numeric, stock.price_rounding::int)
@@ -428,8 +466,8 @@ SET sell_stop_price = GREATEST(
     sell_price = GREATEST(
         CEIL(
             (position.buy_filled_price::numeric
-                * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
-                / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012)))
+                * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
+                / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100)))
                 * (1 + COALESCE((SELECT value::numeric FROM config WHERE key = 'sell_net_cushion'), 0.015))
             * POWER(10::numeric, stock.price_rounding::int)
         ) / POWER(10::numeric, stock.price_rounding::int),
@@ -455,17 +493,17 @@ AND d.current_change_percent > d.historical_avg_change_percent
 -- Estimated profit, from buy_filled_price and buy_fee alone: at the
 -- fee-adjusted floor price (same CEIL(...) breakeven formula as above),
 -- proceeds after an estimated sell fee (same buy-side fee rate, falling
--- back to 1.2%) must exceed total cost (buy_filled_price * shares +
+-- back to config.fee_percent / 100) must exceed total cost (buy_filled_price * shares +
 -- buy_fee). Uses only known buy-side values, not current market price.
 AND (
     (CEIL(
         (position.buy_filled_price::numeric
-            * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
-            / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012)))
+            * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
+            / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100)))
         * POWER(10::numeric, stock.price_rounding::int)
     ) / POWER(10::numeric, stock.price_rounding::int))
     * position.shares::numeric
-    * (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
+    * (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
     - (position.buy_filled_price::numeric * position.shares::numeric + COALESCE(position.buy_fee::numeric, 0))
 ) > 0;
 
