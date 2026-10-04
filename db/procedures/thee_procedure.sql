@@ -222,9 +222,15 @@ AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
 -- planned buys that have no live order yet. Previously only free USD was
 -- compared to the clip, so every brief cash bump (e.g. a far-buy release)
 -- inserted another planned row that then failed INSUFFICIENT_FUND forever.
--- 2026-10-03: daily $1 ETF buys spend only the Default equity portfolio.
--- This crypto USD gate does not look at that cash and does not reserve any.
+-- 2026-10-04: index.js writes config.etf_usd_reserve before this procedure
+-- and vw_etf_cash_reserve exposes it. Subtract that from free USD so a new
+-- crypto plan cannot spend dollars this run's ETF attempts still need.
+-- The reserve is only those attempts (open NORMAL session, dip rules
+-- passed, not already filled, and not skipped for lack of cash). A closed
+-- session stores 0. ETF orders are placed after this procedure, same minute.
+-- pause_buys still gates only these crypto inserts, not the ETF buys.
 AND b.available
+    - COALESCE((SELECT reserve_usd FROM vw_etf_cash_reserve), 0)
     - COALESCE((SELECT SUM(pb.shares * pb.buy_price)::numeric
                 FROM position pb JOIN stock sb ON sb.stock_id = pb.stock_id
                 WHERE pb.buy_coinbase_order_id IS NULL
@@ -337,9 +343,15 @@ WHERE b.name = 'USD'
 -- 2026-09-25 cash-backlog gate (same as the new-position insert above):
 -- don't add another planned buy the free cash can't cover once the
 -- existing no-order planned rows are funded.
--- 2026-10-03: daily $1 ETF buys spend only the Default equity portfolio.
--- This crypto USD gate does not look at that cash and does not reserve any.
+-- 2026-10-04: index.js writes config.etf_usd_reserve before this procedure
+-- and vw_etf_cash_reserve exposes it. Subtract that from free USD so a new
+-- crypto plan cannot spend dollars this run's ETF attempts still need.
+-- The reserve is only those attempts (open NORMAL session, dip rules
+-- passed, not already filled, and not skipped for lack of cash). A closed
+-- session stores 0. ETF orders are placed after this procedure, same minute.
+-- pause_buys still gates only these crypto inserts, not the ETF buys.
 AND b.available
+    - COALESCE((SELECT reserve_usd FROM vw_etf_cash_reserve), 0)
     - COALESCE((SELECT SUM(pb.shares * pb.buy_price)::numeric
                 FROM position pb JOIN stock sb ON sb.stock_id = pb.stock_id
                 WHERE pb.buy_coinbase_order_id IS NULL

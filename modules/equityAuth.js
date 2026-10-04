@@ -207,7 +207,35 @@ async function readFill(orderId) {
 // every USD row. Cash on hold and cash that cannot trade (available 0)
 // stays out. A non-200 does not fall back to the crypto key: if Default
 // cannot be read, the caller skips the ETF buy.
-async function defaultUsdAvailable() {
+function amountValue(value) {
+    if (value == null || value === '') return null
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null
+    if (typeof value === 'string') {
+        const n = Number(value)
+        return Number.isFinite(n) ? n : null
+    }
+    if (typeof value === 'object') return amountValue(value.value)
+    return null
+}
+
+function sumUsdAvailable(positions) {
+    let available = 0
+    for (const pos of positions || []) {
+        if (pos.asset !== 'USD') continue
+        const n = Number(pos.available_to_trade_fiat)
+        if (!Number.isFinite(n)) {
+            return { ok: false, available: 0, reason: 'USD available missing' }
+        }
+        available += n
+    }
+    return { ok: true, available }
+}
+
+// One portfolio read for the reserve. USD is the same sum defaultUsdAvailable
+// uses. equity_positions is where Coinbase reports stock/ETF shares,
+// average entry, and unrealized_pnl. An empty list means no equity shares,
+// which is what lets a never-held ticker (XDTE) buy its first $1.
+async function equitySnapshot() {
     try {
         const response = await equityRequest(
             'GET',
@@ -215,21 +243,57 @@ async function defaultUsdAvailable() {
             '?currency=USD'
         )
         if (response.status !== 200) {
-            return { ok: false, available: 0, reason: `HTTP ${response.status}` }
+            return { ok: false, available: 0, positions: [], reason: `HTTP ${response.status}` }
         }
-        const positions = response.data?.breakdown?.spot_positions || []
-        let available = 0
-        for (const pos of positions) {
-            if (pos.asset !== 'USD') continue
-            const n = Number(pos.available_to_trade_fiat)
-            if (!Number.isFinite(n)) {
-                return { ok: false, available: 0, reason: 'USD available missing' }
-            }
-            available += n
+        const breakdown = response.data?.breakdown || {}
+        const usd = sumUsdAvailable(breakdown.spot_positions)
+        if (!usd.ok) {
+            return { ok: false, available: 0, positions: [], reason: usd.reason }
         }
-        return { ok: true, available }
+        const positions = (breakdown.equity_positions || []).map((pos) => ({
+            cbrn: pos.cbrn || null,
+            shares: amountValue(pos.total_balance_equity),
+            averageEntry: amountValue(pos.average_entry_price),
+            unrealizedPnl: amountValue(pos.unrealized_pnl),
+        }))
+        return { ok: true, available: usd.available, positions, reason: null }
+    } catch (error) {
+        return { ok: false, available: 0, positions: [], reason: error?.message || 'request failed' }
+    }
+}
+
+async function defaultUsdAvailable() {
+    try {
+        const snap = await equitySnapshot()
+        if (!snap.ok) return { ok: false, available: 0, reason: snap.reason }
+        return { ok: true, available: snap.available }
     } catch (error) {
         return { ok: false, available: 0, reason: error?.message || 'request failed' }
+    }
+}
+
+// Live quote for the dip check. Last-close and other session-empty fields
+// are not used: a blank weekend product must not become a made-up price.
+async function equityPrice(productId) {
+    try {
+        const response = await equityRequest('GET', `/api/v3/brokerage/products/${productId}`, '')
+        if (response.status !== 200) {
+            return { ok: false, price: null, reason: `HTTP ${response.status}` }
+        }
+        const product = response.data?.product || response.data || {}
+        const direct = [product.price, product.mid_market_price]
+        for (const value of direct) {
+            const n = amountValue(value)
+            if (n != null && n > 0) return { ok: true, price: n, reason: null }
+        }
+        const bid = amountValue(product.best_bid_price)
+        const ask = amountValue(product.best_ask_price)
+        if (bid != null && ask != null && bid > 0 && ask > 0) {
+            return { ok: true, price: (bid + ask) / 2, reason: null }
+        }
+        return { ok: false, price: null, reason: 'no live price on product' }
+    } catch (error) {
+        return { ok: false, price: null, reason: error?.message || 'request failed' }
     }
 }
 
@@ -245,4 +309,6 @@ module.exports = {
     createMarketBuy,
     readFill,
     defaultUsdAvailable,
+    equitySnapshot,
+    equityPrice,
 }

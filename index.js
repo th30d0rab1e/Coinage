@@ -2,9 +2,15 @@ var ca = require('./modules/coinbaseAuth.js')
 var db = require('./modules/database.js')
 const crypto = require('crypto')
 var equity = require('./modules/equityAuth.js')
+var etfPlan = require('./modules/etfPlan.js')
 // Set each run before thee_procedure. False means the equity session is
-// closed: do not buy ETFs. Crypto cash is never reserved or transferred.
+// closed: do not buy ETFs, and do not reserve USD. When it is true,
+// etfAttemptsThisRun is the dip-eligible attempts this minute will send,
+// and config.etf_usd_reserve is their quote total so thee_procedure cannot
+// spend that Default USD on a new crypto plan. Crypto still places after
+// those attempts, in processBuyOrders. Nothing is transferred.
 let equitySessionOpen = false
+let etfAttemptsThisRun = []
 main()
 
 ///Volumes/2TBSSD/theodorecrossX/Coinbase tedTosterone/
@@ -25,6 +31,12 @@ async function main () {
         // close, holiday, or a failed check) leaves the flag false: no ETF
         // order. Crypto plans do not read this flag. This does not place an order.
         await refreshEquitySession();
+
+        // Reserve before thee_procedure inserts crypto plans. The dollars
+        // are only the ETF attempts this run still needs (session open,
+        // dip rules passed, not already filled, and Default cash can cover
+        // them). A closed session writes 0. Crypto placement is later.
+        await reserveEtfCash();
 
         //call thee procedure (now sees fresh bulk_open_orders, bulk_fills, bulk_currency)
         await db.executeQuery('Call thee_procedure();');
@@ -170,7 +182,8 @@ function chicagoToday() {
 
 // Read BLOX equity_product_details and store config.equity_session_open.
 // Closed (including weekend full close) stays 'false': no ETF order.
-// Crypto planning does not use this flag and does not reserve ETF dollars.
+// Crypto planning does not read this flag. The reserve is a separate
+// config value written only when the flag is true.
 async function refreshEquitySession() {
     try {
         const session = await equity.equitySession()
@@ -199,8 +212,8 @@ async function refreshEquitySession() {
 async function recordEtfAttempt(row) {
     await db.query(
         `INSERT INTO etf_buy
-            (ticker, chicago_date, quote_usd, filled, closed_session, coinbase_order_id, client_order_id, error_message)
-         VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8)`,
+            (ticker, chicago_date, quote_usd, filled, closed_session, coinbase_order_id, client_order_id, error_message, dip_price, fill_price)
+         VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10)`,
         [
             row.ticker,
             row.chicagoDate,
@@ -210,23 +223,177 @@ async function recordEtfAttempt(row) {
             row.coinbaseOrderId || null,
             row.clientOrderId || null,
             row.errorMessage || null,
+            // dip_price is the live price the rule compared, or null when
+            // the rule did not need one. fill_price is the execution price.
+            row.dipPrice == null ? null : row.dipPrice,
+            row.fillPrice == null ? null : row.fillPrice,
         ]
     )
 }
 
-// One market buy of etf.quote_usd per enabled ticker per Chicago day.
-// Spends only available USD in the Default portfolio (equity Ed25519 key).
-// Does not read tedTosterone USD, does not transfer, and does not change
-// what crypto may spend. If Default cannot cover this ticker's quote, skip
-// it. A closed session returns before any order. A closed-market reject is
-// recorded filled=false and does not count as today's buy.
+// Build this minute's ETF attempts and write config.etf_usd_reserve
+// before thee_procedure. pause_buys is not read here. A failure reserves
+// nothing and buys nothing, so a broken price check cannot both block
+// crypto and send an ETF order.
+async function reserveEtfCash() {
+    etfAttemptsThisRun = []
+    if (!equitySessionOpen) {
+        await setEtfUsdReserve(0)
+        console.log('ETF reserve $0: equity session closed')
+        return
+    }
+    try {
+        const plan = await buildEtfPlan()
+        etfAttemptsThisRun = plan.attempts
+        const reserved = await setEtfUsdReserve(plan.reserve)
+        const names = plan.attempts.map((row) => row.ticker).join(', ')
+        console.log(`ETF reserve $${reserved.toFixed(2)} for ${names || 'none'}`)
+        for (const note of plan.notes) console.log(note)
+    } catch (error) {
+        etfAttemptsThisRun = []
+        await setEtfUsdReserve(0)
+        console.log('reserveEtfCash() ERROR', error?.message || error)
+    }
+}
+
+async function setEtfUsdReserve(amount) {
+    const value = Number(amount)
+    const safe = Number.isFinite(value) && value > 0 ? value.toFixed(2) : '0'
+    await db.query(
+        `INSERT INTO config (key, value) VALUES ('etf_usd_reserve', $1)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+        [safe]
+    )
+    return Number(safe)
+}
+
+// Match a portfolio equity row to an etf row. Coinbase identifies the
+// position by cbrn, which we have not seen populated yet (no shares held).
+// Accept the ticker, the product id, or a cbrn whose last token is the ticker.
+function positionFor(positions, row) {
+    const ticker = String(row.ticker || '').toUpperCase()
+    const productId = String(row.product_id || '')
+    return (positions || []).find((pos) => {
+        const id = String(pos.cbrn || '')
+        if (!id) return false
+        if (id === row.ticker || id === productId) return true
+        const token = id.toUpperCase().split(/[^A-Z0-9.]+/).filter(Boolean).pop()
+        return token === ticker
+    }) || null
+}
+
+// True only when an etf_buy row may still be working. A zero fill
+// ("not filled (status CANCELLED/unknown)") is done and may be retried.
+// OPEN/PENDING/QUEUED may still fill. No status word and a non-empty
+// error (a reject such as INSUFFICIENT_FUND) is done. An order id with
+// no error at all is ambiguous, so it stays pending.
+function mightStillFill(errorMessage) {
+    const text = String(errorMessage || '')
+    const match = text.match(/status\s+([A-Za-z0-9_]+)/)
+    if (match) {
+        return ['OPEN', 'PENDING', 'QUEUED', 'UNSETTLED'].includes(match[1].toUpperCase())
+    }
+    return text.trim() === ''
+}
+
+async function buildEtfPlan() {
+    const today = chicagoToday()
+    const notes = []
+    const listed = await db.query(
+        `SELECT ticker, product_id, quote_usd, is_special
+         FROM etf
+         WHERE enabled
+         ORDER BY ticker`
+    )
+    const rows = listed?.rows || []
+    const book = await equity.equitySnapshot()
+    if (!book.ok) {
+        notes.push(`ETF plan skipped: holdings unreadable (${book.reason})`)
+        return { attempts: [], reserve: 0, notes }
+    }
+    const openOrders = await db.query(
+        `SELECT DISTINCT product_id
+         FROM bulk_open_orders
+         WHERE side = 'BUY' AND status = 'OPEN' AND product_id IS NOT NULL`
+    )
+    const openProducts = new Set((openOrders?.rows || []).map((row) => row.product_id))
+    const latest = await db.query(
+        `SELECT DISTINCT ON (ticker)
+                ticker, filled, closed_session, coinbase_order_id, error_message
+         FROM etf_buy
+         ORDER BY ticker, created_at DESC, etf_buy_id DESC`
+    )
+    const pendingTickers = new Set()
+    for (const row of latest?.rows || []) {
+        // A zero fill or a closed-market reject is terminal: filled stays
+        // false so it does not count as today's buy, and it may be retried.
+        // An order id that is still OPEN, or whose status was never shown
+        // to be done, might still fill, so it blocks another send.
+        if (row.filled || row.closed_session || !row.coinbase_order_id) continue
+        if (!mightStillFill(row.error_message)) continue
+        pendingTickers.add(row.ticker)
+    }
+    const bought = await db.query(
+        `SELECT ticker
+         FROM etf_buy
+         WHERE chicago_date = $1::date AND filled`,
+        [today]
+    )
+    const boughtToday = new Set((bought?.rows || []).map((row) => row.ticker))
+    const lastFills = await db.query(
+        `SELECT DISTINCT ON (ticker) ticker, fill_price
+         FROM etf_buy
+         WHERE filled AND fill_price IS NOT NULL
+         ORDER BY ticker, created_at DESC, etf_buy_id DESC`
+    )
+    const lastFillByTicker = new Map((lastFills?.rows || []).map((row) => [row.ticker, Number(row.fill_price)]))
+    const info = {}
+    for (const row of rows) {
+        const held = positionFor(book.positions, row)
+        const sharesKnown = !held || held.shares != null
+        info[row.ticker] = {
+            boughtToday: boughtToday.has(row.ticker),
+            pending: openProducts.has(row.product_id) || pendingTickers.has(row.ticker),
+            sharesKnown,
+            shares: held && held.shares != null ? held.shares : 0,
+            averageEntry: held ? held.averageEntry : null,
+            unrealizedPnl: held ? held.unrealizedPnl : null,
+            lastFillPrice: lastFillByTicker.get(row.ticker) || null,
+            price: null,
+        }
+    }
+    const needPrice = rows.filter((row) => {
+        const state = info[row.ticker]
+        if (!state || state.pending || !state.sharesKnown) return false
+        // First $1 with no shares does not need a price. A held position
+        // or a later buy the same day does.
+        return state.boughtToday || Number(state.shares) > 0
+    })
+    await Promise.all(needPrice.map(async (row) => {
+        const quote = await equity.equityPrice(row.product_id)
+        if (quote.ok) info[row.ticker].price = quote.price
+        else notes.push(`ETF price unavailable ${row.ticker}: ${quote.reason}`)
+    }))
+    const planned = etfPlan.planAttempts(rows, info, etfPlan.inCatchUpWindow())
+    notes.push(...planned.notes)
+    const funded = etfPlan.fundAttempts(planned.chosen, book.available)
+    notes.push(...funded.notes)
+    return { attempts: funded.attempts, reserve: funded.reserve, notes }
+}
+
+// Send the attempts reserved at the start of this run. Does not re-pick
+// tickers: a dip that appears only after thee_procedure would spend cash
+// the crypto plans were already allowed to use. Does not re-reserve.
+// A closed-market reject or a zero fill stays filled=false. A failed
+// fill GET is still recorded filled=true so the $1 is not sent twice.
 async function processEquityEtfBuys() {
     if (!equitySessionOpen) return
-    const today = chicagoToday()
+    if (etfAttemptsThisRun.length === 0) {
+        console.log('ETF buys: nothing reserved this run')
+        return
+    }
     let cash = 0
     try {
-        // Why here: equity orders can only spend Default, so the cash check
-        // has to be that portfolio's available USD, not the crypto balance.
         const bal = await equity.defaultUsdAvailable()
         if (!bal.ok) {
             console.log(`ETF buys skipped: Default USD unreadable (${bal.reason})`)
@@ -234,30 +401,15 @@ async function processEquityEtfBuys() {
         }
         cash = bal.available
         console.log(`ETF Default USD available: $${cash.toFixed(2)}`)
-        const result = await db.query(
-            `SELECT e.ticker, e.product_id, e.quote_usd
-             FROM etf e
-             WHERE e.enabled
-             AND NOT EXISTS (
-                 SELECT 1 FROM etf_buy b
-                 WHERE b.ticker = e.ticker
-                   AND b.chicago_date = $1::date
-                   AND b.filled
-             )
-             ORDER BY e.ticker`,
-            [today]
-        )
-        const rows = result?.rows || []
-        console.log(`ETF buys still open today: ${rows.length}`)
-        for (const row of rows) {
+        const today = chicagoToday()
+        for (const row of etfAttemptsThisRun) {
             if (!equitySessionOpen) break
             const quote = Number(row.quote_usd)
-            // Full quote only. Short Default cash skips this ticker. Nothing
-            // is pulled from the crypto portfolio to cover the difference.
             if (!(cash >= quote) || !(quote > 0)) {
                 console.log(`ETF buy skipped: ${row.ticker} needs $${quote.toFixed(2)} Default USD, have $${cash.toFixed(2)}`)
                 continue
             }
+            console.log(`ETF buy attempt: ${row.ticker} $${quote.toFixed(2)} (${row.reason})`)
             const clientOrderId = crypto.randomUUID()
             const response = await equity.createMarketBuy(row.product_id, quote, clientOrderId)
             if (equity.isClosedMarket(response)) {
@@ -270,6 +422,7 @@ async function processEquityEtfBuys() {
                     closedSession: true,
                     clientOrderId,
                     errorMessage: message,
+                    dipPrice: row.dipPrice,
                 })
                 equitySessionOpen = false
                 await db.query(
@@ -292,6 +445,7 @@ async function processEquityEtfBuys() {
                         coinbaseOrderId: orderId,
                         clientOrderId,
                         errorMessage: 'order queueing is not available',
+                        dipPrice: row.dipPrice,
                     })
                     equitySessionOpen = false
                     await db.query(
@@ -300,10 +454,10 @@ async function processEquityEtfBuys() {
                     console.log(`ETF session closed after accept ${row.ticker}; not today's buy`)
                     break
                 }
-                // Any fill counts as today's buy so we do not send another
-                // quote_usd. A zero fill does not, and will retry later.
-                // If the fill GET failed, count it anyway rather than exceed quote_usd.
                 const filled = fill.unknown || fill.filledSize > 0 || fill.filledQuote > 0
+                const fillPrice = fill.filledSize > 0 && fill.filledQuote > 0
+                    ? fill.filledQuote / fill.filledSize
+                    : null
                 await recordEtfAttempt({
                     ticker: row.ticker,
                     chicagoDate: today,
@@ -313,9 +467,10 @@ async function processEquityEtfBuys() {
                     coinbaseOrderId: orderId,
                     clientOrderId,
                     errorMessage: filled ? null : `not filled (status ${fill.status || 'unknown'})`,
+                    dipPrice: row.dipPrice,
+                    fillPrice: filled ? fillPrice : null,
                 })
                 if (filled) {
-                    // Later tickers in this run must not reuse dollars just spent.
                     cash -= quote
                     console.log(`ETF buy filled: ${row.ticker} $${quote.toFixed(2)}`)
                 } else {
@@ -331,6 +486,7 @@ async function processEquityEtfBuys() {
                     closedSession: false,
                     clientOrderId,
                     errorMessage: message,
+                    dipPrice: row.dipPrice,
                 })
                 console.log(`ETF buy FAILED: ${row.ticker} ${message}`)
             }
@@ -348,8 +504,10 @@ async function processBuyOrders () {
         // than via vw_balance. If there isn't at least $1 free, don't even look at
         // the pending-buy backlog -- every one of them would just fail anyway.
         //
-        // Daily ETF buys spend Default USD only. They run here so a closed
-        // session no-ops, and they do not change the crypto cash figure below.
+        // ETF attempts that were reserved before thee_procedure go first.
+        // Crypto reads the live balance after they return, so it still
+        // trades this minute with whatever Default USD is left. pause_buys
+        // does not apply to the ETF call.
         await processEquityEtfBuys()
 
         // Naked-buy heal path: remake cancel+create can leave buy_coinbase_order_id
