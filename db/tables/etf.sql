@@ -2,8 +2,8 @@
 -- product_id is the canonical Advanced Trade id (64-hex), not the ticker.
 -- Orders must use product_id; the ticker is only a label.
 -- is_special distinguishes the Alpaca-style repeat rules. BLOX, CHPY,
--- TOPW, and TSLW are specials. XDTE is a regular: a later buy the same
--- Chicago day needs a 1% dip, and only one regular is attempted per minute.
+-- TOPW, TSLW, and XDTE are specials.
+-- XDTE was made a special on 2026-10-04 so it gets same-day dip rebuys and the 2:45 PM CT catch-up.
 CREATE TABLE IF NOT EXISTS public.etf (
     ticker     text PRIMARY KEY,
     product_id text NOT NULL,
@@ -24,4 +24,4 @@ COMMENT ON COLUMN public.etf.product_id IS
 COMMENT ON COLUMN public.etf.quote_usd IS
     'Quote USD notional for one market buy. Default $1.';
 COMMENT ON COLUMN public.etf.is_special IS
-    'True for BLOX, CHPY, TOPW, TSLW. False for regulars such as XDTE.';
+    'True for BLOX, CHPY, TOPW, TSLW, and XDTE. XDTE was made a special on 2026-10-04 so it gets same-day dip rebuys and the 2:45 PM CT catch-up.';

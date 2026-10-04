@@ -1,10 +1,9 @@
 -- 2026-10-04: ETF dip rules and a cash reserve that crypto planning can see.
 --
--- is_special marks BLOX, CHPY, TOPW, and TSLW. They keep the special
+-- is_special marks BLOX, CHPY, TOPW, TSLW, and XDTE. They keep the special
 -- repeat rule (later same-day buy when price < last fill, all of them
--- in one minute, plus a 2:45-3:00 PM Chicago catch-up). XDTE is inserted
--- as a regular so it does not inherit those rules: its later buy needs
--- a 1% dip, and only one regular is attempted per minute.
+-- in one minute, plus a 2:45-3:00 PM Chicago catch-up).
+-- XDTE was made a special on 2026-10-04 so it gets same-day dip rebuys and the 2:45 PM CT catch-up.
 --
 -- etf_usd_reserve is written by index.js immediately before thee_procedure.
 -- It is the quote USD of attempts this run will actually send: session
@@ -20,7 +19,7 @@ ALTER TABLE public.etf
     ADD COLUMN IF NOT EXISTS is_special boolean NOT NULL DEFAULT false;
 
 COMMENT ON COLUMN public.etf.is_special IS
-    'True for BLOX, CHPY, TOPW, TSLW (special repeat and end-of-session catch-up). False for regulars such as XDTE, which need a 1% dip and only one attempt per minute.';
+    'True for BLOX, CHPY, TOPW, TSLW, and XDTE (special repeat and end-of-session catch-up). XDTE was made a special on 2026-10-04 so it gets same-day dip rebuys and the 2:45 PM CT catch-up. False for other regulars, which need a 1% dip and only one attempt per minute.';
 
 COMMENT ON COLUMN public.etf.quote_usd IS
     'Quote USD notional for one market buy. Default $1. Not a share count.';
@@ -38,7 +37,8 @@ VALUES (
     '3bfc825072c7a8645061361abb3e4bc6ca1752223580e3acbe603b6a02a42bd2',
     1,
     true,
-    false
+    -- XDTE was made a special on 2026-10-04 so it gets same-day dip rebuys and the 2:45 PM CT catch-up.
+    true
 )
 ON CONFLICT (ticker) DO UPDATE
 SET product_id = EXCLUDED.product_id,
