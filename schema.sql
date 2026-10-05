@@ -535,8 +535,8 @@ AND NOT EXISTS (
 -- cover that clip, not a hard-coded $1.
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
 SELECT s.stock_id, s.name,
-    TRUNC((s.close::numeric * 1.05 * 1.01), stock.price_rounding::integer) AS buy_price,
-    TRUNC((s.close::numeric * 1.05),        stock.price_rounding::integer) AS buy_stop_price,
+    TRUNC((s.close::numeric * 1.02 * 1.01), stock.price_rounding::integer) AS buy_price,
+    TRUNC((s.close::numeric * 1.02),        stock.price_rounding::integer) AS buy_stop_price,
     TRUNC((
         (
             SELECT COUNT(*)::numeric
@@ -817,11 +817,11 @@ AND (
 -- current price to trigger) -- and since the "clear error_message" step
 -- below resets it every cycle, it just retries the same doomed price
 -- forever (confirmed stuck this way on OCEAN-USD for 4 days). Recompute
--- using the same flat 5% rule a fresh pick uses, off current price
+-- using the same flat 2% rule a fresh pick uses, off current price
 -- instead of the stale signal-time price.
 UPDATE position
-SET buy_stop_price = TRUNC(stock.price::numeric * 1.05, stock.price_rounding::integer),
-    buy_price = TRUNC(stock.price::numeric * 1.05 * 1.01, stock.price_rounding::integer)
+SET buy_stop_price = TRUNC(stock.price::numeric * 1.02, stock.price_rounding::integer),
+    buy_price = TRUNC(stock.price::numeric * 1.02 * 1.01, stock.price_rounding::integer)
 FROM stock
 WHERE position.stock_id = stock.stock_id
 AND position.buy_coinbase_order_id IS NULL
@@ -829,7 +829,7 @@ AND position.buy_filled_price IS NULL
 AND stock.price::numeric >= position.buy_stop_price::numeric;
 
 -- 2026-09-27 add-on buy cap: a buy on a coin you already hold must never be
--- priced above your cheapest open bag. Plans are set 5% above market and the
+-- priced above your cheapest open bag. Plans are set 2% above market and the
 -- reset step just above can raise them again, so OCEAN bag 939 filled at
 -- 0.1718 even though bag 926 was bought at 0.1695. This caps the trigger at
 -- config.add_buy_cap_ratio (default 0.99 = 1% below) times the cheapest open
