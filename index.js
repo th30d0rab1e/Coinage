@@ -316,9 +316,99 @@ function mightStillFill(errorMessage) {
     return text.trim() === ''
 }
 
+// fills is the source of truth for whether an ETF order actually filled.
+// readFill often still sees OPEN right after place; processNewFills lands
+// the trade later. Reconcile today's etf_buy from fills before dip planning.
+async function reconcileEtfBuysFromFills(chicagoDate) {
+    const result = await db.query(
+        `UPDATE etf_buy AS e
+         SET filled = true,
+             fill_price = f.avg_price,
+             error_message = NULL
+         FROM (
+             SELECT order_id,
+                    AVG(price)::numeric AS avg_price
+             FROM fills
+             WHERE order_id IS NOT NULL
+               AND price IS NOT NULL
+             GROUP BY order_id
+         ) AS f
+         WHERE e.coinbase_order_id = f.order_id
+           AND e.chicago_date = $1::date
+           AND (
+               e.filled IS NOT TRUE
+               OR e.fill_price IS NULL
+               OR e.error_message IS NOT NULL
+           )
+         RETURNING e.etf_buy_id, e.ticker, e.fill_price`,
+        [chicagoDate]
+    )
+    for (const row of result?.rows || []) {
+        console.log(`ETF reconcile from fills: ${row.ticker} fill_price=${row.fill_price}`)
+    }
+    return (result?.rows || []).length
+}
+
+// Avg fill price from fills for one Coinbase order id, or null.
+async function fillPriceFromFills(orderId) {
+    if (!orderId) return null
+    const result = await db.query(
+        `SELECT AVG(price)::numeric AS avg_price
+         FROM fills
+         WHERE order_id = $1 AND price IS NOT NULL`,
+        [orderId]
+    )
+    const avg = result?.rows?.[0]?.avg_price
+    return avg == null ? null : Number(avg)
+}
+
+// Still-open today's etf_buy with no fills row yet: ask Coinbase once.
+// Fills already covered by reconcileEtfBuysFromFills are skipped.
+async function probeOpenEtfBuys(chicagoDate) {
+    const open = await db.query(
+        `SELECT e.etf_buy_id, e.ticker, e.coinbase_order_id, e.error_message
+         FROM etf_buy e
+         WHERE e.chicago_date = $1::date
+           AND e.filled IS NOT TRUE
+           AND e.closed_session IS NOT TRUE
+           AND e.coinbase_order_id IS NOT NULL
+           AND NOT EXISTS (
+               SELECT 1 FROM fills f WHERE f.order_id = e.coinbase_order_id
+           )`,
+        [chicagoDate]
+    )
+    let updated = 0
+    for (const row of open?.rows || []) {
+        if (!mightStillFill(row.error_message)) continue
+        const fill = await equity.readFill(row.coinbase_order_id)
+        if (fill.unknown) continue
+        const filled = fill.filledSize > 0 || fill.filledQuote > 0
+        if (!filled) continue
+        const fillPrice = fill.filledSize > 0 && fill.filledQuote > 0
+            ? fill.filledQuote / fill.filledSize
+            : null
+        await db.query(
+            `UPDATE etf_buy
+             SET filled = true,
+                 fill_price = COALESCE($2::numeric, fill_price),
+                 error_message = NULL
+             WHERE etf_buy_id = $1`,
+            [row.etf_buy_id, fillPrice]
+        )
+        updated += 1
+        console.log(`ETF probe readFill: ${row.ticker} fill_price=${fillPrice}`)
+    }
+    return updated
+}
+
 async function buildEtfPlan() {
     const today = chicagoToday()
     const notes = []
+    // Sync etf_buy from fills (and probe any still-open leftovers) before
+    // pending / boughtToday / lastFillPrice so dips are not blocked by a
+    // stale "status OPEN" row whose fill already landed.
+    await reconcileEtfBuysFromFills(today)
+    await probeOpenEtfBuys(today)
     const listed = await db.query(
         `SELECT ticker, product_id, quote_usd, is_special
          FROM etf
@@ -470,31 +560,43 @@ async function processEquityEtfBuys() {
             }
             if (response?.success === true) {
                 const orderId = response.success_response?.order_id
-                const fill = await equity.readFill(orderId)
-                const closedFill = equity.isClosedMarket(fill.raw || fill)
-                if (closedFill) {
-                    await recordEtfAttempt({
-                        ticker: row.ticker,
-                        chicagoDate: today,
-                        quoteUsd: quote,
-                        filled: false,
-                        closedSession: true,
-                        coinbaseOrderId: orderId,
-                        clientOrderId,
-                        errorMessage: 'order queueing is not available',
-                        dipPrice: row.dipPrice,
-                    })
-                    equitySessionOpen = false
-                    await db.query(
-                        `UPDATE config SET value = 'false' WHERE key = 'equity_session_open'`
-                    )
-                    console.log(`ETF session closed after accept ${row.ticker}; not today's buy`)
-                    break
+                // Prefer fills when a trade already landed; otherwise readFill.
+                // A later minute's reconcileEtfBuysFromFills repairs OPEN rows.
+                const fromFills = await fillPriceFromFills(orderId)
+                let filled = false
+                let fillPrice = null
+                let fillStatus = null
+                if (fromFills != null && Number.isFinite(fromFills)) {
+                    filled = true
+                    fillPrice = fromFills
+                } else {
+                    const fill = await equity.readFill(orderId)
+                    const closedFill = equity.isClosedMarket(fill.raw || fill)
+                    if (closedFill) {
+                        await recordEtfAttempt({
+                            ticker: row.ticker,
+                            chicagoDate: today,
+                            quoteUsd: quote,
+                            filled: false,
+                            closedSession: true,
+                            coinbaseOrderId: orderId,
+                            clientOrderId,
+                            errorMessage: 'order viewing is not available',
+                            dipPrice: row.dipPrice,
+                        })
+                        equitySessionOpen = false
+                        await db.query(
+                            `UPDATE config SET value = 'false' WHERE key = 'equity_session_open'`
+                        )
+                        console.log(`ETF session closed after accept ${row.ticker}; not today's buy`)
+                        break
+                    }
+                    filled = fill.unknown || fill.filledSize > 0 || fill.filledQuote > 0
+                    fillPrice = fill.filledSize > 0 && fill.filledQuote > 0
+                        ? fill.filledQuote / fill.filledSize
+                        : null
+                    fillStatus = fill.status
                 }
-                const filled = fill.unknown || fill.filledSize > 0 || fill.filledQuote > 0
-                const fillPrice = fill.filledSize > 0 && fill.filledQuote > 0
-                    ? fill.filledQuote / fill.filledSize
-                    : null
                 await recordEtfAttempt({
                     ticker: row.ticker,
                     chicagoDate: today,
@@ -503,7 +605,7 @@ async function processEquityEtfBuys() {
                     closedSession: false,
                     coinbaseOrderId: orderId,
                     clientOrderId,
-                    errorMessage: filled ? null : `not filled (status ${fill.status || 'unknown'})`,
+                    errorMessage: filled ? null : `not filled (status ${fillStatus || 'unknown'})`,
                     dipPrice: row.dipPrice,
                     fillPrice: filled ? fillPrice : null,
                 })
@@ -511,7 +613,7 @@ async function processEquityEtfBuys() {
                     cash -= quote
                     console.log(`ETF buy filled: ${row.ticker} $${quote.toFixed(2)}`)
                 } else {
-                    console.log(`ETF buy not filled, will retry: ${row.ticker} status ${fill.status}`)
+                    console.log(`ETF buy not filled, will retry: ${row.ticker} status ${fillStatus}`)
                 }
             } else {
                 const message = response?.error_response?.message || 'unknown'
