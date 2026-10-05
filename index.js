@@ -836,9 +836,9 @@ async function processRemakeOrders () {
         // own ordering exactly -- a bare `SELECT * FROM view` doesn't reliably
         // preserve a view's internal ORDER BY once queried from outside it.
         // vw_edit_orders remake rules (buy and sell both go through this query):
-        // every open buy bag can be remade; sells are one bag per coin
-        // (stock_id) -- the filled bag with the lowest buy_filled_price
-        // (then buy_stop_price, position_id). Bags with no buy fill are skipped.
+        // every open buy bag can be remade (no creation_hierarchy filter);
+        // sells only remake creation_hierarchy = 1 (cheapest fill per coin,
+        // ranked by thee_procedure on buy_filled_price / buy_stop_price).
         const orders = await db.executeQuery(`SELECT * FROM vw_edit_orders ORDER BY last_remade_at ASC NULLS FIRST, price_diff DESC;`)
         for(let i = 0; i < orders.length; i++){
             let element = orders[i];
