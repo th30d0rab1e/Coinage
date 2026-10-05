@@ -28,8 +28,9 @@ CREATE TABLE IF NOT EXISTS public.position (
     buy_placed_at          timestamp without time zone,
     buy_released_at        timestamp without time zone,
     -- 2026-10-05 (migrations/2026-10-05_position_creation_hierarchy.sql):
-    -- per-coin sequence of open positions (1 = cheapest fill), by
-    -- buy_filled_price ASC NULLS LAST, then buy_stop_price ASC NULLS LAST,
-    -- then position_id. thee_procedure recomputes it every run.
+    -- per-coin sequence of open positions with sell_price set (1 = cheapest
+    -- fill); NULL when sell_price IS NULL. Order: buy_filled_price ASC
+    -- NULLS LAST, then buy_stop_price ASC NULLS LAST, then position_id.
+    -- thee_procedure recomputes it every run.
     creation_hierarchy       integer
 );

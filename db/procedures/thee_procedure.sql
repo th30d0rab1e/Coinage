@@ -674,12 +674,12 @@ AND EXISTS (
 );
 
 -- 2026-10-05: number each open position per coin (creation_hierarchy).
--- 1 = cheapest fill (lowest buy_filled_price), then lowest buy_stop_price;
--- NOT the oldest row. "Coin" means stock_id, not period_type, so
--- day/month/year rows share one sequence.
--- Order: buy_filled_price ASC NULLS LAST, buy_stop_price ASC NULLS LAST,
--- position_id ASC (tie-break). Unfilled bags (NULL buy_filled_price) sort
--- after every filled bag, ranked among themselves by buy_stop_price.
+-- Only rows with sell_price IS NOT NULL are ranked. 1 = cheapest fill
+-- (lowest buy_filled_price), then lowest buy_stop_price; NOT the oldest
+-- row. Rows with sell_price NULL keep creation_hierarchy NULL (not numbered).
+-- "Coin" means stock_id, not period_type, so day/month/year rows share one
+-- sequence. Order among ranked rows: buy_filled_price ASC NULLS LAST,
+-- buy_stop_price ASC NULLS LAST, position_id ASC (tie-break).
 -- Placed here, after every INSERT and DELETE on position in this run
 -- (orphan recovery, new and average-down buys, stale-plan expiry, and the
 -- Step 3 close-out), so the numbers match the rows that are left.
@@ -689,14 +689,20 @@ AND EXISTS (
 UPDATE position p
 SET creation_hierarchy = r.rn
 FROM (
-    SELECT position_id,
-           ROW_NUMBER() OVER (
-               PARTITION BY stock_id
-               ORDER BY buy_filled_price ASC NULLS LAST,
-                        buy_stop_price ASC NULLS LAST,
-                        position_id ASC
-           ) AS rn
-    FROM position
+    SELECT p_all.position_id,
+           ranked.rn
+    FROM position p_all
+    LEFT JOIN (
+        SELECT position_id,
+               ROW_NUMBER() OVER (
+                   PARTITION BY stock_id
+                   ORDER BY buy_filled_price ASC NULLS LAST,
+                            buy_stop_price ASC NULLS LAST,
+                            position_id ASC
+               ) AS rn
+        FROM position
+        WHERE sell_price IS NOT NULL
+    ) ranked ON ranked.position_id = p_all.position_id
 ) r
 WHERE p.position_id = r.position_id
   AND p.creation_hierarchy IS DISTINCT FROM r.rn;
