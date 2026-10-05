@@ -835,6 +835,8 @@ async function processRemakeOrders () {
         // an arbitrary row cap. Explicit ORDER BY here matches vw_edit_orders'
         // own ordering exactly -- a bare `SELECT * FROM view` doesn't reliably
         // preserve a view's internal ORDER BY once queried from outside it.
+        // vw_edit_orders only returns creation_hierarchy = 1 rows (oldest open
+        // bag per coin); buy and sell remakes both go through this query.
         const orders = await db.executeQuery(`SELECT * FROM vw_edit_orders ORDER BY last_remade_at ASC NULLS FIRST, price_diff DESC;`)
         for(let i = 0; i < orders.length; i++){
             let element = orders[i];

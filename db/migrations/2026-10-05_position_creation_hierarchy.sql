@@ -1,4 +1,4 @@
--- 2026-10-05: buy_order_number numbers each open position per coin.
+-- 2026-10-05: creation_hierarchy numbers each open position per coin.
 -- The first open BTC-USD row is 1, the second is 2, and so on.
 -- "Coin" is the product (stock_id / name), not period_type, so day,
 -- month, and year rows for one coin share a single sequence.
@@ -13,15 +13,15 @@
 -- Idempotent.
 
 ALTER TABLE public.position
-    ADD COLUMN IF NOT EXISTS buy_order_number integer;
+    ADD COLUMN IF NOT EXISTS creation_hierarchy integer;
 
-COMMENT ON COLUMN public.position.buy_order_number IS
+COMMENT ON COLUMN public.position.creation_hierarchy IS
     'Per-coin sequence of open positions (1 = oldest), by date_created then position_id. Recomputed every run by thee_procedure.';
 
 -- First fill, so the column has values before the next procedure run.
 -- Same statement as in thee_procedure.
 UPDATE public.position p
-SET buy_order_number = r.rn
+SET creation_hierarchy = r.rn
 FROM (
     SELECT position_id,
            ROW_NUMBER() OVER (
@@ -31,4 +31,4 @@ FROM (
     FROM public.position
 ) r
 WHERE p.position_id = r.position_id
-  AND p.buy_order_number IS DISTINCT FROM r.rn;
+  AND p.creation_hierarchy IS DISTINCT FROM r.rn;

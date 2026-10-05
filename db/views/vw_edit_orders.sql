@@ -80,6 +80,12 @@
 -- its own limit (the ratchet already implies this whenever the current
 -- stop is >= sell_price, which thee_procedure guarantees; this just makes
 -- it explicit).
+--
+-- 2026-10-05 -- remakes only for creation_hierarchy = 1: only the oldest
+-- open bag per coin (stock_id) is remade. Newer average-down / stacked
+-- bags keep their original stops until they become #1. Applied to the buy
+-- branch and both sell branches below; processRemakeOrders() reads only
+-- this view, so the filter covers every remake path.
 CREATE OR REPLACE VIEW public.vw_edit_orders AS
 SELECT p.name,
     p.period_type,
@@ -106,6 +112,8 @@ WHERE p.buy_coinbase_order_id IS NOT NULL
 AND p.buy_filled_price IS NULL
 AND p.buy_stop_price > trunc(s.price::numeric * bal.stop_mult, s.price_rounding)::double precision
 AND p.buy_price > trunc(s.price::numeric * bal.stop_mult * 1.01, s.price_rounding)::double precision
+-- Only the oldest open bag per coin is remade.
+AND p.creation_hierarchy = 1
 
 UNION ALL
 
@@ -158,6 +166,8 @@ AND ns.new_stop >= p.sell_price::numeric
 -- FIX 1: profit gate at the NEW stop, not the old limit.
 AND pr.net_at_new_stop > 0
 AND pr.net_at_new_stop > (SELECT COALESCE(AVG(profit), 0) FROM profit_history WHERE period_type = p.period_type)
+-- Only the oldest open bag per coin is remade.
+AND p.creation_hierarchy = 1
 
 UNION ALL
 
@@ -218,4 +228,6 @@ AND ns.new_stop >= p.sell_price::numeric
 -- FIX 1: profit gate at the NEW stop, not the old limit.
 AND pr.net_at_new_stop > 0
 AND pr.net_at_new_stop > (SELECT COALESCE(AVG(profit), 0) FROM profit_history WHERE period_type = p.period_type)
+-- Only the oldest open bag per coin is remade.
+AND p.creation_hierarchy = 1
 ORDER BY last_remade_at ASC NULLS FIRST, price_diff DESC;
