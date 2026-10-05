@@ -992,9 +992,12 @@ AND EXISTS (
 );
 
 -- 2026-10-05: number each open position per coin (creation_hierarchy).
--- The first open BTC-USD row is 1, the second is 2, and so on. "Coin" means
--- stock_id, not period_type, so day/month/year rows share one sequence.
--- Ordered by date_created, then position_id to break ties.
+-- 1 = cheapest fill (lowest buy_filled_price), then lowest buy_stop_price;
+-- NOT the oldest row. "Coin" means stock_id, not period_type, so
+-- day/month/year rows share one sequence.
+-- Order: buy_filled_price ASC NULLS LAST, buy_stop_price ASC NULLS LAST,
+-- position_id ASC (tie-break). Unfilled bags (NULL buy_filled_price) sort
+-- after every filled bag, ranked among themselves by buy_stop_price.
 -- Placed here, after every INSERT and DELETE on position in this run
 -- (orphan recovery, new and average-down buys, stale-plan expiry, and the
 -- Step 3 close-out), so the numbers match the rows that are left.
@@ -1007,7 +1010,9 @@ FROM (
     SELECT position_id,
            ROW_NUMBER() OVER (
                PARTITION BY stock_id
-               ORDER BY date_created ASC NULLS LAST, position_id ASC
+               ORDER BY buy_filled_price ASC NULLS LAST,
+                        buy_stop_price ASC NULLS LAST,
+                        position_id ASC
            ) AS rn
     FROM position
 ) r
@@ -1593,7 +1598,7 @@ CREATE TABLE public."position" (
 -- Name: COLUMN "position".creation_hierarchy; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public."position".creation_hierarchy IS 'Per-coin sequence of open positions (1 = oldest), by date_created then position_id. Recomputed every run by thee_procedure.';
+COMMENT ON COLUMN public."position".creation_hierarchy IS 'Per-coin sequence of open positions (1 = cheapest fill), by buy_filled_price ASC NULLS LAST, then buy_stop_price ASC NULLS LAST, then position_id. Recomputed every run by thee_procedure.';
 
 
 --
