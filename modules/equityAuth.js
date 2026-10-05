@@ -272,8 +272,12 @@ async function defaultUsdAvailable() {
     }
 }
 
-// Live quote for the dip check. Last-close and other session-empty fields
-// are not used: a blank weekend product must not become a made-up price.
+// Live Coinbase quote for the dip check. Last-close and other session-empty
+// fields are not used: a blank weekend product must not become a made-up
+// price. When price/mid/bid/ask are all blank (common on these ETF products
+// even in NORMAL session), callers fall back to stock.price populated by
+// modules/alpacaMarketData.js from Alpaca IEX — this function stays
+// Coinbase-only so auth and market-data stay separate.
 async function equityPrice(productId) {
     try {
         const response = await equityRequest('GET', `/api/v3/brokerage/products/${productId}`, '')

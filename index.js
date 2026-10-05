@@ -3,6 +3,9 @@ var db = require('./modules/database.js')
 const crypto = require('crypto')
 var equity = require('./modules/equityAuth.js')
 var etfPlan = require('./modules/etfPlan.js')
+// IEX snapshots → stock.price for enabled ETF tickers. Secrets load from
+// the Alpaca bot config outside this repo (see alpacaMarketData.js).
+var alpacaMd = require('./modules/alpacaMarketData.js')
 // Set each run before thee_procedure. False means the equity session is
 // closed: do not buy ETFs, and do not reserve USD. When it is true,
 // etfAttemptsThisRun is the dip-eligible attempts this minute will send,
@@ -31,6 +34,12 @@ async function main () {
         // close, holiday, or a failed check) leaves the flag false: no ETF
         // order. Crypto plans do not read this flag. This does not place an order.
         await refreshEquitySession();
+
+        // Pull Alpaca IEX prices for every enabled etf row into stock.price
+        // (bare ticker). Runs whether or not the equity session is open so
+        // the table stays fresh; dip decisions still gate on session below.
+        // Cron starts a fresh node each minute, so no bot restart is needed.
+        await syncEtfStockPrices();
 
         // Reserve before thee_procedure inserts crypto plans. The dollars
         // are only the ETF attempts this run still needs (session open,
@@ -231,6 +240,17 @@ async function recordEtfAttempt(row) {
     )
 }
 
+// Upsert stock.price from Alpaca IEX for every enabled etf.ticker.
+// Failures log and leave prior stock.price alone; dip path may then
+// still miss a price and skip rather than invent one.
+async function syncEtfStockPrices() {
+    try {
+        await alpacaMd.syncEnabledEtfStockPrices(db)
+    } catch (error) {
+        console.log('syncEtfStockPrices() ERROR', error?.message || error)
+    }
+}
+
 // Build this minute's ETF attempts and write config.etf_usd_reserve
 // before thee_procedure. pause_buys is not read here. A failure reserves
 // nothing and buys nothing, so a broken price check cannot both block
@@ -369,11 +389,28 @@ async function buildEtfPlan() {
         // or a later buy the same day does.
         return state.boughtToday || Number(state.shares) > 0
     })
+    // Coinbase product price/mid/bid/ask first. When those are blank
+    // (common on these ETF products), use stock.price written by the
+    // Alpaca IEX sync earlier this run. Session open / not-halted is
+    // already required before we get here via equitySessionOpen.
     await Promise.all(needPrice.map(async (row) => {
         const quote = await equity.equityPrice(row.product_id)
         if (quote.ok) info[row.ticker].price = quote.price
-        else notes.push(`ETF price unavailable ${row.ticker}: ${quote.reason}`)
+        else notes.push(`ETF Coinbase price blank ${row.ticker}: ${quote.reason}`)
     }))
+    const stillNeed = needPrice.filter((row) => !(Number(info[row.ticker]?.price) > 0))
+    if (stillNeed.length > 0) {
+        const fromStock = await alpacaMd.readStockPrices(db, stillNeed.map((r) => r.ticker))
+        for (const row of stillNeed) {
+            const p = fromStock.get(String(row.ticker).toUpperCase())
+            if (Number(p) > 0) {
+                info[row.ticker].price = p
+                notes.push(`ETF price from stock (Alpaca IEX) ${row.ticker}: ${p}`)
+            } else {
+                notes.push(`ETF price unavailable ${row.ticker}: Coinbase blank and no stock.price`)
+            }
+        }
+    }
     const planned = etfPlan.planAttempts(rows, info, etfPlan.inCatchUpWindow())
     notes.push(...planned.notes)
     const funded = etfPlan.fundAttempts(planned.chosen, book.available)
