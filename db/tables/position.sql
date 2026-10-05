@@ -26,5 +26,9 @@ CREATE TABLE IF NOT EXISTS public.position (
     -- when the current buy order was created/remade, and when far-buy cash
     -- release last cancelled it. Used to stop the place/cancel loop.
     buy_placed_at          timestamp without time zone,
-    buy_released_at        timestamp without time zone
+    buy_released_at        timestamp without time zone,
+    -- 2026-10-05 (migrations/2026-10-05_position_buy_order_number.sql):
+    -- per-coin sequence of open positions (1 = oldest), by date_created
+    -- then position_id. thee_procedure recomputes it every run.
+    buy_order_number       integer
 );

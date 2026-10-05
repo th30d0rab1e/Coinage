@@ -673,6 +673,29 @@ AND EXISTS (
     WHERE ph.buy_coinbase_order_id = p.buy_coinbase_order_id AND ph.sell_fills_id = p.sell_coinbase_order_id
 );
 
+-- 2026-10-05: number each open position per coin (buy_order_number).
+-- The first open BTC-USD row is 1, the second is 2, and so on. "Coin" means
+-- stock_id, not period_type, so day/month/year rows share one sequence.
+-- Ordered by date_created, then position_id to break ties.
+-- Placed here, after every INSERT and DELETE on position in this run
+-- (orphan recovery, new and average-down buys, stale-plan expiry, and the
+-- Step 3 close-out), so the numbers match the rows that are left.
+-- Recomputed every run, so a closed or deleted row makes the rows after it
+-- move down. Only rows whose number actually changes are written, so the
+-- position_audit trigger does not log an unchanged row every run.
+UPDATE position p
+SET buy_order_number = r.rn
+FROM (
+    SELECT position_id,
+           ROW_NUMBER() OVER (
+               PARTITION BY stock_id
+               ORDER BY date_created ASC NULLS LAST, position_id ASC
+           ) AS rn
+    FROM position
+) r
+WHERE p.position_id = r.position_id
+  AND p.buy_order_number IS DISTINCT FROM r.rn;
+
 -- Once the position row is gone, its audit history goes with it. The DELETE
 -- trigger's snapshot is included, on purpose.
 DELETE FROM position_audit AS pa

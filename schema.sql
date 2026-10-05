@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict Fy0Q4ppSoUEVJU7tp7nGR14EZYhbaLcNklpXqPizntIb16vIMC6ZsStyQXXjheH
+\restrict Ldh4sGePG8deyZ73nD2KLCsZI0Mi69jKbxALMwUA7Fb0rNwucSoKJ3VKLvjrJGm
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -357,6 +357,24 @@ WHERE stock.name = bs.id
 AND bs.id LIKE '%-USD'
 AND bs.price != '';
 
+-- 2026-09-25: flag coins that have vanished from Coinbase's product catalog.
+-- The UPDATE above only touches stocks that still appear in bulk_stock, so a
+-- coin removed from the catalog entirely (LRC-USD) kept trading_disabled NULL
+-- and a frozen price forever -- the comment above assumed "not in the catalog"
+-- meant "never a candidate", but its already-inserted planned buy row was
+-- still retried every cycle, failing with 'Invalid product_id' (18,987 audit
+-- rows on position 787). Marking it disabled lets processBuyOrders and both
+-- INSERT gates skip it. Guarded on bulk_stock actually being populated
+-- (> 100 -USD products; normally ~400) so a failed/empty fetchProducts()
+-- can't mass-disable every coin. Self-healing: if a coin comes back, the
+-- UPDATE above resets trading_disabled from Coinbase's own flag next cycle.
+UPDATE stock
+SET trading_disabled = TRUE
+WHERE stock.name LIKE '%-USD'
+AND stock.trading_disabled IS NOT TRUE
+AND NOT EXISTS (SELECT 1 FROM bulk_stock bs WHERE bs.id = stock.name)
+AND (SELECT COUNT(*) FROM bulk_stock WHERE id LIKE '%-USD') > 100;
+
 -- Snapshot each stock's year-basis signal priority onto the stock row itself,
 -- as a priority marker for what to buy -- vw_signal's priority isn't
 -- otherwise persisted anywhere outside the view.
@@ -376,6 +394,43 @@ INSERT INTO fills (order_id, trade_id, product_id, side, price, size, fee, trade
 SELECT bf.order_id, bf.trade_id, bf.product_id, bf.side, bf.price, bf.size, bf.fee, bf.created_at
 FROM bulk_fills bf
 ON CONFLICT (trade_id) DO NOTHING;
+
+-- Learn the taker fee from the single latest fill, not an average.
+-- fee_percent is a percent with 2 decimal places: 0.90 means 0.90 percent,
+-- not a 0.009 rate. Rounding the raw rate (fee / notional) to 2 decimals
+-- would collapse 0.90 and 0.50 into 0.01, so the stored number is percent.
+-- Sits here, just after the fills archive and before any buy/sell pricing,
+-- so this cycle's fill is already in the ledger. A null or zero result
+-- does not insert a row and does not wipe a value already stored.
+INSERT INTO config (key, value)
+SELECT 'fee_percent', learned.pct
+FROM (
+    SELECT ROUND(((fee / NULLIF(price * size, 0)) * 100)::numeric, 2)::text AS pct
+    FROM fills
+    WHERE fee > 0
+      AND price > 0
+      AND size > 0
+    ORDER BY trade_time DESC
+    LIMIT 1
+) learned
+WHERE learned.pct IS NOT NULL
+  AND learned.pct::numeric <> 0
+ON CONFLICT (key) DO NOTHING;
+
+UPDATE config
+SET value = learned.pct
+FROM (
+    SELECT ROUND(((fee / NULLIF(price * size, 0)) * 100)::numeric, 2)::text AS pct
+    FROM fills
+    WHERE fee > 0
+      AND price > 0
+      AND size > 0
+    ORDER BY trade_time DESC
+    LIMIT 1
+) learned
+WHERE config.key = 'fee_percent'
+  AND learned.pct IS NOT NULL
+  AND learned.pct::numeric <> 0;
 
 -- Recover orphaned buy orders: open on Coinbase but missing from position table.
 -- Skip if an unfilled buy position already exists for that coin + period_type.
@@ -443,6 +498,27 @@ SET sell_coinbase_order_id = om.order_id
 FROM orphan_match om
 WHERE p.buy_order_id = om.pos_key;
 
+-- 2026-09-25: expire stale planned buys. A planned row that never got a
+-- Coinbase order (buy_coinbase_order_id NULL, never filled) sits in
+-- processBuyOrders' queue forever, failing INSUFFICIENT_FUND every cycle
+-- (USDS-USD had been planned since 8/13) and -- via the cash-backlog gate
+-- below -- blocking new picks. Delete it once its last activity (created,
+-- remade, placed, or released) is older than config.pending_buy_ttl_hours
+-- (default 24). The signal logic simply re-picks the coin later if it's
+-- still attractive. Never touches a row with a live Coinbase order: the
+-- NULL buy_coinbase_order_id check plus a match on client_order_id in the
+-- current open-orders snapshot (covers an order whose id was nulled while
+-- still live). The position_audit trigger logs each DELETE.
+DELETE FROM position p
+WHERE p.buy_coinbase_order_id IS NULL
+AND p.buy_filled_price IS NULL
+AND p.sell_coinbase_order_id IS NULL
+AND GREATEST(p.date_created, p.last_remade_at, p.buy_placed_at, p.buy_released_at)
+    < NOW() - make_interval(hours => COALESCE((SELECT value::int FROM config WHERE key = 'pending_buy_ttl_hours'), 24))
+AND NOT EXISTS (
+    SELECT 1 FROM bulk_open_orders o WHERE o.client_order_id = p.buy_order_id
+);
+
 -- New position: $1 into the highest year-basis-priority coin not already
 -- held, gated only on the coin's year-basis trend being positive -- no
 -- day-timing signal (recommendation / current-vs-average dip) and no
@@ -452,11 +528,25 @@ WHERE p.buy_order_id = om.pos_key;
 -- Always recorded as period_type 'day' (the existing $1-size bucket), even
 -- though the signal driving the pick is the year row. One new position per
 -- cycle.
+-- Clip size: $1 for a brand-new day position on this coin; if this INSERT
+-- is instead an add while open day rows already exist (price below the
+-- lowest filled buy), use $N where N = open_count + 1 (2nd order $2, 3rd
+-- $3, ...). Open = any buy still live (sell not filled). available must
+-- cover that clip, not a hard-coded $1.
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
 SELECT s.stock_id, s.name,
     TRUNC((s.close::numeric * 1.05 * 1.01), stock.price_rounding::integer) AS buy_price,
     TRUNC((s.close::numeric * 1.05),        stock.price_rounding::integer) AS buy_stop_price,
-    TRUNC((1.00 / s.close)::numeric, stock.share_rounding::integer) AS shares,
+    TRUNC((
+        (
+            SELECT COUNT(*)::numeric
+            FROM position open_sz
+            WHERE open_sz.stock_id = s.stock_id
+            AND open_sz.period_type = 'day'
+            AND open_sz.buy_order_id IS NOT NULL
+            AND open_sz.sell_filled_price IS NULL
+        ) + 1
+    ) / s.close::numeric, stock.share_rounding::integer) AS shares,
     NOW() AS date_created,
     gen_random_uuid(),
     'day'
@@ -467,12 +557,52 @@ LEFT JOIN position p ON p.stock_id = s.stock_id
     AND p.period_type = 'day'
     AND p.buy_order_id IS NOT NULL
     AND p.buy_filled_price IS NULL
+LEFT JOIN LATERAL (
+    SELECT bs.imbalance
+    FROM book_snapshot bs
+    WHERE bs.name = s.name
+    ORDER BY bs.date_created DESC
+    LIMIT 1
+) book ON TRUE
+-- Day row of vw_signal: today's close-vs-yesterday % vs this coin's
+-- average historical day-over-day %. Keeps the year-basis priority pick
+-- (s.period_type = 'year') but blocks chase entries on hot days (e.g.
+-- MSOL up hard today while year signal still says BUY).
+JOIN vw_signal d
+  ON d.stock_id = s.stock_id
+ AND d.period_type = 'day'
 WHERE b.name = 'USD'
 AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
-AND b.available > 1.00
+-- 2026-09-25 cash-backlog gate: free USD minus what is already promised to
+-- planned buys that have no live order yet. Previously only free USD was
+-- compared to the clip, so every brief cash bump (e.g. a far-buy release)
+-- inserted another planned row that then failed INSUFFICIENT_FUND forever.
+-- 2026-10-04: index.js writes config.etf_usd_reserve before this procedure
+-- and vw_etf_cash_reserve exposes it. Subtract that from free USD so a new
+-- crypto plan cannot spend dollars this run's ETF attempts still need.
+-- The reserve is only those attempts (open NORMAL session, dip rules
+-- passed, not already filled, and not skipped for lack of cash). A closed
+-- session stores 0. ETF orders are placed after this procedure, same minute.
+-- pause_buys still gates only these crypto inserts, not the ETF buys.
+AND b.available
+    - COALESCE((SELECT reserve_usd FROM vw_etf_cash_reserve), 0)
+    - COALESCE((SELECT SUM(pb.shares * pb.buy_price)::numeric
+                FROM position pb JOIN stock sb ON sb.stock_id = pb.stock_id
+                WHERE pb.buy_coinbase_order_id IS NULL
+                AND pb.buy_filled_price IS NULL
+                AND sb.trading_disabled IS NOT TRUE), 0)
+  > (
+    SELECT COUNT(*)::numeric
+    FROM position open_sz
+    WHERE open_sz.stock_id = s.stock_id
+    AND open_sz.period_type = 'day'
+    AND open_sz.buy_order_id IS NOT NULL
+    AND open_sz.sell_filled_price IS NULL
+) + 1
 AND s.period_type = 'year'
 AND p.buy_order_id IS NULL
-AND historical_avg_change_percent > 0
+AND s.historical_avg_change_percent > 0
+AND d.current_change_percent < d.historical_avg_change_percent
 AND stock.trading_disabled IS NOT TRUE
 AND (
     NOT EXISTS (
@@ -500,27 +630,49 @@ AND (
     WHERE open_pos.buy_filled_price IS NOT NULL
     AND open_pos.sell_filled_price IS NULL
 ) < COALESCE((SELECT value::int FROM config WHERE key = 'max_open_positions'), 60)
-ORDER BY s.priority DESC NULLS LAST
+-- Book gate: do not insert a new/add day buy when the latest L2 snapshot is
+-- ask-heavy. Prefer bid-heavy (+0.2) via ORDER BY below. NULL snapshot = allow.
+AND (book.imbalance IS NULL OR book.imbalance > -0.4)
+ORDER BY
+    CASE WHEN book.imbalance IS NOT NULL AND book.imbalance > 0.2 THEN 0 ELSE 1 END,
+    book.imbalance DESC NULLS LAST,
+    s.priority DESC NULLS LAST
 LIMIT 1;
 
--- Buy again (always $1) if current price has dropped below the MOST
--- RECENT already-filled price for a stock+period (not the lowest ever --
+-- Buy again if current price has dropped below the MOST RECENT
+-- already-filled price for a stock+period (not the lowest ever --
 -- anchored on whichever fill actually happened last, so this can
 -- re-trigger even after a good fill if price has since moved against
 -- the latest one). Anchored on position itself, not vw_signal — purely
 -- "average down further," no recommendation conditions involved.
--- Only triggers off a coin whose buy is actually filled, and only if
+-- Clip size scales with depth: $N for the Nth open buy on that
+-- stock+period (1 open filled → next is $2; 2 open → next is $3). Open
+-- means buy_order_id set and sell not filled. available must exceed that
+-- clip. Only triggers off a coin whose buy is actually filled, and only if
 -- there's no other buy order currently open/pending for that same
 -- stock+period. When multiple held coins qualify in the same cycle,
 -- ranked by stock.priority descending (same year-basis priority marker the
 -- new-position buy uses) so the highest-priority coin gets the
--- average-down dollar first. One new position per cycle.
+-- average-down clip first. One new position per cycle.
 WITH held AS (
     SELECT DISTINCT ON (stock_id, period_type)
         stock_id, period_type, buy_filled_price AS last_filled_price
     FROM position
     WHERE buy_filled_price IS NOT NULL
     ORDER BY stock_id, period_type, buy_filled_date DESC
+),
+sized AS (
+    SELECT
+        h.*,
+        (
+            SELECT COUNT(*)::numeric
+            FROM position op
+            WHERE op.stock_id = h.stock_id
+            AND op.period_type = h.period_type
+            AND op.buy_order_id IS NOT NULL
+            AND op.sell_filled_price IS NULL
+        ) + 1 AS clip_usd
+    FROM held h
 )
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
 SELECT
@@ -528,22 +680,46 @@ SELECT
     s.name,
     TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) AS buy_price,
     TRUNC(s.price::numeric * 1.01,  s.price_rounding::integer) AS buy_stop_price,
-    TRUNC((1.00 / s.price)::numeric, s.share_rounding::integer) AS shares,
+    TRUNC((sized.clip_usd / s.price::numeric), s.share_rounding::integer) AS shares,
     NOW() AS date_created,
     gen_random_uuid(),
-    held.period_type
-FROM held
-JOIN stock s ON s.stock_id = held.stock_id
+    sized.period_type
+FROM sized
+JOIN stock s ON s.stock_id = sized.stock_id
 CROSS JOIN vw_balance b
+LEFT JOIN LATERAL (
+    SELECT bs.imbalance
+    FROM book_snapshot bs
+    WHERE bs.name = s.name
+    ORDER BY bs.date_created DESC
+    LIMIT 1
+) book ON TRUE
 WHERE b.name = 'USD'
-AND b.available > 1.00
+-- 2026-09-25 cash-backlog gate (same as the new-position insert above):
+-- don't add another planned buy the free cash can't cover once the
+-- existing no-order planned rows are funded.
+-- 2026-10-04: index.js writes config.etf_usd_reserve before this procedure
+-- and vw_etf_cash_reserve exposes it. Subtract that from free USD so a new
+-- crypto plan cannot spend dollars this run's ETF attempts still need.
+-- The reserve is only those attempts (open NORMAL session, dip rules
+-- passed, not already filled, and not skipped for lack of cash). A closed
+-- session stores 0. ETF orders are placed after this procedure, same minute.
+-- pause_buys still gates only these crypto inserts, not the ETF buys.
+AND b.available
+    - COALESCE((SELECT reserve_usd FROM vw_etf_cash_reserve), 0)
+    - COALESCE((SELECT SUM(pb.shares * pb.buy_price)::numeric
+                FROM position pb JOIN stock sb ON sb.stock_id = pb.stock_id
+                WHERE pb.buy_coinbase_order_id IS NULL
+                AND pb.buy_filled_price IS NULL
+                AND sb.trading_disabled IS NOT TRUE), 0)
+  > sized.clip_usd
 AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
-AND TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) < held.last_filled_price
+AND TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) < sized.last_filled_price
 AND s.trading_disabled IS NOT TRUE
 AND NOT EXISTS (
     SELECT 1 FROM position existing
-    WHERE existing.stock_id = held.stock_id
-    AND existing.period_type = held.period_type
+    WHERE existing.stock_id = sized.stock_id
+    AND existing.period_type = sized.period_type
     AND existing.buy_order_id IS NOT NULL
     AND existing.buy_filled_price IS NULL
 )
@@ -556,7 +732,11 @@ AND (
     WHERE open_pos.buy_filled_price IS NOT NULL
     AND open_pos.sell_filled_price IS NULL
 ) < COALESCE((SELECT value::int FROM config WHERE key = 'max_open_positions'), 60)
-ORDER BY s.priority DESC NULLS LAST
+AND (book.imbalance IS NULL OR book.imbalance > -0.4)
+ORDER BY
+    CASE WHEN book.imbalance IS NOT NULL AND book.imbalance > 0.2 THEN 0 ELSE 1 END,
+    book.imbalance DESC NULLS LAST,
+    s.priority DESC NULLS LAST
 LIMIT 1;
 
 -- Initial sell stop, floored at a breakeven price unconditionally — a
@@ -566,7 +746,8 @@ LIMIT 1;
 -- still loses both fees. This expression solves for the sell price where
 -- post-fee proceeds exactly cover total cost, using this position's own
 -- realized buy-side fee rate as the estimate for the sell-side fee
--- (falling back to 1.2% if the buy fee is unknown). LATERAL can't be used
+-- (falling back to config.fee_percent / 100 when the buy fee is unknown).
+-- LATERAL can't be used
 -- here since UPDATE's target table isn't a FROM-list item it can see, so
 -- the formula is inlined directly instead of computed once via a join.
 -- When underwater this floor makes the stop land above current market,
@@ -576,26 +757,21 @@ LIMIT 1;
 -- preview data next cycle until price recovers enough for this floor to
 -- clear.
 --
--- sell_stop_price's floor branch carries an extra 1.01 multiplier that
--- sell_price's floor branch does not: when the floor is the binding
--- constraint (GREATEST picks it over the volatility-discount branch,
--- which is most underwater positions), the two branches would otherwise
--- compute to the exact same price, leaving zero gap between trigger and
--- fill. A sell stop-limit order triggers at stop_price and then only
--- fills at limit_price or better; with no gap, price crosses the trigger
--- and keeps falling before the now-working limit order ever gets a
--- chance to execute against it, stranding it above the market
--- indefinitely (confirmed on two LSETH-USD orders: both showed
--- trigger_status STOP_TRIGGERED but sat unfilled since stop_price and
--- limit_price were identical). The 1% buffer only raises the trigger
--- threshold; sell_price's floor is untouched, so the guaranteed-minimum
--- fill price is unchanged and the no-loss floor still holds exactly.
+-- Happy-path sell target sits ABOVE fee breakeven by config.sell_net_cushion
+-- (default 0.015 = +1.5% net after fees). Fee floor is still the no-loss
+-- minimum; cushion multiplies that floor so closes book real cents instead
+-- of $0 scrapes. sell_stop_price keeps the extra 1.01 vs sell_price so the
+-- stop-limit has a trigger gap (LSETH stranding bug). Volatility branch is
+-- unchanged and still wins via GREATEST when spot is strong enough.
+-- Cushion lives in config.sell_net_cushion so it can be tuned without a
+-- procedure edit.
 UPDATE position
 SET sell_stop_price = GREATEST(
         CEIL(
             (position.buy_filled_price::numeric
-                * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
-                / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012)))
+                * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
+                / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100)))
+                * (1 + COALESCE((SELECT value::numeric FROM config WHERE key = 'sell_net_cushion'), 0.015))
                 * 1.01
             * POWER(10::numeric, stock.price_rounding::int)
         ) / POWER(10::numeric, stock.price_rounding::int),
@@ -608,8 +784,9 @@ SET sell_stop_price = GREATEST(
     sell_price = GREATEST(
         CEIL(
             (position.buy_filled_price::numeric
-                * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
-                / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012)))
+                * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
+                / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100)))
+                * (1 + COALESCE((SELECT value::numeric FROM config WHERE key = 'sell_net_cushion'), 0.015))
             * POWER(10::numeric, stock.price_rounding::int)
         ) / POWER(10::numeric, stock.price_rounding::int),
         TRUNC(stock.price::numeric * (CASE position.period_type
@@ -620,24 +797,31 @@ SET sell_stop_price = GREATEST(
     )
 FROM stock
 JOIN price_aggregate_total pat ON stock.stock_id = pat.stock_id
+JOIN vw_signal d
+  ON d.stock_id = stock.stock_id
+ AND d.period_type = 'day'
 WHERE position.stock_id = stock.stock_id
 AND pat.period_type = position.period_type
 AND position.buy_filled_price IS NOT NULL
 AND position.sell_price IS NULL
+-- Sell stays unpriced until today is stronger than this coin's usual day,
+-- the mirror of the buy dip filter (current day change below the day
+-- average). The sell price is still written only once.
+AND d.current_change_percent > d.historical_avg_change_percent
 -- Estimated profit, from buy_filled_price and buy_fee alone: at the
 -- fee-adjusted floor price (same CEIL(...) breakeven formula as above),
 -- proceeds after an estimated sell fee (same buy-side fee rate, falling
--- back to 1.2%) must exceed total cost (buy_filled_price * shares +
+-- back to config.fee_percent / 100) must exceed total cost (buy_filled_price * shares +
 -- buy_fee). Uses only known buy-side values, not current market price.
 AND (
     (CEIL(
         (position.buy_filled_price::numeric
-            * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
-            / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012)))
+            * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
+            / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100)))
         * POWER(10::numeric, stock.price_rounding::int)
     ) / POWER(10::numeric, stock.price_rounding::int))
     * position.shares::numeric
-    * (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), 0.012))
+    * (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
     - (position.buy_filled_price::numeric * position.shares::numeric + COALESCE(position.buy_fee::numeric, 0))
 ) > 0;
 
@@ -662,31 +846,112 @@ AND position.buy_coinbase_order_id IS NULL
 AND position.buy_filled_price IS NULL
 AND stock.price::numeric >= position.buy_stop_price::numeric;
 
+-- 2026-09-27 add-on buy cap: a buy on a coin you already hold must never be
+-- priced above your cheapest open bag. Plans are set 5% above market and the
+-- reset step just above can raise them again, so OCEAN bag 939 filled at
+-- 0.1718 even though bag 926 was bought at 0.1695. This caps the trigger at
+-- config.add_buy_cap_ratio (default 0.99 = 1% below) times the cheapest open
+-- bag, with the limit 1% above that trigger (0.99 * 1.01 = 0.9999, still
+-- below the bag). Only buys not yet sent to Coinbase are touched; live orders
+-- are only ever lowered by the remake step. processBuyOrders then waits to
+-- place a capped buy until price is below its trigger.
+UPDATE position p
+SET buy_stop_price = TRUNC(c.min_fill * cap.ratio,        s.price_rounding::integer),
+    buy_price      = TRUNC(c.min_fill * cap.ratio * 1.01, s.price_rounding::integer)
+FROM stock s,
+     (SELECT stock_id, MIN(buy_filled_price)::numeric AS min_fill
+      FROM position
+      WHERE buy_filled_price IS NOT NULL AND sell_filled_price IS NULL
+      GROUP BY stock_id) c,
+     (SELECT COALESCE((SELECT value::numeric FROM config WHERE key = 'add_buy_cap_ratio'), 0.99) AS ratio) cap
+WHERE p.stock_id = s.stock_id
+AND c.stock_id = p.stock_id
+AND p.buy_coinbase_order_id IS NULL
+AND p.buy_filled_price IS NULL
+AND p.buy_stop_price::numeric > c.min_fill * cap.ratio;
+
 -- Clear error_message on unfilled buy positions instead of deleting them.
+-- 2026-09-25: except permanent rejections. Clearing 'Invalid product_id'
+-- every cycle made processBuyOrders retry a delisted coin (LRC-USD) forever;
+-- that error can never succeed on retry, so it is left in place and the row
+-- stays out of processBuyOrders' `error_message IS NULL` queue.
 UPDATE position SET error_message = NULL
 WHERE error_message IS NOT NULL
 AND buy_coinbase_order_id IS NULL
-AND buy_filled_price IS NULL;
+AND buy_filled_price IS NULL
+AND error_message NOT IN ('Invalid product_id');
 
--- Step 1: match fills for either side of a position (buy or sell) against
--- this cycle's bulk_fills. Deliberately does not compute profit here — that
--- happens fresh in Step 2 from position's own stored columns, decoupled
--- from this statement, so a NULL fee here can never silently block the
--- close-out the way it used to (buy_fee NULL -> profit NULL -> position
--- stuck forever with no way back in).
--- Also retries fee alone even after the price is already filled in: Coinbase
--- can return a fill with price known but commission not yet settled, and
--- without this the fee would stay NULL forever since nothing else ever
--- rechecks a row once buy_filled_price/sell_filled_price is no longer NULL.
+-- Step 1: match fills for either side of a position (buy or sell).
+-- Deliberately does not compute profit here -- that happens fresh in Step 2
+-- from position's own stored columns, decoupled from this statement, so a
+-- NULL fee here can never silently block the close-out the way it used to.
+--
+-- 2026-09-25 rewrite (was: UPDATE ... FROM bulk_fills with `bf.fee > 0`):
+--  * Source is the permanent `fills` ledger (archived from bulk_fills at the
+--    top of this procedure), not bulk_fills. bulk_fills only holds Coinbase's
+--    recent-fills window, so a fill whose fee/price wasn't captured in that
+--    window (e.g. PAX 468/578) could never be matched again.
+--  * Aggregated per order: an order can fill in several partial fills, and
+--    UPDATE ... FROM bulk_fills picked ONE arbitrary fill row -- so price was
+--    one partial's price and fee was one partial's fee (understated, e.g.
+--    MAMO 568 fee 0.00043 vs 0.00188 actual). Now price = size-weighted VWAP
+--    across all fills of the order, fee = SUM of all their commissions.
+--  * A zero fee is accepted. Coinbase charges $0 on some maker fills (PAX),
+--    and the old `fee > 0` test left sell_fee NULL forever, so Step 2 never
+--    recorded the close and Step 3 never deleted the row. Because Coinbase
+--    can briefly report commission 0 before it settles, a 0 fee is only
+--    accepted once the order's last fill is > 15 minutes old.
+--  * The fee is finalized only once the order is fully filled (filled size
+--    covers position.shares), so a first partial fill can't lock in a
+--    partial fee. Fallback: if the order's last fill is > 1 day old, accept
+--    whatever filled (a partially-filled-then-cancelled order must not
+--    block the close-out forever).
+--  * Filled price keeps refreshing to the latest VWAP until the fee is
+--    finalized (i.e. while partial fills are still arriving);
+--    buy_filled_date is still stamped only on the first match.
+--  * Buy and sell aggregates are joined separately (fb / fs) so a position
+--    whose buy and sell orders both have fills is updated deterministically
+--    in one pass instead of depending on which join row Postgres picks.
+WITH f AS (
+    SELECT order_id,
+           SUM(price * size) / NULLIF(SUM(size), 0) AS vwap,        -- size-weighted avg price over partial fills
+           SUM(size)                                AS filled_size, -- total base filled so far
+           SUM(fee)                                 AS fee,         -- total commission across partial fills
+           MAX(trade_time)                          AS last_fill    -- most recent partial fill
+    FROM fills
+    GROUP BY order_id
+),
+m AS (
+    SELECT p.position_id,
+           fb.vwap AS b_vwap, fs.vwap AS s_vwap,
+           -- buy fee is final when: fully filled AND (fee > 0 OR fill settled > 15 min),
+           -- or the order simply stopped filling > 1 day ago
+           CASE WHEN fb.order_id IS NOT NULL AND (
+                    (fb.filled_size >= p.shares::numeric * 0.999
+                        AND (fb.fee > 0 OR fb.last_fill < NOW() - INTERVAL '15 minutes'))
+                    OR fb.last_fill < NOW() - INTERVAL '1 day')
+                THEN fb.fee END AS b_fee_final,
+           -- same rule for the sell side
+           CASE WHEN fs.order_id IS NOT NULL AND (
+                    (fs.filled_size >= p.shares::numeric * 0.999
+                        AND (fs.fee > 0 OR fs.last_fill < NOW() - INTERVAL '15 minutes'))
+                    OR fs.last_fill < NOW() - INTERVAL '1 day')
+                THEN fs.fee END AS s_fee_final
+    FROM position p
+    LEFT JOIN f fb ON fb.order_id = p.buy_coinbase_order_id
+    LEFT JOIN f fs ON fs.order_id = p.sell_coinbase_order_id
+    -- only rows that still have something to fill in
+    WHERE (fb.order_id IS NOT NULL AND (p.buy_filled_price  IS NULL OR p.buy_fee  IS NULL))
+       OR (fs.order_id IS NOT NULL AND (p.sell_filled_price IS NULL OR p.sell_fee IS NULL))
+)
 UPDATE position
-SET buy_filled_price  = CASE WHEN position.buy_filled_price IS NULL AND bf.order_id = position.buy_coinbase_order_id THEN bf.price ELSE position.buy_filled_price END,
-    buy_fee            = CASE WHEN position.buy_fee IS NULL AND bf.order_id = position.buy_coinbase_order_id AND bf.fee > 0 THEN bf.fee ELSE position.buy_fee END,
-    buy_filled_date    = CASE WHEN position.buy_filled_price IS NULL AND bf.order_id = position.buy_coinbase_order_id THEN NOW() ELSE position.buy_filled_date END,
-    sell_filled_price  = CASE WHEN position.sell_filled_price IS NULL AND bf.order_id = position.sell_coinbase_order_id THEN bf.price ELSE position.sell_filled_price END,
-    sell_fee           = CASE WHEN position.sell_fee IS NULL AND bf.order_id = position.sell_coinbase_order_id AND bf.fee > 0 THEN bf.fee ELSE position.sell_fee END
-FROM bulk_fills bf
-WHERE (bf.order_id = position.buy_coinbase_order_id AND (position.buy_filled_price IS NULL OR position.buy_fee IS NULL))
-   OR (bf.order_id = position.sell_coinbase_order_id AND (position.sell_filled_price IS NULL OR position.sell_fee IS NULL));
+SET buy_filled_price  = CASE WHEN m.b_vwap IS NOT NULL AND position.buy_fee  IS NULL THEN m.b_vwap ELSE position.buy_filled_price END,
+    buy_filled_date   = CASE WHEN m.b_vwap IS NOT NULL AND position.buy_filled_price IS NULL THEN NOW() ELSE position.buy_filled_date END,
+    buy_fee           = COALESCE(position.buy_fee,  m.b_fee_final),
+    sell_filled_price = CASE WHEN m.s_vwap IS NOT NULL AND position.sell_fee IS NULL THEN m.s_vwap ELSE position.sell_filled_price END,
+    sell_fee          = COALESCE(position.sell_fee, m.s_fee_final)
+FROM m
+WHERE position.position_id = m.position_id;
 
 -- Step 2: record any fully bought-and-sold position into profit_history,
 -- computing profit fresh from position's current buy/sell price and fee
@@ -725,6 +990,37 @@ AND EXISTS (
     SELECT 1 FROM profit_history ph
     WHERE ph.buy_coinbase_order_id = p.buy_coinbase_order_id AND ph.sell_fills_id = p.sell_coinbase_order_id
 );
+
+-- 2026-10-05: number each open position per coin (buy_order_number).
+-- The first open BTC-USD row is 1, the second is 2, and so on. "Coin" means
+-- stock_id, not period_type, so day/month/year rows share one sequence.
+-- Ordered by date_created, then position_id to break ties.
+-- Placed here, after every INSERT and DELETE on position in this run
+-- (orphan recovery, new and average-down buys, stale-plan expiry, and the
+-- Step 3 close-out), so the numbers match the rows that are left.
+-- Recomputed every run, so a closed or deleted row makes the rows after it
+-- move down. Only rows whose number actually changes are written, so the
+-- position_audit trigger does not log an unchanged row every run.
+UPDATE position p
+SET buy_order_number = r.rn
+FROM (
+    SELECT position_id,
+           ROW_NUMBER() OVER (
+               PARTITION BY stock_id
+               ORDER BY date_created ASC NULLS LAST, position_id ASC
+           ) AS rn
+    FROM position
+) r
+WHERE p.position_id = r.position_id
+  AND p.buy_order_number IS DISTINCT FROM r.rn;
+
+-- Once the position row is gone, its audit history goes with it. The DELETE
+-- trigger's snapshot is included, on purpose.
+DELETE FROM position_audit AS pa
+USING position_audit AS a
+LEFT JOIN position AS p ON p.position_id = a.position_id
+WHERE pa.audit_id = a.audit_id
+  AND p.position_id IS NULL;
 
 -- Prune position_audit records older than a month.
 DELETE FROM position_audit WHERE changed_at < NOW() - INTERVAL '1 month';
@@ -812,8 +1108,16 @@ ALTER TABLE public.stock ALTER COLUMN stock_id ADD GENERATED ALWAYS AS IDENTITY 
 
 CREATE TABLE public.account (
     account_id integer NOT NULL,
-    date_created timestamp without time zone
+    date_created timestamp without time zone,
+    email text
 );
+
+
+--
+-- Name: COLUMN account.email; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.account.email IS 'Email for this account. Nullable so the original row did not need a value.';
 
 
 --
@@ -822,6 +1126,42 @@ CREATE TABLE public.account (
 
 ALTER TABLE public.account ALTER COLUMN account_id ADD GENERATED ALWAYS AS IDENTITY (
     SEQUENCE NAME public.account_account_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: book_snapshot; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.book_snapshot (
+    book_snapshot_id integer NOT NULL,
+    stock_id integer,
+    name text,
+    best_bid double precision,
+    best_ask double precision,
+    mid double precision,
+    spread_pct double precision,
+    near_bid_usd double precision,
+    near_ask_usd double precision,
+    imbalance double precision,
+    band_pct double precision,
+    bid_levels integer,
+    ask_levels integer,
+    date_created timestamp without time zone DEFAULT now()
+);
+
+
+--
+-- Name: book_snapshot_book_snapshot_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.book_snapshot ALTER COLUMN book_snapshot_id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.book_snapshot_book_snapshot_id_seq
     START WITH 1
     INCREMENT BY 1
     NO MINVALUE
@@ -1048,6 +1388,109 @@ CREATE TABLE public.config (
 
 
 --
+-- Name: etf; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.etf (
+    ticker text NOT NULL,
+    product_id text NOT NULL,
+    quote_usd numeric DEFAULT 1 NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    is_special boolean DEFAULT false NOT NULL
+);
+
+
+--
+-- Name: TABLE etf; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.etf IS 'Equity ETFs bought on the Coinbase NORMAL session under dip rules. is_special selects the repeat rule.';
+
+
+--
+-- Name: COLUMN etf.product_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.etf.product_id IS 'Canonical EQUITY product_id from the products API. Do not substitute the ticker.';
+
+
+--
+-- Name: COLUMN etf.quote_usd; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.etf.quote_usd IS 'Quote USD notional for one market buy. Default $1. Not a share count.';
+
+
+--
+-- Name: COLUMN etf.is_special; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.etf.is_special IS 'True for BLOX, CHPY, TOPW, TSLW (special repeat and end-of-session catch-up). False for regulars such as XDTE, which need a 1% dip and only one attempt per minute.';
+
+
+--
+-- Name: etf_buy; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.etf_buy (
+    etf_buy_id bigint NOT NULL,
+    ticker text NOT NULL,
+    chicago_date date NOT NULL,
+    quote_usd numeric NOT NULL,
+    filled boolean DEFAULT false NOT NULL,
+    closed_session boolean DEFAULT false NOT NULL,
+    coinbase_order_id text,
+    client_order_id text,
+    error_message text,
+    created_at timestamp without time zone DEFAULT now() NOT NULL,
+    dip_price numeric,
+    fill_price numeric
+);
+
+
+--
+-- Name: TABLE etf_buy; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.etf_buy IS 'ETF buy attempts. filled = true counts for the Chicago-day dip rules. A closed-market reject or zero fill stays filled = false and does not count.';
+
+
+--
+-- Name: COLUMN etf_buy.closed_session; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.etf_buy.closed_session IS 'Closed-market reject. Does not count as today''s buy.';
+
+
+--
+-- Name: COLUMN etf_buy.dip_price; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.etf_buy.dip_price IS 'Live price the dip rule compared. Null when the attempt did not need a price (no shares held yet, or the special 2:45 PM Chicago catch-up).';
+
+
+--
+-- Name: COLUMN etf_buy.fill_price; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.etf_buy.fill_price IS 'Execution price from filled value / filled size. The next same-day dip uses the latest non-null value. Null when size was not returned.';
+
+
+--
+-- Name: etf_buy_etf_buy_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.etf_buy ALTER COLUMN etf_buy_id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.etf_buy_etf_buy_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: fills; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1139,8 +1582,18 @@ CREATE TABLE public."position" (
     buy_filled_date timestamp without time zone,
     daily_buy boolean DEFAULT false NOT NULL,
     position_id bigint NOT NULL,
-    last_remade_at timestamp without time zone
+    last_remade_at timestamp without time zone,
+    buy_placed_at timestamp without time zone,
+    buy_released_at timestamp without time zone,
+    buy_order_number integer
 );
+
+
+--
+-- Name: COLUMN "position".buy_order_number; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public."position".buy_order_number IS 'Per-coin sequence of open positions (1 = oldest), by date_created then position_id. Recomputed every run by thee_procedure.';
 
 
 --
@@ -1451,15 +1904,19 @@ UNION ALL
     p.buy_order_id,
     p.sell_coinbase_order_id AS coinbase_order_id,
     p.shares,
-    GREATEST((p.sell_price)::numeric, trunc(((s.price)::numeric * (0.99 + ((p.sell_counter)::numeric * 0.005))), s.price_rounding)) AS new_stop_price,
+    ns.new_stop AS new_stop_price,
     'sell'::text AS order_type,
-    trunc((((p.sell_price)::numeric - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit,
+    trunc(pr.net_at_new_stop, 2) AS estimated_profit,
     p.last_remade_at,
     p.sell_counter AS counter,
-    (abs((GREATEST((p.sell_price)::numeric, trunc(((s.price)::numeric * (0.99 + ((p.sell_counter)::numeric * 0.005))), s.price_rounding)) - (p.sell_stop_price)::numeric)) / NULLIF((s.price)::numeric, (0)::numeric)) AS price_diff
-   FROM (public."position" p
+    (abs((ns.new_stop - (p.sell_stop_price)::numeric)) / NULLIF((s.price)::numeric, (0)::numeric)) AS price_diff
+   FROM (((public."position" p
      JOIN public.stock s ON ((p.stock_id = s.stock_id)))
-  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.daily_sell = true) AND (p.sell_stop_price < (GREATEST((p.sell_price)::numeric, trunc(((s.price)::numeric * (0.99 + ((p.sell_counter)::numeric * 0.005))), s.price_rounding)))::double precision) AND (((((p.sell_price)::numeric * (p.shares)::numeric) * ((1)::numeric - COALESCE((NULLIF((p.buy_fee)::numeric, (0)::numeric) / NULLIF(((p.buy_filled_price)::numeric * (p.shares)::numeric), (0)::numeric)), 0.012))) - (((p.buy_filled_price)::numeric * (p.shares)::numeric) + COALESCE((p.buy_fee)::numeric, (0)::numeric))) > (0)::numeric) AND ((((((p.sell_price)::numeric * (p.shares)::numeric) * ((1)::numeric - COALESCE((NULLIF((p.buy_fee)::numeric, (0)::numeric) / NULLIF(((p.buy_filled_price)::numeric * (p.shares)::numeric), (0)::numeric)), 0.012))) - (((p.buy_filled_price)::numeric * (p.shares)::numeric) + COALESCE((p.buy_fee)::numeric, (0)::numeric))))::double precision > ( SELECT COALESCE(avg(profit_history.profit), (0)::double precision) AS "coalesce"
+     CROSS JOIN LATERAL ( SELECT LEAST(GREATEST((p.sell_price)::numeric, trunc(((s.price)::numeric * (0.99 + ((p.sell_counter)::numeric * 0.005))), s.price_rounding)), trunc(((s.price)::numeric * 0.995), s.price_rounding)) AS new_stop) ns)
+     CROSS JOIN LATERAL ( SELECT (((ns.new_stop * (p.shares)::numeric) * ((1)::numeric - COALESCE((NULLIF((p.buy_fee)::numeric, (0)::numeric) / NULLIF(((p.buy_filled_price)::numeric * (p.shares)::numeric), (0)::numeric)), (COALESCE(( SELECT (config.value)::numeric AS value
+                   FROM public.config
+                  WHERE (config.key = 'fee_percent'::text)), 1.20) / (100)::numeric)))) - (((p.buy_filled_price)::numeric * (p.shares)::numeric) + COALESCE((p.buy_fee)::numeric, (0)::numeric))) AS net_at_new_stop) pr)
+  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.daily_sell = true) AND (p.sell_stop_price < (ns.new_stop)::double precision) AND (ns.new_stop >= (p.sell_price)::numeric) AND (pr.net_at_new_stop > (0)::numeric) AND ((pr.net_at_new_stop)::double precision > ( SELECT COALESCE(avg(profit_history.profit), (0)::double precision) AS "coalesce"
            FROM public.profit_history
           WHERE (profit_history.period_type = p.period_type))))
 UNION ALL
@@ -1470,13 +1927,13 @@ UNION ALL
     p.buy_order_id,
     p.sell_coinbase_order_id AS coinbase_order_id,
     p.shares,
-    GREATEST((p.sell_price)::numeric, trunc(((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.005))), s.price_rounding)) AS new_stop_price,
+    ns.new_stop AS new_stop_price,
     'sell'::text AS order_type,
-    trunc((((p.sell_price)::numeric - (p.buy_filled_price)::numeric) * (p.shares)::numeric), 2) AS estimated_profit,
+    trunc(pr.net_at_new_stop, 2) AS estimated_profit,
     p.last_remade_at,
     p.sell_counter AS counter,
-    (abs((GREATEST((p.sell_price)::numeric, trunc(((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.005))), s.price_rounding)) - (p.sell_stop_price)::numeric)) / NULLIF((s.price)::numeric, (0)::numeric)) AS price_diff
-   FROM (((public."position" p
+    (abs((ns.new_stop - (p.sell_stop_price)::numeric)) / NULLIF((s.price)::numeric, (0)::numeric)) AS price_diff
+   FROM (((((public."position" p
      JOIN public.stock s ON ((p.stock_id = s.stock_id)))
      JOIN public.price_aggregate_total pat ON (((p.stock_id = pat.stock_id) AND (p.period_type = pat.period_type))))
      CROSS JOIN LATERAL ( SELECT
@@ -1486,10 +1943,31 @@ UNION ALL
                     WHEN 'year'::text THEN LEAST(0.95, GREATEST(0.60, ((1)::numeric - ((pat.std_dev)::numeric / (200)::numeric))))
                     ELSE NULL::numeric
                 END AS stop_ratio) vol)
-  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.daily_sell = false) AND (p.sell_stop_price < (GREATEST((p.sell_price)::numeric, trunc(((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.005))), s.price_rounding)))::double precision) AND (((((p.sell_price)::numeric * (p.shares)::numeric) * ((1)::numeric - COALESCE((NULLIF((p.buy_fee)::numeric, (0)::numeric) / NULLIF(((p.buy_filled_price)::numeric * (p.shares)::numeric), (0)::numeric)), 0.012))) - (((p.buy_filled_price)::numeric * (p.shares)::numeric) + COALESCE((p.buy_fee)::numeric, (0)::numeric))) > (0)::numeric) AND ((((((p.sell_price)::numeric * (p.shares)::numeric) * ((1)::numeric - COALESCE((NULLIF((p.buy_fee)::numeric, (0)::numeric) / NULLIF(((p.buy_filled_price)::numeric * (p.shares)::numeric), (0)::numeric)), 0.012))) - (((p.buy_filled_price)::numeric * (p.shares)::numeric) + COALESCE((p.buy_fee)::numeric, (0)::numeric))))::double precision > ( SELECT COALESCE(avg(profit_history.profit), (0)::double precision) AS "coalesce"
+     CROSS JOIN LATERAL ( SELECT LEAST(GREATEST((p.sell_price)::numeric, trunc(((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.005))), s.price_rounding)), trunc(((s.price)::numeric * 0.995), s.price_rounding)) AS new_stop) ns)
+     CROSS JOIN LATERAL ( SELECT (((ns.new_stop * (p.shares)::numeric) * ((1)::numeric - COALESCE((NULLIF((p.buy_fee)::numeric, (0)::numeric) / NULLIF(((p.buy_filled_price)::numeric * (p.shares)::numeric), (0)::numeric)), (COALESCE(( SELECT (config.value)::numeric AS value
+                   FROM public.config
+                  WHERE (config.key = 'fee_percent'::text)), 1.20) / (100)::numeric)))) - (((p.buy_filled_price)::numeric * (p.shares)::numeric) + COALESCE((p.buy_fee)::numeric, (0)::numeric))) AS net_at_new_stop) pr)
+  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.daily_sell = false) AND (p.sell_stop_price < (ns.new_stop)::double precision) AND (ns.new_stop >= (p.sell_price)::numeric) AND (pr.net_at_new_stop > (0)::numeric) AND ((pr.net_at_new_stop)::double precision > ( SELECT COALESCE(avg(profit_history.profit), (0)::double precision) AS "coalesce"
            FROM public.profit_history
           WHERE (profit_history.period_type = p.period_type))))
   ORDER BY 11 NULLS FIRST, 13 DESC;
+
+
+--
+-- Name: vw_etf_cash_reserve; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.vw_etf_cash_reserve AS
+ SELECT COALESCE(( SELECT (config.value)::numeric AS value
+           FROM public.config
+          WHERE (config.key = 'etf_usd_reserve'::text)), (0)::numeric) AS reserve_usd;
+
+
+--
+-- Name: VIEW vw_etf_cash_reserve; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.vw_etf_cash_reserve IS 'Default USD index.js reserved for this run''s ETF attempts. thee_procedure subtracts it from crypto buy plans. 0 when the equity session is closed or nothing qualifies.';
 
 
 --
@@ -1538,24 +2016,26 @@ CREATE VIEW public.vw_position AS
  SELECT stock_id,
     name,
     period_type,
-    count(1) AS cnt,
-    sum(shares) AS sum_shares,
-    max(buy_price) AS max_buy_price,
-    min(buy_price) AS min_buy_price,
-    sum((buy_price * shares)) AS sum_buy_value,
-    max(buy_order_id) AS max_buy_order_id,
-    min(buy_order_id) AS min_buy_order_id,
-    max(buy_coinbase_order_id) AS max_buy_coinbase_order_id,
-    min(buy_coinbase_order_id) AS min_buy_coinbase_order_id,
-    max(buy_filled_price) AS max_buy_filled_price,
-        CASE
-            WHEN bool_or((buy_filled_price IS NULL)) THEN NULL::double precision
-            ELSE min(buy_filled_price)
-        END AS min_buy_filled_price,
-    min(buy_stop_price) AS min_buy_stop_price,
-    max(buy_stop_price) AS max_buy_stop_price,
-    min(date_created) AS min_date_created,
-    max(date_created) AS max_date_created
+    count(*) FILTER (WHERE ((buy_filled_price IS NOT NULL) AND (sell_filled_price IS NULL))) AS cnt,
+    sum(shares) FILTER (WHERE ((buy_filled_price IS NOT NULL) AND (sell_filled_price IS NULL))) AS sum_shares,
+    max(buy_price) FILTER (WHERE ((buy_filled_price IS NOT NULL) AND (sell_filled_price IS NULL))) AS max_buy_price,
+    min(buy_price) FILTER (WHERE ((buy_filled_price IS NOT NULL) AND (sell_filled_price IS NULL))) AS min_buy_price,
+    sum((buy_price * shares)) FILTER (WHERE ((buy_filled_price IS NOT NULL) AND (sell_filled_price IS NULL))) AS sum_buy_value,
+    max(buy_order_id) FILTER (WHERE ((buy_filled_price IS NOT NULL) AND (sell_filled_price IS NULL))) AS max_buy_order_id,
+    min(buy_order_id) FILTER (WHERE ((buy_filled_price IS NOT NULL) AND (sell_filled_price IS NULL))) AS min_buy_order_id,
+    max(buy_coinbase_order_id) FILTER (WHERE ((buy_filled_price IS NOT NULL) AND (sell_filled_price IS NULL))) AS max_buy_coinbase_order_id,
+    min(buy_coinbase_order_id) FILTER (WHERE ((buy_filled_price IS NOT NULL) AND (sell_filled_price IS NULL))) AS min_buy_coinbase_order_id,
+    max(buy_filled_price) FILTER (WHERE ((buy_filled_price IS NOT NULL) AND (sell_filled_price IS NULL))) AS max_buy_filled_price,
+    min(buy_filled_price) FILTER (WHERE ((buy_filled_price IS NOT NULL) AND (sell_filled_price IS NULL))) AS min_buy_filled_price,
+    min(buy_stop_price) FILTER (WHERE ((buy_filled_price IS NOT NULL) AND (sell_filled_price IS NULL))) AS min_buy_stop_price,
+    max(buy_stop_price) FILTER (WHERE ((buy_filled_price IS NOT NULL) AND (sell_filled_price IS NULL))) AS max_buy_stop_price,
+    min(date_created) FILTER (WHERE ((buy_filled_price IS NOT NULL) AND (sell_filled_price IS NULL))) AS min_date_created,
+    max(date_created) FILTER (WHERE ((buy_filled_price IS NOT NULL) AND (sell_filled_price IS NULL))) AS max_date_created,
+    sum(((buy_filled_price * shares) + COALESCE(buy_fee, (0)::double precision))) FILTER (WHERE ((buy_filled_price IS NOT NULL) AND (sell_filled_price IS NULL))) AS held_cost_filled,
+    count(*) FILTER (WHERE (buy_filled_price IS NULL)) AS pending_cnt,
+    sum(shares) FILTER (WHERE (buy_filled_price IS NULL)) AS pending_shares,
+    sum((buy_price * shares)) FILTER (WHERE (buy_filled_price IS NULL)) AS pending_value,
+    count(*) FILTER (WHERE (sell_filled_price IS NOT NULL)) AS sold_unclosed_cnt
    FROM public."position"
   GROUP BY stock_id, name, period_type;
 
@@ -1803,6 +2283,14 @@ ALTER TABLE ONLY public.account
 
 
 --
+-- Name: book_snapshot book_snapshot_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.book_snapshot
+    ADD CONSTRAINT book_snapshot_pkey PRIMARY KEY (book_snapshot_id);
+
+
+--
 -- Name: bulk_currency bulk_currency_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1840,6 +2328,22 @@ ALTER TABLE ONLY public.bulk_stock
 
 ALTER TABLE ONLY public.config
     ADD CONSTRAINT config_pkey PRIMARY KEY (key);
+
+
+--
+-- Name: etf_buy etf_buy_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.etf_buy
+    ADD CONSTRAINT etf_buy_pkey PRIMARY KEY (etf_buy_id);
+
+
+--
+-- Name: etf etf_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.etf
+    ADD CONSTRAINT etf_pkey PRIMARY KEY (ticker);
 
 
 --
@@ -1923,6 +2427,20 @@ ALTER TABLE ONLY public.unmatched_fills
 
 
 --
+-- Name: book_snapshot_name_created_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX book_snapshot_name_created_idx ON public.book_snapshot USING btree (name, date_created DESC);
+
+
+--
+-- Name: etf_buy_filled_day_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX etf_buy_filled_day_idx ON public.etf_buy USING btree (ticker, chicago_date) WHERE filled;
+
+
+--
 -- Name: idx_fills_order_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1972,8 +2490,16 @@ CREATE TRIGGER position_audit_trg AFTER INSERT OR DELETE OR UPDATE ON public."po
 
 
 --
+-- Name: etf_buy etf_buy_ticker_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.etf_buy
+    ADD CONSTRAINT etf_buy_ticker_fkey FOREIGN KEY (ticker) REFERENCES public.etf(ticker);
+
+
+--
 -- PostgreSQL database dump complete
 --
 
-\unrestrict Fy0Q4ppSoUEVJU7tp7nGR14EZYhbaLcNklpXqPizntIb16vIMC6ZsStyQXXjheH
+\unrestrict Ldh4sGePG8deyZ73nD2KLCsZI0Mi69jKbxALMwUA7Fb0rNwucSoKJ3VKLvjrJGm
 
