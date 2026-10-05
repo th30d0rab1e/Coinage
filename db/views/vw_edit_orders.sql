@@ -81,12 +81,40 @@
 -- stop is >= sell_price, which thee_procedure guarantees; this just makes
 -- it explicit).
 --
--- 2026-10-05 -- remakes only for creation_hierarchy = 1: only the oldest
--- open bag per coin (stock_id) is remade. Newer average-down / stacked
--- bags keep their original stops until they become #1. Applied to the buy
--- branch and both sell branches below; processRemakeOrders() reads only
--- this view, so the filter covers every remake path.
+-- 2026-10-05 (rev 2) -- remake rules per coin:
+--
+-- BUY remakes: every open buy bag is eligible again. The earlier
+-- creation_hierarchy = 1 filter (oldest bag per coin only) is removed from
+-- the buy branch.
+--
+-- SELL remakes: one bag per coin (stock_id), picked in the sell_pick CTE.
+-- Candidates are bags with a live sell order (sell_coinbase_order_id set,
+-- sell_filled_price NULL) whose buy has actually filled (buy_filled_price
+-- NOT NULL; a bag with no fill has nothing to sell yet, so it is skipped).
+-- They are ranked per stock_id, across period_type and both daily_sell
+-- branches, by
+--   buy_filled_price ASC NULLS LAST, buy_stop_price ASC NULLS LAST, position_id ASC
+-- so the cheapest filled bag comes first. Only rank 1 is remade. The rank is
+-- taken BEFORE the ratchet / profit gates below, so if the rank-1 bag does
+-- not qualify this cycle, no other bag of that coin is remade in its place.
+-- creation_hierarchy is no longer used by this view.
+-- processRemakeOrders() reads only this view, so these rules cover every
+-- remake path.
 CREATE OR REPLACE VIEW public.vw_edit_orders AS
+WITH sell_pick AS (
+    -- One sell bag per coin: rank 1 = lowest buy_filled_price.
+    SELECT sp.position_id,
+        ROW_NUMBER() OVER (
+            PARTITION BY sp.stock_id
+            ORDER BY sp.buy_filled_price ASC NULLS LAST,
+                     sp.buy_stop_price ASC NULLS LAST,
+                     sp.position_id ASC
+        ) AS sell_rank
+    FROM position sp
+    WHERE sp.sell_coinbase_order_id IS NOT NULL
+    AND sp.sell_filled_price IS NULL
+    AND sp.buy_filled_price IS NOT NULL
+)
 SELECT p.name,
     p.period_type,
     trunc(s.price::numeric * bal.stop_mult * 1.01, s.price_rounding) AS order_price,
@@ -112,8 +140,6 @@ WHERE p.buy_coinbase_order_id IS NOT NULL
 AND p.buy_filled_price IS NULL
 AND p.buy_stop_price > trunc(s.price::numeric * bal.stop_mult, s.price_rounding)::double precision
 AND p.buy_price > trunc(s.price::numeric * bal.stop_mult * 1.01, s.price_rounding)::double precision
--- Only the oldest open bag per coin is remade.
-AND p.creation_hierarchy = 1
 
 UNION ALL
 
@@ -136,6 +162,8 @@ SELECT p.name,
     ABS(ns.new_stop - p.sell_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
 FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
+-- One sell bag per coin (see header): only the rank-1 pick is remade.
+JOIN sell_pick spk ON spk.position_id = p.position_id AND spk.sell_rank = 1
 -- FIX 2: the one place the new stop is calculated for this branch.
 -- Old: GREATEST(sell_price, trunc(price * (0.99 + counter*0.005)))
 -- New: same, but LEAST'd against trunc(price * 0.995) so the stop is
@@ -166,8 +194,6 @@ AND ns.new_stop >= p.sell_price::numeric
 -- FIX 1: profit gate at the NEW stop, not the old limit.
 AND pr.net_at_new_stop > 0
 AND pr.net_at_new_stop > (SELECT COALESCE(AVG(profit), 0) FROM profit_history WHERE period_type = p.period_type)
--- Only the oldest open bag per coin is remade.
-AND p.creation_hierarchy = 1
 
 UNION ALL
 
@@ -190,6 +216,8 @@ SELECT p.name,
     ABS(ns.new_stop - p.sell_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
 FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
+-- One sell bag per coin (see header): only the rank-1 pick is remade.
+JOIN sell_pick spk ON spk.position_id = p.position_id AND spk.sell_rank = 1
 JOIN price_aggregate_total pat ON p.stock_id = pat.stock_id AND p.period_type = pat.period_type
 CROSS JOIN LATERAL (
     SELECT CASE p.period_type
@@ -228,6 +256,4 @@ AND ns.new_stop >= p.sell_price::numeric
 -- FIX 1: profit gate at the NEW stop, not the old limit.
 AND pr.net_at_new_stop > 0
 AND pr.net_at_new_stop > (SELECT COALESCE(AVG(profit), 0) FROM profit_history WHERE period_type = p.period_type)
--- Only the oldest open bag per coin is remade.
-AND p.creation_hierarchy = 1
 ORDER BY last_remade_at ASC NULLS FIRST, price_diff DESC;

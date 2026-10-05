@@ -1877,6 +1877,12 @@ UNION
 --
 
 CREATE VIEW public.vw_edit_orders AS
+ WITH sell_pick AS (
+         SELECT sp.position_id,
+            row_number() OVER (PARTITION BY sp.stock_id ORDER BY sp.buy_filled_price, sp.buy_stop_price, sp.position_id) AS sell_rank
+           FROM public."position" sp
+          WHERE ((sp.sell_coinbase_order_id IS NOT NULL) AND (sp.sell_filled_price IS NULL) AND (sp.buy_filled_price IS NOT NULL))
+        )
  SELECT p.name,
     p.period_type,
     trunc((((s.price)::numeric * bal.stop_mult) * 1.01), s.price_rounding) AS order_price,
@@ -1887,15 +1893,15 @@ CREATE VIEW public.vw_edit_orders AS
     trunc(((s.price)::numeric * bal.stop_mult), s.price_rounding) AS new_stop_price,
     'buy'::text AS order_type,
     trunc((1.0 - ((s.price)::numeric / NULLIF(( SELECT (min(pa.low))::numeric AS min
-           FROM price_aggregate pa
+           FROM public.price_aggregate pa
           WHERE ((pa.stock_id = p.stock_id) AND (pa.period_type = p.period_type))), (0)::numeric))), 4) AS estimated_profit,
     p.last_remade_at,
     p.buy_counter AS counter,
     (abs((trunc(((s.price)::numeric * bal.stop_mult), s.price_rounding) - (p.buy_stop_price)::numeric)) / NULLIF((s.price)::numeric, (0)::numeric)) AS price_diff
-   FROM (("position" p
-     JOIN stock s ON ((p.stock_id = s.stock_id)))
+   FROM ((public."position" p
+     JOIN public.stock s ON ((p.stock_id = s.stock_id)))
      CROSS JOIN LATERAL ( SELECT GREATEST(1.001, (1.05 - ((p.buy_counter)::numeric * 0.005))) AS stop_mult) bal)
-  WHERE ((p.buy_coinbase_order_id IS NOT NULL) AND (p.buy_filled_price IS NULL) AND (p.buy_stop_price > (trunc(((s.price)::numeric * bal.stop_mult), s.price_rounding))::double precision) AND (p.buy_price > (trunc((((s.price)::numeric * bal.stop_mult) * 1.01), s.price_rounding))::double precision) AND (p.creation_hierarchy = 1))
+  WHERE ((p.buy_coinbase_order_id IS NOT NULL) AND (p.buy_filled_price IS NULL) AND (p.buy_stop_price > (trunc(((s.price)::numeric * bal.stop_mult), s.price_rounding))::double precision) AND (p.buy_price > (trunc((((s.price)::numeric * bal.stop_mult) * 1.01), s.price_rounding))::double precision))
 UNION ALL
  SELECT p.name,
     p.period_type,
@@ -1910,15 +1916,16 @@ UNION ALL
     p.last_remade_at,
     p.sell_counter AS counter,
     (abs((ns.new_stop - (p.sell_stop_price)::numeric)) / NULLIF((s.price)::numeric, (0)::numeric)) AS price_diff
-   FROM ((("position" p
-     JOIN stock s ON ((p.stock_id = s.stock_id)))
+   FROM ((((public."position" p
+     JOIN public.stock s ON ((p.stock_id = s.stock_id)))
+     JOIN sell_pick spk ON (((spk.position_id = p.position_id) AND (spk.sell_rank = 1))))
      CROSS JOIN LATERAL ( SELECT LEAST(GREATEST((p.sell_price)::numeric, trunc(((s.price)::numeric * (0.99 + ((p.sell_counter)::numeric * 0.005))), s.price_rounding)), trunc(((s.price)::numeric * 0.995), s.price_rounding)) AS new_stop) ns)
      CROSS JOIN LATERAL ( SELECT (((ns.new_stop * (p.shares)::numeric) * ((1)::numeric - COALESCE((NULLIF((p.buy_fee)::numeric, (0)::numeric) / NULLIF(((p.buy_filled_price)::numeric * (p.shares)::numeric), (0)::numeric)), (COALESCE(( SELECT (config.value)::numeric AS value
-                   FROM config
+                   FROM public.config
                   WHERE (config.key = 'fee_percent'::text)), 1.20) / (100)::numeric)))) - (((p.buy_filled_price)::numeric * (p.shares)::numeric) + COALESCE((p.buy_fee)::numeric, (0)::numeric))) AS net_at_new_stop) pr)
   WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.daily_sell = true) AND (p.sell_stop_price < (ns.new_stop)::double precision) AND (ns.new_stop >= (p.sell_price)::numeric) AND (pr.net_at_new_stop > (0)::numeric) AND ((pr.net_at_new_stop)::double precision > ( SELECT COALESCE(avg(profit_history.profit), (0)::double precision) AS "coalesce"
-           FROM profit_history
-          WHERE (profit_history.period_type = p.period_type))) AND (p.creation_hierarchy = 1))
+           FROM public.profit_history
+          WHERE (profit_history.period_type = p.period_type))))
 UNION ALL
  SELECT p.name,
     p.period_type,
@@ -1933,9 +1940,10 @@ UNION ALL
     p.last_remade_at,
     p.sell_counter AS counter,
     (abs((ns.new_stop - (p.sell_stop_price)::numeric)) / NULLIF((s.price)::numeric, (0)::numeric)) AS price_diff
-   FROM ((((("position" p
-     JOIN stock s ON ((p.stock_id = s.stock_id)))
-     JOIN price_aggregate_total pat ON (((p.stock_id = pat.stock_id) AND (p.period_type = pat.period_type))))
+   FROM ((((((public."position" p
+     JOIN public.stock s ON ((p.stock_id = s.stock_id)))
+     JOIN sell_pick spk ON (((spk.position_id = p.position_id) AND (spk.sell_rank = 1))))
+     JOIN public.price_aggregate_total pat ON (((p.stock_id = pat.stock_id) AND (p.period_type = pat.period_type))))
      CROSS JOIN LATERAL ( SELECT
                 CASE p.period_type
                     WHEN 'day'::text THEN LEAST(0.99, GREATEST(0.90, ((1)::numeric - ((pat.std_dev)::numeric / (200)::numeric))))
@@ -1945,12 +1953,14 @@ UNION ALL
                 END AS stop_ratio) vol)
      CROSS JOIN LATERAL ( SELECT LEAST(GREATEST((p.sell_price)::numeric, trunc(((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.005))), s.price_rounding)), trunc(((s.price)::numeric * 0.995), s.price_rounding)) AS new_stop) ns)
      CROSS JOIN LATERAL ( SELECT (((ns.new_stop * (p.shares)::numeric) * ((1)::numeric - COALESCE((NULLIF((p.buy_fee)::numeric, (0)::numeric) / NULLIF(((p.buy_filled_price)::numeric * (p.shares)::numeric), (0)::numeric)), (COALESCE(( SELECT (config.value)::numeric AS value
-                   FROM config
+                   FROM public.config
                   WHERE (config.key = 'fee_percent'::text)), 1.20) / (100)::numeric)))) - (((p.buy_filled_price)::numeric * (p.shares)::numeric) + COALESCE((p.buy_fee)::numeric, (0)::numeric))) AS net_at_new_stop) pr)
   WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.daily_sell = false) AND (p.sell_stop_price < (ns.new_stop)::double precision) AND (ns.new_stop >= (p.sell_price)::numeric) AND (pr.net_at_new_stop > (0)::numeric) AND ((pr.net_at_new_stop)::double precision > ( SELECT COALESCE(avg(profit_history.profit), (0)::double precision) AS "coalesce"
-           FROM profit_history
-          WHERE (profit_history.period_type = p.period_type))) AND (p.creation_hierarchy = 1))
+           FROM public.profit_history
+          WHERE (profit_history.period_type = p.period_type))))
   ORDER BY 11 NULLS FIRST, 13 DESC;
+
+
 --
 -- Name: vw_etf_cash_reserve; Type: VIEW; Schema: public; Owner: -
 --
