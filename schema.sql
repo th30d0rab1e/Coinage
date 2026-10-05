@@ -621,15 +621,6 @@ AND (
         AND existing.sell_filled_price IS NULL
     )
 )
--- Inventory cap: stop inserting brand-new buy signals when too many filled
--- positions are still open (no sell fill yet). Remakes, sell arming, and
--- processBuyOrders healing of naked pending rows are unaffected — those do
--- not INSERT here. Threshold lives in config.max_open_positions (default 60).
-AND (
-    SELECT COUNT(*) FROM position open_pos
-    WHERE open_pos.buy_filled_price IS NOT NULL
-    AND open_pos.sell_filled_price IS NULL
-) < COALESCE((SELECT value::int FROM config WHERE key = 'max_open_positions'), 60)
 -- Book gate: do not insert a new/add day buy when the latest L2 snapshot is
 -- ask-heavy. Prefer bid-heavy (+0.2) via ORDER BY below. NULL snapshot = allow.
 AND (book.imbalance IS NULL OR book.imbalance > -0.4)
@@ -723,15 +714,6 @@ AND NOT EXISTS (
     AND existing.buy_order_id IS NOT NULL
     AND existing.buy_filled_price IS NULL
 )
--- Inventory cap: stop inserting brand-new buy signals when too many filled
--- positions are still open (no sell fill yet). Remakes, sell arming, and
--- processBuyOrders healing of naked pending rows are unaffected — those do
--- not INSERT here. Threshold lives in config.max_open_positions (default 60).
-AND (
-    SELECT COUNT(*) FROM position open_pos
-    WHERE open_pos.buy_filled_price IS NOT NULL
-    AND open_pos.sell_filled_price IS NULL
-) < COALESCE((SELECT value::int FROM config WHERE key = 'max_open_positions'), 60)
 AND (book.imbalance IS NULL OR book.imbalance > -0.4)
 ORDER BY
     CASE WHEN book.imbalance IS NOT NULL AND book.imbalance > 0.2 THEN 0 ELSE 1 END,
