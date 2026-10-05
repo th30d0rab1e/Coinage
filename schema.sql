@@ -535,8 +535,8 @@ AND NOT EXISTS (
 -- cover that clip, not a hard-coded $1.
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
 SELECT s.stock_id, s.name,
-    TRUNC((s.close::numeric * 1.02 * 1.01), stock.price_rounding::integer) AS buy_price,
-    TRUNC((s.close::numeric * 1.02),        stock.price_rounding::integer) AS buy_stop_price,
+    TRUNC((s.close::numeric * gap.stop_mult * 1.01), stock.price_rounding::integer) AS buy_price,
+    TRUNC((s.close::numeric * gap.stop_mult),        stock.price_rounding::integer) AS buy_stop_price,
     TRUNC((
         (
             SELECT COUNT(*)::numeric
@@ -553,6 +553,41 @@ SELECT s.stock_id, s.name,
 FROM vw_signal s
 JOIN stock ON s.stock_id = stock.stock_id
 CROSS JOIN vw_balance b
+CROSS JOIN LATERAL (
+    -- Cash-scaled new-buy stop gap: base 2%, stretched by total program
+    -- equity / available USD (same components as the equity calc: filled
+    -- bags at stock.price, USD available, USD hold in open buys, priced
+    -- untracked dust). stop_mult = 1 + 0.02 * (equity / available).
+    -- Falls back to 1.02 when available USD is 0/NULL.
+    SELECT COALESCE(
+        1 + 0.02 * (
+            (
+                COALESCE((
+                    SELECT SUM(p2.shares::numeric * s2.price::numeric)
+                    FROM position p2
+                    JOIN stock s2 ON s2.stock_id = p2.stock_id
+                    WHERE p2.buy_filled_price IS NOT NULL
+                    AND p2.sell_filled_price IS NULL
+                ), 0)
+                + COALESCE((SELECT available::numeric FROM vw_balance WHERE name = 'USD'), 0)
+                + COALESCE((SELECT hold::numeric FROM vw_balance WHERE name = 'USD'), 0)
+                + COALESCE((
+                    SELECT SUM(
+                        CASE
+                            WHEN a.currency IN ('USDS', 'USD1', 'PAX') THEN a.balance::numeric
+                            WHEN st.price IS NOT NULL THEN a.balance::numeric * st.price::numeric
+                            ELSE 0
+                        END
+                    )
+                    FROM vw_position_order_balance_audit a
+                    LEFT JOIN stock st ON st.name = a.name
+                    WHERE a.issue_type = 'untracked_holding'
+                ), 0)
+            ) / NULLIF((SELECT available::numeric FROM vw_balance WHERE name = 'USD'), 0)
+        ),
+        1.02
+    ) AS stop_mult
+) gap
 LEFT JOIN position p ON p.stock_id = s.stock_id
     AND p.period_type = 'day'
     AND p.buy_order_id IS NOT NULL
@@ -817,19 +852,54 @@ AND (
 -- current price to trigger) -- and since the "clear error_message" step
 -- below resets it every cycle, it just retries the same doomed price
 -- forever (confirmed stuck this way on OCEAN-USD for 4 days). Recompute
--- using the same flat 2% rule a fresh pick uses, off current price
+-- using the same cash-scaled stop gap a fresh pick uses, off current price
 -- instead of the stale signal-time price.
 UPDATE position
-SET buy_stop_price = TRUNC(stock.price::numeric * 1.02, stock.price_rounding::integer),
-    buy_price = TRUNC(stock.price::numeric * 1.02 * 1.01, stock.price_rounding::integer)
+SET buy_stop_price = TRUNC(stock.price::numeric * gap.stop_mult, stock.price_rounding::integer),
+    buy_price = TRUNC(stock.price::numeric * gap.stop_mult * 1.01, stock.price_rounding::integer)
 FROM stock
+CROSS JOIN LATERAL (
+    -- Cash-scaled new-buy stop gap: base 2%, stretched by total program
+    -- equity / available USD (same components as the equity calc: filled
+    -- bags at stock.price, USD available, USD hold in open buys, priced
+    -- untracked dust). stop_mult = 1 + 0.02 * (equity / available).
+    -- Falls back to 1.02 when available USD is 0/NULL.
+    SELECT COALESCE(
+        1 + 0.02 * (
+            (
+                COALESCE((
+                    SELECT SUM(p2.shares::numeric * s2.price::numeric)
+                    FROM position p2
+                    JOIN stock s2 ON s2.stock_id = p2.stock_id
+                    WHERE p2.buy_filled_price IS NOT NULL
+                    AND p2.sell_filled_price IS NULL
+                ), 0)
+                + COALESCE((SELECT available::numeric FROM vw_balance WHERE name = 'USD'), 0)
+                + COALESCE((SELECT hold::numeric FROM vw_balance WHERE name = 'USD'), 0)
+                + COALESCE((
+                    SELECT SUM(
+                        CASE
+                            WHEN a.currency IN ('USDS', 'USD1', 'PAX') THEN a.balance::numeric
+                            WHEN st.price IS NOT NULL THEN a.balance::numeric * st.price::numeric
+                            ELSE 0
+                        END
+                    )
+                    FROM vw_position_order_balance_audit a
+                    LEFT JOIN stock st ON st.name = a.name
+                    WHERE a.issue_type = 'untracked_holding'
+                ), 0)
+            ) / NULLIF((SELECT available::numeric FROM vw_balance WHERE name = 'USD'), 0)
+        ),
+        1.02
+    ) AS stop_mult
+) gap
 WHERE position.stock_id = stock.stock_id
 AND position.buy_coinbase_order_id IS NULL
 AND position.buy_filled_price IS NULL
 AND stock.price::numeric >= position.buy_stop_price::numeric;
 
 -- 2026-09-27 add-on buy cap: a buy on a coin you already hold must never be
--- priced above your cheapest open bag. Plans are set 2% above market and the
+-- priced above your cheapest open bag. Plans use a cash-scaled stop gap (base 2%) and the
 -- reset step just above can raise them again, so OCEAN bag 939 filled at
 -- 0.1718 even though bag 926 was bought at 0.1695. This caps the trigger at
 -- config.add_buy_cap_ratio (default 0.99 = 1% below) times the cheapest open
