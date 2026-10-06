@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 81AMjQMl61ZDhEYBunBaackNBMgcQb1H9FZFAT55wtCmlENzGXFOaGfkpfHcp1G
+\restrict MXa6Iy4WGN6rIhU4kYls3b6EzGDNem5KyeqmvM2QWEwodIDiHaWYxl7acgab3qy
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -1488,7 +1488,7 @@ COMMENT ON COLUMN public.etf.quote_usd IS 'Quote USD notional for one market buy
 -- Name: COLUMN etf.is_special; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.etf.is_special IS 'True for BLOX, CHPY, TOPW, TSLW (special repeat and end-of-session catch-up). False for regulars such as XDTE, which need a 1% dip and only one attempt per minute.';
+COMMENT ON COLUMN public.etf.is_special IS 'True for BLOX, CHPY, TOPW, TSLW, XDTE, and SPCX. XDTE was made a special on 2026-10-04 so it gets same-day dip rebuys and the 2:45 PM CT catch-up. SPCX (SpaceX common stock) added as a special on 2026-10-05.';
 
 
 --
@@ -2635,5 +2635,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 81AMjQMl61ZDhEYBunBaackNBMgcQb1H9FZFAT55wtCmlENzGXFOaGfkpfHcp1G
+\unrestrict MXa6Iy4WGN6rIhU4kYls3b6EzGDNem5KyeqmvM2QWEwodIDiHaWYxl7acgab3qy
 
