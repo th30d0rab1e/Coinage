@@ -313,6 +313,23 @@ async function syncEtfStockPrices() {
 // orders need. A failure reserves nothing and places nothing.
 async function reserveEtfCash() {
     etfAttemptsThisRun = []
+    // 2026-10-06: listing snipe is priority one. If any listing bag is still
+    // open (pending buy or filled-unsold), reserve $0 so ETF-hours buys do
+    // not take cash ahead of it.
+    try {
+        const listingOpen = await db.query(
+            `SELECT 1 FROM position
+             WHERE period_type = 'listing' AND sell_filled_price IS NULL
+             LIMIT 1`
+        )
+        if ((listingOpen?.rows || []).length > 0) {
+            await setEtfUsdReserve(0)
+            console.log('ETF reserve $0: active listing position (priority one)')
+            return
+        }
+    } catch (error) {
+        console.log('reserveEtfCash() listing gate ERROR', error?.message || error)
+    }
     if (!equitySessionOpen) {
         await setEtfUsdReserve(0)
         console.log('ETF reserve $0: equity session closed (resting limits stay; nothing new placed)')
@@ -865,6 +882,23 @@ async function placeEtfMarket(row, today) {
 // re-reserve). Runs first inside processBuyOrders, before crypto.
 async function processEquityEtfBuys() {
     if (!equitySessionOpen) return
+    // 2026-10-06: listing snipe is priority one over ETF-hours. Re-check after
+    // thee_procedure so a listing row inserted this same minute still blocks
+    // ETF placement (covers pending buy and filled-unsold).
+    try {
+        const listingOpen = await db.query(
+            `SELECT 1 FROM position
+             WHERE period_type = 'listing' AND sell_filled_price IS NULL
+             LIMIT 1`
+        )
+        if ((listingOpen?.rows || []).length > 0) {
+            etfAttemptsThisRun = []
+            console.log('ETF orders skipped: active listing position (priority one)')
+            return
+        }
+    } catch (error) {
+        console.log('processEquityEtfBuys() listing gate ERROR', error?.message || error)
+    }
     if (etfAttemptsThisRun.length === 0) {
         console.log('ETF orders: nothing to place this run')
         return

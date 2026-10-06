@@ -677,6 +677,50 @@ USING walk w
 WHERE p.position_id = w.position_id
 AND w.drop_row IS TRUE;
 
+-- 2026-10-06: New-listing snipe ($1). Priority one over ETF-hours and normal
+-- crypto buys. Only when Coinbase shows the product tradable (online, not
+-- trading_disabled, SPOT USD) AND no other listing bag is still open
+-- (pending buy or filled-unsold). Skip if either gate fails. Selling uses
+-- the normal sell code — no custom listing take-profit.
+INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
+SELECT
+    s.stock_id,
+    s.name,
+    TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) AS buy_price,
+    TRUNC(s.price::numeric * 1.01,  s.price_rounding::integer) AS buy_stop_price,
+    TRUNC((1.00 / NULLIF(s.price::numeric, 0)), s.share_rounding::integer) AS shares,
+    NOW() AS date_created,
+    gen_random_uuid(),
+    'listing'
+FROM stock s
+JOIN bulk_stock bs ON bs.id = s.name
+CROSS JOIN vw_balance b
+WHERE b.name = 'USD'
+AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
+AND b.available > 1.00
+AND s.name LIKE '%-USD'
+AND s.price IS NOT NULL
+AND s.price::numeric > 0
+-- Tradable gate: skip if not actually tradeable
+AND s.trading_disabled IS NOT TRUE
+AND COALESCE(bs.trading_disabled, 'false') NOT IN ('true', 't', '1')
+AND COALESCE(bs.json->>'trading_disabled', 'false') NOT IN ('true', 't', '1')
+AND COALESCE(bs.json->>'status', '') = 'online'
+AND COALESCE(bs.json->>'product_type', 'SPOT') = 'SPOT'
+AND COALESCE(bs.json->>'is_disabled', 'false') NOT IN ('true', 't', '1')
+-- Fresh listing window (Coinbase new_at), not merely stock.date_created
+AND (bs.json->>'new_at')::timestamptz > NOW() - INTERVAL '60 minutes'
+-- One-coin gate: no other listing bag open
+AND NOT EXISTS (
+    SELECT 1 FROM position p
+    WHERE p.period_type = 'listing'
+    AND p.sell_filled_price IS NULL
+)
+AND TRUNC((1.00 / NULLIF(s.price::numeric, 0)), s.share_rounding::integer) > 0
+AND TRUNC((1.00 / NULLIF(s.price::numeric, 0)), s.share_rounding::integer) >= COALESCE(s.min_shares, 0)
+ORDER BY (bs.json->>'new_at')::timestamptz DESC
+LIMIT 1;
+
 -- New position: $1 into the highest year-basis-priority coin not already
 -- held, gated only on the coin's year-basis trend being positive -- no
 -- day-timing signal (recommendation / current-vs-average dip) and no
