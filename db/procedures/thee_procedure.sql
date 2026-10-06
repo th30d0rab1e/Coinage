@@ -363,7 +363,7 @@ AND w.drop_row IS TRUE;
 -- crypto buys. Only when Coinbase shows the product tradable (online, not
 -- trading_disabled, SPOT USD) AND no other listing bag is still open
 -- (pending buy or filled-unsold). Skip if either gate fails. Selling uses
--- the normal sell code — no custom listing take-profit.
+-- the normal sell code -- no custom listing take-profit.
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
 SELECT
     s.stock_id,
