@@ -6,6 +6,9 @@ var etfPlan = require('./modules/etfPlan.js')
 // IEX snapshots → stock.price for enabled ETF tickers. Secrets load from
 // the Alpaca bot config outside this repo (see alpacaMarketData.js).
 var alpacaMd = require('./modules/alpacaMarketData.js')
+// Completed USD deposits/withdrawals -> usd_transfer (GET-only against
+// Coinbase; writes only that table). See modules/usdTransferSync.js.
+var usdTransferSync = require('./modules/usdTransferSync.js')
 // Set each run before thee_procedure. False means the equity session is
 // closed: do not buy ETFs, and do not reserve USD. When it is true,
 // etfAttemptsThisRun is the dip-eligible attempts this minute will send,
@@ -39,6 +42,12 @@ async function main () {
         // (bare ticker). Runs whether or not the equity session is open so
         // the table stays fresh; dip decisions still gate on session below.
         // Cron starts a fresh node each minute, so no bot restart is needed.
+        // Same per-minute cadence: record any newly completed USD deposit or
+        // withdrawal in usd_transfer. Started here but NOT awaited until the
+        // end of this run, so a slow Coinbase v2 call can never delay ETF or
+        // crypto order handling. syncRecent() catches and logs its own
+        // errors and never rejects, so it cannot break this loop.
+        const usdTransfers = usdTransferSync.syncRecent(db);
         await syncEtfStockPrices();
 
         // Reserve before thee_procedure inserts crypto plans. The dollars
@@ -88,6 +97,9 @@ async function main () {
         // position now points at between runs. Without this, every re-place shows
         // up as a fake ghost + orphan pair until the next run. Costs 1 API call.
         await processOpenOrders();
+
+        // Let the USD transfer sync started above finish before this run ends.
+        await usdTransfers;
 
 
     } catch (error) {

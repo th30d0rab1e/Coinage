@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict MWA57IKz1wwc2Pr1v10ZQieeCRB2nvL6D56Z6V60EqhgknriWcponk0XHDLYRgK
+\restrict 81AMjQMl61ZDhEYBunBaackNBMgcQb1H9FZFAT55wtCmlENzGXFOaGfkpfHcp1G
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -1906,6 +1906,61 @@ ALTER SEQUENCE public.unmatched_fills_unmatched_fill_id_seq OWNED BY public.unma
 
 
 --
+-- Name: usd_transfer; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.usd_transfer (
+    id bigint NOT NULL,
+    type text NOT NULL,
+    amount numeric(14,2) NOT NULL,
+    date timestamp without time zone NOT NULL,
+    CONSTRAINT usd_transfer_type_check CHECK ((type = ANY (ARRAY['deposit'::text, 'withdrawal'::text])))
+);
+
+
+--
+-- Name: TABLE usd_transfer; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.usd_transfer IS 'Completed USD deposits/withdrawals between the bank and Coinbase (net invested capital). Inserted each minute by index.js (modules/usdTransferSync.js) and backfilled by node scripts/exportUsdDeposits.js --load-db. UNIQUE (type, amount, date) dedupes.';
+
+
+--
+-- Name: COLUMN usd_transfer.type; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.usd_transfer.type IS 'deposit = money in from the bank, withdrawal = money out to the bank.';
+
+
+--
+-- Name: COLUMN usd_transfer.amount; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.usd_transfer.amount IS 'USD, always positive. Direction comes from type.';
+
+
+--
+-- Name: COLUMN usd_transfer.date; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.usd_transfer.date IS 'When Coinbase created the deposit/withdrawal, America/Chicago local time (same convention as date_created / created_at).';
+
+
+--
+-- Name: usd_transfer_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.usd_transfer ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.usd_transfer_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: vw_balance; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -2490,6 +2545,22 @@ ALTER TABLE ONLY public.unmatched_fills
 
 
 --
+-- Name: usd_transfer usd_transfer_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.usd_transfer
+    ADD CONSTRAINT usd_transfer_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: usd_transfer usd_transfer_type_amount_date_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.usd_transfer
+    ADD CONSTRAINT usd_transfer_type_amount_date_key UNIQUE (type, amount, date);
+
+
+--
 -- Name: book_snapshot_name_created_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2564,5 +2635,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict MWA57IKz1wwc2Pr1v10ZQieeCRB2nvL6D56Z6V60EqhgknriWcponk0XHDLYRgK
+\unrestrict 81AMjQMl61ZDhEYBunBaackNBMgcQb1H9FZFAT55wtCmlENzGXFOaGfkpfHcp1G
 

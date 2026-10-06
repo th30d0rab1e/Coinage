@@ -47,8 +47,17 @@
 // Ed25519 key, stored outside the repo). Key needs the "view" permission.
 // No secret is printed.
 //
+// --load-db: instead of a CSV, fetch BOTH deposits and withdrawals and
+// insert every COMPLETED one into the bot DB table usd_transfer (type,
+// amount, date) via modules/usdTransferSync.js insertTransfers(), which
+// uses ON CONFLICT (type, amount, date) DO NOTHING -- re-running never
+// duplicates. This is the full-history backfill; index.js keeps the table
+// current every minute after that. Prints SUM/COUNT by type to verify.
+// It writes only to usd_transfer.
+//
 // Usage:
 //   node scripts/exportUsdDeposits.js [--withdrawals] [--out /path/file.csv] [--skip-transactions]
+//   node scripts/exportUsdDeposits.js --load-db [--skip-transactions]
 // Default output: ~/Downloads/coinbase_usd_deposits.csv
 //             or  ~/Downloads/coinbase_usd_withdrawals.csv with --withdrawals
 // Dates in the CSV are America/Chicago.
@@ -60,10 +69,10 @@ const axios = require('axios')
 const { signRequest } = require('../modules/equityAuth.js')
 
 const args = process.argv.slice(2)
-// KIND picks the v2 endpoint (/deposits or /withdrawals) and the ledger type.
+const LOAD_DB = args.includes('--load-db')
+// KIND picks the v2 endpoint (/deposits or /withdrawals) and the ledger type
+// for CSV mode. --load-db runs collect() for both kinds.
 const KIND = args.includes('--withdrawals') ? 'withdrawal' : 'deposit'
-const ENDPOINT = `${KIND}s`
-const LEDGER_TYPE = `fiat_${KIND}`
 const outIdx = args.indexOf('--out')
 const OUT = outIdx >= 0 ? args[outIdx + 1] : path.join(os.homedir(), 'Downloads', `coinbase_usd_${KIND}s.csv`)
 const SKIP_TX = args.includes('--skip-transactions')
@@ -120,7 +129,11 @@ function csvCell(v) {
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
 }
 
-async function main() {
+// Fetch every deposit or withdrawal record (all statuses) plus unmatched
+// ledger rows for every Cash (USD) account. Shared by CSV and --load-db.
+async function collect(KIND) {
+    const ENDPOINT = `${KIND}s`
+    const LEDGER_TYPE = `fiat_${KIND}`
     // 1. USD fiat accounts
     const accounts = await getAllV2('/v2/accounts?limit=100')
     const usdAccounts = accounts.filter((a) => a.type === 'fiat' && (a.currency?.code || a.currency) === 'USD')
@@ -199,8 +212,36 @@ async function main() {
             })
         }
     }
-
     rows.sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
+    return rows
+}
+
+async function loadDb() {
+    const db = require('../modules/database.js') // same pg Pool the bot uses
+    const { insertTransfers } = require('../modules/usdTransferSync.js')
+    try {
+        let candidates = []
+        for (const kind of ['deposit', 'withdrawal']) {
+            const rows = await collect(kind)
+            // Only completed transfers; date = the record's created_at (same
+            // key the minute sync uses). Ledger-only rows have no record, so
+            // their own created_at is used.
+            candidates = candidates.concat(rows.filter((r) => r.status === 'completed')
+                .map((r) => ({ type: kind, amount: r.amount_usd, createdAt: r.created_at })))
+        }
+        const inserted = await insertTransfers(db, candidates)
+        console.log(`\nusd_transfer: ${candidates.length} completed transfers fetched, ${inserted.length} newly inserted (rest already present)`)
+        const sum = await db.query(`SELECT type, COUNT(*) AS n, SUM(amount) AS total, MIN(date) AS first, MAX(date) AS last
+                                    FROM usd_transfer GROUP BY type ORDER BY type`)
+        console.table(sum.rows)
+    } finally {
+        await db.end()
+    }
+}
+
+async function main() {
+    if (LOAD_DB) return loadDb()
+    const rows = await collect(KIND)
     // Header names keep the kind in them (deposit_id / withdrawal_id) so each
     // CSV reads naturally on its own.
     const cols = ['date_ct', 'amount_usd', 'fee_usd', 'status', 'type', 'payment_method', 'transaction_id',
@@ -222,6 +263,6 @@ async function main() {
 }
 
 main().catch((e) => {
-    console.error(`exportUsdDeposits (${KIND}s) failed: ${e.message}`)
+    console.error(`exportUsdDeposits (${LOAD_DB ? '--load-db' : KIND + 's'}) failed: ${e.message}`)
     process.exit(1)
 })
