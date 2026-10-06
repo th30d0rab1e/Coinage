@@ -517,4 +517,21 @@ ca.getProductBook = async function (productId, limit = 20) {
     }
 }
 
+// 2026-10-05: top-of-book (best bid / best ask) for EVERY product in one
+// call. With no product_ids the endpoint returns all ~1000 pricebooks in
+// ~200 ms, so index.js processBestBidAsk() loads it into bulk_best_bid_ask
+// each run and thee_procedure gates new planned buys on spread from it
+// (replacing the old one-coin-at-a-time product_book spread check at
+// placement time). Read-only. Returns the pricebooks array, or null on any
+// failure so the caller can empty the table (procedure then fails open).
+ca.getBestBidAskAll = async function () {
+    try {
+        const response = await getApiCall('GET', '/api/v3/brokerage/best_bid_ask', '', null)
+        return Array.isArray(response?.data?.pricebooks) ? response.data.pricebooks : null
+    } catch (error) {
+        console.log('getBestBidAskAll()', error?.response?.status, error?.response?.data || error.message)
+        return null
+    }
+}
+
 module.exports = ca;

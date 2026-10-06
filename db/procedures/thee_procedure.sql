@@ -201,6 +201,164 @@ AND NOT EXISTS (
     SELECT 1 FROM bulk_open_orders o WHERE o.client_order_id = p.buy_order_id
 );
 
+-- ===========================================================================
+-- 2026-10-05 PLANNED-ROW CLEAN-UP (one rule set, owned by this procedure)
+-- ===========================================================================
+-- Rule: a planned buy row (no Coinbase order yet) may only exist if index.js
+-- processBuyOrders() would send it THIS minute. Before this change index.js
+-- had its own placement filters (order-book gates, price-vs-trigger wait,
+-- per-row cash check, trading_disabled, 30-min release cooldown), so rows
+-- sat in position for hours doing nothing while still counting against the
+-- cash-backlog gate below and blocking new picks (ABT / LSETH wide spread;
+-- PNG / DOGE / VVV / GFI / QI waiting for price to drop under the 99% add-on
+-- cap). Those filters now live here, on both INSERTs below (never create
+-- such a row) and in these DELETEs (drop an existing row the moment it stops
+-- qualifying). index.js keeps only reactions to Coinbase itself (rejection ->
+-- error_message -> retry next minute, 'Invalid product_id', the live
+-- "<= $1 available" guard). A deleted coin is simply re-picked later by the
+-- INSERTs once it qualifies again. Runs before the INSERTs so freed backlog
+-- cash is usable this same cycle.
+--
+-- Safety guards on every DELETE here (same as the TTL delete above): never
+-- filled, no Coinbase order id, no sell side, and no live order under its
+-- client_order_id in this run's bulk_open_orders. Live orders are never
+-- touched. The position_audit trigger logs each DELETE (note: the audit
+-- prune near the end of this procedure removes audit rows of deleted
+-- positions, so the log is visible only within this transaction).
+--
+-- Reasons (any one deletes the row):
+--  (a) pause_buys is not 'false' -- same test the INSERTs use. Chosen over a
+--      pause check in index.js: with an index.js check, rows would sit
+--      unsent for the whole pause (exactly what this rule forbids) and pause
+--      logic would live in two places. Live orders are left alone.
+--  (b) coin is trading_disabled (delisted / vanished from the catalog;
+--      flagged earlier in this procedure). Was an index.js filter.
+--  (c) row was released by index.js processFarBuyCashRelease() (its live
+--      order was cancelled to free cash for something better). Used to sit
+--      in a 30-min index.js cooldown; now dropped, the coin is re-picked
+--      later if still attractive.
+--  (d) below Coinbase minimum order size: shares < stock.min_shares
+--      (base_min_size) or shares * buy_price < stock.min_price
+--      (quote_min_size). Coinbase rejects these forever.
+--  (e) trigger no longer above price on a coin already held: the add-on cap
+--      below (add_buy_cap_ratio, default 0.99 x cheapest open bag) pins the
+--      trigger, so once price is at/above that cap the stop-buy cannot be
+--      placed (Coinbase needs the stop above market). Uncapped rows are not
+--      deleted here: the "refresh stale buy candidates" UPDATE further down
+--      re-prices them above market, and a safety DELETE after the cap
+--      catches anything still at/below price.
+--  (f) spread wider than config book_max_spread_pct (default 0.75%), from
+--      bulk_best_bid_ask (loaded by index.js processBestBidAsk() just
+--      before this procedure). Only judged when that table is fresh (loaded
+--      within 3 minutes); then a coin missing from it or with a one-sided
+--      quote (spread_pct NULL) counts as failing. Stale/empty = fail open.
+--  (g) latest book_snapshot from the last 3 minutes is ask-heavy
+--      (imbalance < book_skip_imbalance, default -0.4) or thin (ask
+--      notional within 0.5% of mid < book_min_ask_notional_mult, default 5,
+--      x the row's own dollar size). No fresh snapshot = allow. index.js
+--      processBookSnapshots() now runs before this procedure and always
+--      snapshots coins with a planned buy.
+DELETE FROM position p
+USING stock s
+WHERE s.stock_id = p.stock_id
+AND p.buy_coinbase_order_id IS NULL
+AND p.buy_filled_price IS NULL
+AND p.sell_coinbase_order_id IS NULL
+AND NOT EXISTS (
+    SELECT 1 FROM bulk_open_orders o WHERE o.client_order_id = p.buy_order_id
+)
+AND (
+    -- (a) buys paused
+    (SELECT value FROM config WHERE key = 'pause_buys') IS DISTINCT FROM 'false'
+    -- (b) delisted / trading disabled
+    OR s.trading_disabled IS TRUE
+    -- (c) released by far-buy cash release
+    OR p.buy_released_at IS NOT NULL
+    -- (d) below Coinbase minimum order size
+    OR p.shares IS NULL
+    OR p.shares <= 0
+    OR p.shares < COALESCE(s.min_shares, 0)
+    OR (p.shares * p.buy_price) < COALESCE(s.min_price, 0)
+    -- (e) held coin: price at/above the capped trigger
+    OR s.price::numeric >= (
+        SELECT TRUNC(MIN(f.buy_filled_price)::numeric
+                     * COALESCE((SELECT value::numeric FROM config WHERE key = 'add_buy_cap_ratio'), 0.99),
+                     s.price_rounding::integer)
+        FROM position f
+        WHERE f.stock_id = p.stock_id
+        AND f.buy_filled_price IS NOT NULL
+        AND f.sell_filled_price IS NULL
+    )
+    -- (f) wide spread (only with fresh best-bid/ask data)
+    OR (
+        EXISTS (SELECT 1 FROM bulk_best_bid_ask WHERE loaded_at > NOW() - INTERVAL '3 minutes')
+        AND COALESCE(
+                (SELECT bba.spread_pct FROM bulk_best_bid_ask bba WHERE bba.product_id = s.name),
+                'Infinity'::double precision
+            ) > COALESCE((SELECT value::double precision FROM config WHERE key = 'book_max_spread_pct'), 0.75)
+    )
+    -- (g) ask-heavy or thin book (fresh snapshot only)
+    OR EXISTS (
+        SELECT 1
+        FROM (
+            SELECT bs.imbalance, bs.near_ask_usd
+            FROM book_snapshot bs
+            WHERE bs.name = s.name
+            AND bs.date_created > NOW() - INTERVAL '3 minutes'
+            ORDER BY bs.date_created DESC
+            LIMIT 1
+        ) fresh_book
+        WHERE fresh_book.imbalance < COALESCE((SELECT value::double precision FROM config WHERE key = 'book_skip_imbalance'), -0.4)
+        OR fresh_book.near_ask_usd < (p.shares * p.buy_price)
+            * COALESCE((SELECT value::double precision FROM config WHERE key = 'book_min_ask_notional_mult'), 5)
+    )
+);
+
+-- 2026-10-05 affordability clean-up (was the per-row cashLeft check in
+-- index.js processBuyOrders, which skipped -- but kept -- rows free cash
+-- could not cover, so they sat and were retried every minute). Walk the
+-- surviving planned rows in the same order processBuyOrders sends them
+-- (stock.priority DESC, then position_id) with a running cash balance:
+-- free USD (vw_balance.available, i.e. after holds of live orders) minus
+-- this run's ETF reserve (vw_etf_cash_reserve). A row whose cost incl. the
+-- ~1.2% taker-fee pad (shares * buy_price * 1.012, same pad index.js used)
+-- fits is kept and its cost is taken off the balance; a row that does not
+-- fit is deleted and the walk continues (greedy, exactly like the old
+-- cashLeft loop). Same safety guards as above. Fail-open: when there is no
+-- USD row in vw_balance (balance fetch failed this run) cash_left is NULL,
+-- every comparison is NULL and nothing is deleted.
+WITH RECURSIVE cand AS (
+    SELECT p.position_id,
+           (p.shares * p.buy_price)::numeric * 1.012 AS cost,
+           ROW_NUMBER() OVER (ORDER BY s.priority DESC NULLS LAST, p.position_id) AS rn
+    FROM position p
+    JOIN stock s ON s.stock_id = p.stock_id
+    WHERE p.buy_coinbase_order_id IS NULL
+    AND p.buy_filled_price IS NULL
+    AND p.sell_coinbase_order_id IS NULL
+    AND NOT EXISTS (
+        SELECT 1 FROM bulk_open_orders o WHERE o.client_order_id = p.buy_order_id
+    )
+),
+walk AS (
+    SELECT 0::bigint AS rn,
+           (SELECT available::numeric FROM vw_balance WHERE name = 'USD')
+             - COALESCE((SELECT reserve_usd FROM vw_etf_cash_reserve), 0) AS cash_left,
+           NULL::bigint AS position_id,
+           FALSE AS drop_row
+    UNION ALL
+    SELECT c.rn,
+           CASE WHEN c.cost <= w.cash_left THEN w.cash_left - c.cost ELSE w.cash_left END,
+           c.position_id,
+           c.cost > w.cash_left
+    FROM walk w
+    JOIN cand c ON c.rn = w.rn + 1
+)
+DELETE FROM position p
+USING walk w
+WHERE p.position_id = w.position_id
+AND w.drop_row IS TRUE;
+
 -- New position: $1 into the highest year-basis-priority coin not already
 -- held, gated only on the coin's year-basis trend being positive -- no
 -- day-timing signal (recommendation / current-vs-average dip) and no
@@ -217,18 +375,12 @@ AND NOT EXISTS (
 -- cover that clip, not a hard-coded $1.
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
 SELECT s.stock_id, s.name,
-    TRUNC((s.close::numeric * gap.stop_mult * 1.01), stock.price_rounding::integer) AS buy_price,
-    TRUNC((s.close::numeric * gap.stop_mult),        stock.price_rounding::integer) AS buy_stop_price,
-    TRUNC((
-        (
-            SELECT COUNT(*)::numeric
-            FROM position open_sz
-            WHERE open_sz.stock_id = s.stock_id
-            AND open_sz.period_type = 'day'
-            AND open_sz.buy_order_id IS NOT NULL
-            AND open_sz.sell_filled_price IS NULL
-        ) + 1
-    ) / s.close::numeric, stock.share_rounding::integer) AS shares,
+    -- 2026-10-05: price / trigger / size now come from the "plan" lateral
+    -- below (same formulas as before, computed once) so the new gates can
+    -- check the exact order this INSERT will create.
+    plan.buy_price,
+    plan.buy_stop_price,
+    plan.shares,
     NOW() AS date_created,
     gen_random_uuid(),
     'day'
@@ -274,13 +426,76 @@ LEFT JOIN position p ON p.stock_id = s.stock_id
     AND p.period_type = 'day'
     AND p.buy_order_id IS NOT NULL
     AND p.buy_filled_price IS NULL
+-- 2026-10-05 book gates (moved here from index.js processBuyOrders(); see
+-- the clean-up delete near the top for the full rationale and fail-open
+-- rules). Latest L2 snapshot from the last 3 minutes only -- before this,
+-- any age was used, and coins past the old 40-coin alphabetical snapshot
+-- cap were judged on hours-old books. NULL = no fresh snapshot = allow.
 LEFT JOIN LATERAL (
-    SELECT bs.imbalance
+    SELECT bs.imbalance, bs.near_ask_usd
     FROM book_snapshot bs
     WHERE bs.name = s.name
+    AND bs.date_created > NOW() - INTERVAL '3 minutes'
     ORDER BY bs.date_created DESC
     LIMIT 1
 ) book ON TRUE
+-- This run's top-of-book for the coin (spread gate).
+LEFT JOIN bulk_best_bid_ask bba ON bba.product_id = s.name
+-- Thresholds from config (defaults = the old index.js constants) and
+-- whether bulk_best_bid_ask is fresh enough to judge spread at all.
+CROSS JOIN LATERAL (
+    SELECT
+        COALESCE((SELECT value::numeric FROM config WHERE key = 'book_max_spread_pct'), 0.75)       AS max_spread_pct,
+        COALESCE((SELECT value::numeric FROM config WHERE key = 'book_skip_imbalance'), -0.4)        AS skip_imbalance,
+        COALESCE((SELECT value::numeric FROM config WHERE key = 'book_min_ask_notional_mult'), 5)    AS min_ask_mult,
+        EXISTS (SELECT 1 FROM bulk_best_bid_ask WHERE loaded_at > NOW() - INTERVAL '3 minutes')     AS bba_fresh
+) bookcfg
+-- Dollar size of this clip ($1 new, $N for the Nth open day row), the same
+-- count + 1 the shares / cash-backlog expressions use; the thin-ask gate
+-- compares near-ask notional to clip_usd * book_min_ask_notional_mult.
+CROSS JOIN LATERAL (
+    SELECT COUNT(*)::numeric + 1 AS clip_usd
+    FROM position open_sz
+    WHERE open_sz.stock_id = s.stock_id
+    AND open_sz.period_type = 'day'
+    AND open_sz.buy_order_id IS NOT NULL
+    AND open_sz.sell_filled_price IS NULL
+) clip
+-- 2026-10-05 the order this INSERT will create (formulas unchanged from the
+-- old inline SELECT list): trigger = signal close * cash-scaled stop gap,
+-- limit 1% above, shares = clip dollars / close.
+CROSS JOIN LATERAL (
+    SELECT
+        TRUNC((s.close::numeric * gap.stop_mult * 1.01), stock.price_rounding::integer) AS buy_price,
+        TRUNC((s.close::numeric * gap.stop_mult),        stock.price_rounding::integer) AS buy_stop_price,
+        TRUNC(clip.clip_usd / s.close::numeric, stock.share_rounding::integer)          AS shares
+) plan
+-- 2026-10-05 add-on cap preview: the "add-on buy cap" UPDATE near the end
+-- of this procedure pins an unsent buy on a coin already held to
+-- add_buy_cap_ratio (default 0.99) x the cheapest open bag (limit 1% above).
+-- Computed here so the gates judge the trigger/limit the row will really
+-- have. NULLs when the coin has no open filled bag (no cap applies).
+CROSS JOIN LATERAL (
+    SELECT
+        TRUNC(MIN(f.buy_filled_price)::numeric
+              * COALESCE((SELECT value::numeric FROM config WHERE key = 'add_buy_cap_ratio'), 0.99),
+              stock.price_rounding::integer) AS cap_stop,
+        TRUNC(MIN(f.buy_filled_price)::numeric
+              * COALESCE((SELECT value::numeric FROM config WHERE key = 'add_buy_cap_ratio'), 0.99) * 1.01,
+              stock.price_rounding::integer) AS cap_limit
+    FROM position f
+    WHERE f.stock_id = s.stock_id
+    AND f.buy_filled_price IS NOT NULL
+    AND f.sell_filled_price IS NULL
+) addcap
+-- Effective limit price after the cap (LEAST ignores the NULL cap) and the
+-- dollar cost of the order, plain and with the ~1.2% taker-fee pad (1.012,
+-- the same pad index.js used for its old per-row cash check).
+CROSS JOIN LATERAL (
+    SELECT
+        plan.shares * LEAST(plan.buy_price, addcap.cap_limit)         AS cost_usd,
+        plan.shares * LEAST(plan.buy_price, addcap.cap_limit) * 1.012 AS cost_with_fee
+) eff
 -- Day row of vw_signal: today's close-vs-yesterday % vs this coin's
 -- average historical day-over-day %. Keeps the year-basis priority pick
 -- (s.period_type = 'year') but blocks chase entries on hot days (e.g.
@@ -303,19 +518,15 @@ AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
 -- pause_buys still gates only these crypto inserts, not the ETF buys.
 AND b.available
     - COALESCE((SELECT reserve_usd FROM vw_etf_cash_reserve), 0)
-    - COALESCE((SELECT SUM(pb.shares * pb.buy_price)::numeric
+    - COALESCE((SELECT SUM(pb.shares * pb.buy_price * 1.012)::numeric  -- 2026-10-05: + fee pad
                 FROM position pb JOIN stock sb ON sb.stock_id = pb.stock_id
                 WHERE pb.buy_coinbase_order_id IS NULL
                 AND pb.buy_filled_price IS NULL
                 AND sb.trading_disabled IS NOT TRUE), 0)
-  > (
-    SELECT COUNT(*)::numeric
-    FROM position open_sz
-    WHERE open_sz.stock_id = s.stock_id
-    AND open_sz.period_type = 'day'
-    AND open_sz.buy_order_id IS NOT NULL
-    AND open_sz.sell_filled_price IS NULL
-) + 1
+-- 2026-10-05 (#2): compare against the real cost of THIS order incl. the
+-- fee pad (was: the clip dollars, ~20% less than the order actually holds,
+-- so rows were inserted that free cash could not cover and they sat).
+  >= eff.cost_with_fee
 AND s.period_type = 'year'
 AND p.buy_order_id IS NULL
 AND s.historical_avg_change_percent > 0
@@ -338,9 +549,29 @@ AND (
         AND existing.sell_filled_price IS NULL
     )
 )
--- Book gate: do not insert a new/add day buy when the latest L2 snapshot is
--- ask-heavy. Prefer bid-heavy (+0.2) via ORDER BY below. NULL snapshot = allow.
-AND (book.imbalance IS NULL OR book.imbalance > -0.4)
+-- Book gates (2026-10-05, were index.js placement-time checks):
+--   spread:    only judged when bulk_best_bid_ask is fresh; then a missing
+--              coin / one-sided quote (spread_pct NULL) fails the <= test.
+--   imbalance: fresh snapshot not ask-heavy (>= threshold; was > -0.4 here
+--              and >= -0.4 in index.js -- now one rule). NULL = allow.
+--   thin ask:  near-ask notional >= order cost (eff.cost_usd, i.e. shares x
+--              limit, same notional index.js used) * multiple. NULL = allow.
+-- Prefer bid-heavy (+0.2) via ORDER BY below is unchanged.
+AND (NOT bookcfg.bba_fresh OR bba.spread_pct <= bookcfg.max_spread_pct)
+AND (book.imbalance IS NULL OR book.imbalance >= bookcfg.skip_imbalance)
+AND (book.near_ask_usd IS NULL OR book.near_ask_usd >= eff.cost_usd * bookcfg.min_ask_mult)
+-- 2026-10-05 (#3) trigger must already be above price: on a coin already
+-- held the cap pins the trigger at addcap.cap_stop, so only create the row
+-- when price is under it (was: inserted anyway, then index.js waited for
+-- price to fall -- the PNG/DOGE/VVV/GFI/QI rows). No cap = no limit here
+-- (the refresh UPDATE keeps uncapped triggers above market).
+AND stock.price::numeric < COALESCE(addcap.cap_stop, 'Infinity'::numeric)  -- stock.price: s is vw_signal here
+-- 2026-10-05 (#11) Coinbase minimum order size: base size >= base_min_size
+-- (stock.min_shares) and quote size (shares x effective limit) >=
+-- quote_min_size (stock.min_price). NULL minimum = no limit.
+AND plan.shares > 0
+AND plan.shares >= COALESCE(stock.min_shares, 0)
+AND eff.cost_usd >= COALESCE(stock.min_price, 0)
 ORDER BY
     CASE WHEN book.imbalance IS NOT NULL AND book.imbalance > 0.2 THEN 0 ELSE 1 END,
     book.imbalance DESC NULLS LAST,
@@ -386,22 +617,75 @@ INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_cr
 SELECT
     s.stock_id,
     s.name,
-    TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) AS buy_price,
-    TRUNC(s.price::numeric * 1.01,  s.price_rounding::integer) AS buy_stop_price,
-    TRUNC((sized.clip_usd / s.price::numeric), s.share_rounding::integer) AS shares,
+    -- 2026-10-05: from the "plan" lateral below (formulas unchanged).
+    plan.buy_price,
+    plan.buy_stop_price,
+    plan.shares,
     NOW() AS date_created,
     gen_random_uuid(),
     sized.period_type
 FROM sized
 JOIN stock s ON s.stock_id = sized.stock_id
 CROSS JOIN vw_balance b
+-- 2026-10-05 book gates (moved here from index.js processBuyOrders(); see
+-- the clean-up delete near the top for the full rationale and fail-open
+-- rules). Latest L2 snapshot from the last 3 minutes only -- before this,
+-- any age was used, and coins past the old 40-coin alphabetical snapshot
+-- cap were judged on hours-old books. NULL = no fresh snapshot = allow.
 LEFT JOIN LATERAL (
-    SELECT bs.imbalance
+    SELECT bs.imbalance, bs.near_ask_usd
     FROM book_snapshot bs
     WHERE bs.name = s.name
+    AND bs.date_created > NOW() - INTERVAL '3 minutes'
     ORDER BY bs.date_created DESC
     LIMIT 1
 ) book ON TRUE
+-- This run's top-of-book for the coin (spread gate).
+LEFT JOIN bulk_best_bid_ask bba ON bba.product_id = s.name
+-- Thresholds from config (defaults = the old index.js constants) and
+-- whether bulk_best_bid_ask is fresh enough to judge spread at all.
+CROSS JOIN LATERAL (
+    SELECT
+        COALESCE((SELECT value::numeric FROM config WHERE key = 'book_max_spread_pct'), 0.75)       AS max_spread_pct,
+        COALESCE((SELECT value::numeric FROM config WHERE key = 'book_skip_imbalance'), -0.4)        AS skip_imbalance,
+        COALESCE((SELECT value::numeric FROM config WHERE key = 'book_min_ask_notional_mult'), 5)    AS min_ask_mult,
+        EXISTS (SELECT 1 FROM bulk_best_bid_ask WHERE loaded_at > NOW() - INTERVAL '3 minutes')     AS bba_fresh
+) bookcfg
+-- 2026-10-05 the order this INSERT will create (formulas unchanged from the
+-- old inline SELECT list): trigger 1% above current price, limit 1.1%
+-- above, shares = clip dollars / price.
+CROSS JOIN LATERAL (
+    SELECT
+        TRUNC(s.price::numeric * 1.011, s.price_rounding::integer)               AS buy_price,
+        TRUNC(s.price::numeric * 1.01,  s.price_rounding::integer)               AS buy_stop_price,
+        TRUNC((sized.clip_usd / s.price::numeric), s.share_rounding::integer)    AS shares
+) plan
+-- 2026-10-05 add-on cap preview: the "add-on buy cap" UPDATE near the end
+-- of this procedure pins an unsent buy on a coin already held to
+-- add_buy_cap_ratio (default 0.99) x the cheapest open bag (limit 1% above).
+-- Computed here so the gates judge the trigger/limit the row will really
+-- have. NULLs when the coin has no open filled bag (no cap applies).
+CROSS JOIN LATERAL (
+    SELECT
+        TRUNC(MIN(f.buy_filled_price)::numeric
+              * COALESCE((SELECT value::numeric FROM config WHERE key = 'add_buy_cap_ratio'), 0.99),
+              s.price_rounding::integer) AS cap_stop,
+        TRUNC(MIN(f.buy_filled_price)::numeric
+              * COALESCE((SELECT value::numeric FROM config WHERE key = 'add_buy_cap_ratio'), 0.99) * 1.01,
+              s.price_rounding::integer) AS cap_limit
+    FROM position f
+    WHERE f.stock_id = s.stock_id
+    AND f.buy_filled_price IS NOT NULL
+    AND f.sell_filled_price IS NULL
+) addcap
+-- Effective limit price after the cap (LEAST ignores the NULL cap) and the
+-- dollar cost of the order, plain and with the ~1.2% taker-fee pad (1.012,
+-- the same pad index.js used for its old per-row cash check).
+CROSS JOIN LATERAL (
+    SELECT
+        plan.shares * LEAST(plan.buy_price, addcap.cap_limit)         AS cost_usd,
+        plan.shares * LEAST(plan.buy_price, addcap.cap_limit) * 1.012 AS cost_with_fee
+) eff
 WHERE b.name = 'USD'
 -- 2026-09-25 cash-backlog gate (same as the new-position insert above):
 -- don't add another planned buy the free cash can't cover once the
@@ -415,12 +699,13 @@ WHERE b.name = 'USD'
 -- pause_buys still gates only these crypto inserts, not the ETF buys.
 AND b.available
     - COALESCE((SELECT reserve_usd FROM vw_etf_cash_reserve), 0)
-    - COALESCE((SELECT SUM(pb.shares * pb.buy_price)::numeric
+    - COALESCE((SELECT SUM(pb.shares * pb.buy_price * 1.012)::numeric  -- 2026-10-05: + fee pad
                 FROM position pb JOIN stock sb ON sb.stock_id = pb.stock_id
                 WHERE pb.buy_coinbase_order_id IS NULL
                 AND pb.buy_filled_price IS NULL
                 AND sb.trading_disabled IS NOT TRUE), 0)
-  > sized.clip_usd
+-- 2026-10-05 (#2): real cost of this order incl. fee pad (was clip dollars).
+  >= eff.cost_with_fee
 AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
 AND TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) < sized.last_filled_price
 AND s.trading_disabled IS NOT TRUE
@@ -431,7 +716,29 @@ AND NOT EXISTS (
     AND existing.buy_order_id IS NOT NULL
     AND existing.buy_filled_price IS NULL
 )
-AND (book.imbalance IS NULL OR book.imbalance > -0.4)
+-- Book gates (2026-10-05, were index.js placement-time checks):
+--   spread:    only judged when bulk_best_bid_ask is fresh; then a missing
+--              coin / one-sided quote (spread_pct NULL) fails the <= test.
+--   imbalance: fresh snapshot not ask-heavy (>= threshold; was > -0.4 here
+--              and >= -0.4 in index.js -- now one rule). NULL = allow.
+--   thin ask:  near-ask notional >= order cost (eff.cost_usd, i.e. shares x
+--              limit, same notional index.js used) * multiple. NULL = allow.
+-- Prefer bid-heavy (+0.2) via ORDER BY below is unchanged.
+AND (NOT bookcfg.bba_fresh OR bba.spread_pct <= bookcfg.max_spread_pct)
+AND (book.imbalance IS NULL OR book.imbalance >= bookcfg.skip_imbalance)
+AND (book.near_ask_usd IS NULL OR book.near_ask_usd >= eff.cost_usd * bookcfg.min_ask_mult)
+-- 2026-10-05 (#3) trigger must already be above price: on a coin already
+-- held the cap pins the trigger at addcap.cap_stop, so only create the row
+-- when price is under it (was: inserted anyway, then index.js waited for
+-- price to fall -- the PNG/DOGE/VVV/GFI/QI rows). No cap = no limit here
+-- (the refresh UPDATE keeps uncapped triggers above market).
+AND s.price::numeric < COALESCE(addcap.cap_stop, 'Infinity'::numeric)
+-- 2026-10-05 (#11) Coinbase minimum order size: base size >= base_min_size
+-- (stock.min_shares) and quote size (shares x effective limit) >=
+-- quote_min_size (stock.min_price). NULL minimum = no limit.
+AND plan.shares > 0
+AND plan.shares >= COALESCE(s.min_shares, 0)
+AND eff.cost_usd >= COALESCE(s.min_price, 0)
 ORDER BY
     CASE WHEN book.imbalance IS NOT NULL AND book.imbalance > 0.2 THEN 0 ELSE 1 END,
     book.imbalance DESC NULLS LAST,
@@ -603,6 +910,23 @@ AND c.stock_id = p.stock_id
 AND p.buy_coinbase_order_id IS NULL
 AND p.buy_filled_price IS NULL
 AND p.buy_stop_price::numeric > c.min_fill * cap.ratio;
+
+-- 2026-10-05 (#3) safety net: after the refresh and cap UPDATEs above, an
+-- unsent planned row whose trigger is still not above current price cannot
+-- be placed (Coinbase needs the stop above market) -- index.js used to wait
+-- on these (`s.price < p.buy_stop_price`); now they are deleted so nothing
+-- sits. The INSERT gates and clean-up (e) above should already prevent this;
+-- this catches rounding edge cases. Same safety guards as the clean-up.
+DELETE FROM position p
+USING stock s
+WHERE s.stock_id = p.stock_id
+AND p.buy_coinbase_order_id IS NULL
+AND p.buy_filled_price IS NULL
+AND p.sell_coinbase_order_id IS NULL
+AND NOT EXISTS (
+    SELECT 1 FROM bulk_open_orders o WHERE o.client_order_id = p.buy_order_id
+)
+AND s.price::numeric >= p.buy_stop_price::numeric;
 
 -- Clear error_message on unfilled buy positions instead of deleting them.
 -- 2026-09-25: except permanent rejections. Clearing 'Invalid product_id'

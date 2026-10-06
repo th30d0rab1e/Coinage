@@ -30,8 +30,12 @@ async function main () {
         const pnf = processNewFills();
         const poo = processOpenOrders();
         const ppd = processPriceData();
+        // 2026-10-05: top-of-book for every product in ONE call ->
+        // bulk_best_bid_ask, so thee_procedure can gate new planned buys on
+        // spread (book gates moved from processBuyOrders into the procedure).
+        const pba = processBestBidAsk();
 
-        await Promise.all([pnc, pnb, pnf, poo, ppd]);
+        await Promise.all([pnc, pnb, pnf, poo, ppd, pba]);
 
         // Equity session before the buy pass. A closed session (weekend full
         // close, holiday, or a failed check) leaves the flag false: no ETF
@@ -56,6 +60,14 @@ async function main () {
         // them). A closed session writes 0. Crypto placement is later.
         await reserveEtfCash();
 
+        // 2026-10-05: moved here from after aggregate() so thee_procedure sees
+        // a FRESH (< 3 min) L2 snapshot for every coin it may plan or keep a
+        // planned buy for -- its imbalance / thin-ask gates and clean-up use
+        // only snapshots from the last 3 minutes. Retargeted (pending buys,
+        // then top buy candidates, then held coins oldest-first), cap 50.
+        // Read-only: no place/cancel inside.
+        await processBookSnapshots();
+
         //call thee procedure (now sees fresh bulk_open_orders, bulk_fills, bulk_currency)
         await db.executeQuery('Call thee_procedure();');
         //surface anything thee_procedure just logged to unmatched_fills so the
@@ -70,10 +82,9 @@ async function main () {
         //cancel buy orders 
         //await processBuyOrdersOutOfRange(pnfR)
 
-        // Read-only book snapshots first so buy gates can use fresh imbalance
-        // (and so thee_procedure's next cycle can ORDER BY it). Still no
-        // place/cancel inside the logger itself.
-        await processBookSnapshots();
+        // 2026-10-05: processBookSnapshots() used to run here (after the
+        // procedure, feeding index.js book gates). It now runs before
+        // thee_procedure -- see above.
 
         // When free USD is under $1, cancel the farthest open buy stops first so
         // remakes / heal-placements have a chance at cash this cycle. Must run
@@ -679,68 +690,39 @@ async function processBuyOrders () {
             JOIN stock s ON s.stock_id = p.stock_id
             WHERE p.buy_coinbase_order_id IS NULL AND p.error_message IS NULL
             AND p.buy_filled_price IS NULL
-            -- 2026-09-25: never try to place on a delisted / trading-disabled coin
-            AND s.trading_disabled IS NOT TRUE
-            -- 2026-09-25: cooldown -- a row processFarBuyCashRelease just cancelled
-            -- to free cash is not re-placed for 30 min, so the freed cash actually
-            -- reaches the higher-priority row it was released for (previously the
-            -- same ETC/TRB/ATOM orders were re-placed the very next minute).
-            AND (p.buy_released_at IS NULL OR p.buy_released_at < NOW() - INTERVAL '30 minutes')
-            -- 2026-09-27: only place a buy while price is below its trigger. A
-            -- bounce-buy (stop) must sit above current price or Coinbase rejects
-            -- it. When thee_procedure's add-on cap puts a trigger below the
-            -- current price, the row waits here until price drops under it
-            -- instead of being rejected every minute.
-            AND s.price < p.buy_stop_price
+            -- 2026-10-05: every planned row thee_procedure keeps is meant to be
+            -- sent THIS minute. The old placement filters here were moved into
+            -- the procedure (its INSERT gates + planned-row clean-up), so rows
+            -- no longer sit unsent:
+            --   * trading_disabled coin          -> clean-up (b)
+            --   * 30-min far-release cooldown    -> clean-up (c) deletes released rows
+            --   * price not under trigger        -> INSERT gate + clean-up (e) + post-cap delete
+            --   * order-book gates               -> INSERT gates + clean-up (f)/(g)
+            --   * per-row cash check (cashLeft)  -> INSERT cost gate + affordability walk
+            -- Left here: error_message IS NULL (a Coinbase rejection; the
+            -- procedure clears it each run so the row is retried next minute)
+            -- and this one same-run guard: a row processFarBuyCashRelease()
+            -- released moments ago in THIS run is not re-placed into the cash
+            -- it just freed; thee_procedure deletes it at the start of the next
+            -- run, so it never sits.
+            AND p.buy_released_at IS NULL
             ORDER BY s.priority DESC NULLS LAST
         `)
         console.log(`Buy Orders to Process: ${orders.length}`);
 
-        // 2026-09-27 affordability gate: the $1 check above and the cash-backlog
-        // gate in thee_procedure only stop NEW planned rows from being inserted;
-        // nothing checked whether each already-planned row fits in free cash, so
-        // e.g. MON 1003 (234 @ ~$6.41) was sent every minute and Coinbase rejected
-        // it INSUFFICIENT_FUND (~90 log lines/hour). Compare each row's cost plus
-        // fee pad against AVAILABLE USD (available_balance excludes cash already
-        // held by other open buy orders) and skip it this cycle if it doesn't fit.
-        // The row is left as-is (not deleted, no error_message) so it places once
-        // cash frees up, or expires via thee_procedure's 24h TTL. cashLeft is
-        // decremented after each successful create so later rows in the same run
-        // don't count the same dollars twice.
-        const BUY_FEE_PAD = 1.012   // same ~1.2% taker-fee pad as processFarBuyCashRelease
-        let cashLeft = available
-
+        // 2026-10-05: the per-row cashLeft skip (2026-09-27) and the live L2
+        // book gate that used to sit here were removed. Both only SKIPPED a row
+        // (left it planned), which is how rows sat for hours. thee_procedure
+        // now (a) only inserts a row whose cost incl. the 1.2% fee pad fits
+        // free cash after the planned backlog and ETF reserve, (b) deletes
+        // planned rows that no longer fit (greedy walk in priority order, same
+        // as the old cashLeft loop) and (c) applies the spread / imbalance /
+        // thin-ask gates (thresholds in config: book_max_spread_pct,
+        // book_skip_imbalance, book_min_ask_notional_mult). If Coinbase still
+        // rejects (e.g. INSUFFICIENT_FUND after a race), the else branch below
+        // records error_message and the row is retried / cleaned up next run.
         for (i = 0; i < orders.length; i++) {
             const element = orders[i];
-            const cost = Number(element.buy_price) * Number(element.shares) * BUY_FEE_PAD
-            if (cost > cashLeft) {
-                console.log(`Skip buy ${element.name}: cost $${cost.toFixed(2)} > available $${cashLeft.toFixed(2)}`)
-                continue
-            }
-            // Live L2 gate before create — skip this cycle (leave row pending,
-            // no error_message) so a bad book can clear without blocking forever.
-            try {
-                const book = await ca.getProductBook(element.name, 20)
-                const metrics = computeBookMetrics(book)
-                const clipNotional = Number(element.buy_price) * Number(element.shares)
-                if (metrics) {
-                    if (metrics.imbalance < BOOK_SKIP_IMBALANCE) {
-                        console.log(`Buy Order deferred (ask-heavy book): ${element.name} | imbalance: ${metrics.imbalance.toFixed(3)}`)
-                        continue
-                    }
-                    if (metrics.spreadPct > BOOK_MAX_SPREAD_PCT) {
-                        console.log(`Buy Order deferred (wide spread): ${element.name} | spread: ${metrics.spreadPct.toFixed(3)}%`)
-                        continue
-                    }
-                    if (clipNotional > 0 && metrics.nearAskUsd < clipNotional * BOOK_MIN_ASK_NOTIONAL_MULT) {
-                        console.log(`Buy Order deferred (thin ask): ${element.name} | nearAskUsd: ${metrics.nearAskUsd.toFixed(2)} | clip: ${clipNotional.toFixed(2)}`)
-                        continue
-                    }
-                }
-            } catch (bookErr) {
-                console.log(`Buy Order book-check ERROR ${element.name}`, bookErr?.message || bookErr)
-                // Fail open: still attempt place if the book call blips.
-            }
             // Coinbase treats client_order_id as an idempotency key: reusing one
             // already used for a since-cancelled order returns that SAME dead
             // order back with success: true, not a genuinely new one. Confirmed
@@ -754,8 +736,6 @@ async function processBuyOrders () {
                 // buy_placed_at (2026-09-25): order age, so far-release won't cancel a fresh order
                 await db.executeQuery(`UPDATE position SET buy_order_id = '${newOrderId}', buy_coinbase_order_id = '${response.success_response.order_id}', buy_placed_at = NOW() WHERE buy_order_id = '${element.buy_order_id}'`)
                 console.log(`Buy Order Created: ${element.name} | shares: ${element.shares} | price: ${element.buy_price}`)
-                // this order's hold now comes out of free USD for the rest of the loop
-                cashLeft -= cost
             } else {
                 const errMsg = (response?.error_response?.message || 'unknown').replace(/'/g, "''")
                 await db.executeQuery(`UPDATE position SET error_message = '${errMsg}' WHERE buy_order_id = '${element.buy_order_id}'`)
@@ -899,30 +879,16 @@ async function processFarBuyCashRelease () {
                    (p.shares * p.buy_price)::numeric * ${FEE_PAD} AS clip
             FROM position p
             JOIN stock s ON s.stock_id = p.stock_id
-            -- latest L2 snapshot (processBookSnapshots runs just before this)
-            LEFT JOIN LATERAL (
-                SELECT bs.imbalance, bs.spread_pct, bs.near_ask_usd
-                FROM book_snapshot bs
-                WHERE bs.name = p.name AND bs.date_created > NOW() - INTERVAL '10 minutes'
-                ORDER BY bs.date_created DESC
-                LIMIT 1
-            ) book ON TRUE
+            -- 2026-10-05: the price-vs-trigger, order-book, trading_disabled and
+            -- 30-min cooldown filters were removed here (and in processBuyOrders):
+            -- thee_procedure now deletes any planned row that fails them, so
+            -- every remaining planned row is one processBuyOrders will send.
+            -- NOTE: the procedure also deletes planned rows free cash cannot
+            -- cover, so when free USD is <= $1 there is normally no planned row
+            -- left to be a beneficiary and this function just logs "skipped".
             WHERE p.buy_coinbase_order_id IS NULL
             AND p.buy_filled_price IS NULL
-            AND s.trading_disabled IS NOT TRUE
             AND (p.error_message IS NULL OR p.error_message NOT IN ('Invalid product_id'))
-            AND (p.buy_released_at IS NULL OR p.buy_released_at < NOW() - INTERVAL '30 minutes')
-            -- 2026-09-27: same price gate as processBuyOrders -- a capped add-on
-            -- buy waiting for price to drop is not a real beneficiary yet.
-            AND s.price < p.buy_stop_price
-            -- same book gates processBuyOrders applies before placing; a row it
-            -- would just defer (e.g. DEXT's chronic wide spread) is not a real
-            -- beneficiary -- releasing cash for it would hand the cash to some
-            -- lower-priority row instead. No snapshot = allow (processBuyOrders
-            -- also fails open).
-            AND (book.imbalance  IS NULL OR book.imbalance >= ${BOOK_SKIP_IMBALANCE})
-            AND (book.spread_pct IS NULL OR book.spread_pct <= ${BOOK_MAX_SPREAD_PCT})
-            AND (book.near_ask_usd IS NULL OR book.near_ask_usd >= (p.shares * p.buy_price) * ${BOOK_MIN_ASK_NOTIONAL_MULT})
             ORDER BY s.priority DESC NULLS LAST
             LIMIT 1
         `)
@@ -962,8 +928,10 @@ async function processFarBuyCashRelease () {
             const element = orders[i]
             const cancelResponse = await ca.cancelOrder(element.buy_coinbase_order_id)
             if (cancelResponse == true) {
-                // Leave error_message NULL so processBuyOrders can heal once cash returns.
-                // buy_released_at (2026-09-25) starts the 30-min re-place cooldown.
+                // buy_released_at marks the row as released: processBuyOrders will
+                // not re-place it in this run, and (2026-10-05) thee_procedure
+                // deletes it at the start of the next run (clean-up (c)) instead
+                // of the old 30-min cooldown during which it sat unsent.
                 await db.executeQuery(`UPDATE position SET buy_coinbase_order_id = NULL, error_message = NULL, buy_released_at = NOW() WHERE buy_order_id = '${element.buy_order_id}'`)
                 console.log(`Far Buy Cancelled: ${element.name} | gap: ${(Number(element.gap_pct)*100).toFixed(1)}% | stop: ${element.buy_stop_price} | mkt: ${element.market} | for: ${best.name}`)
             } else {
@@ -1092,31 +1060,189 @@ function computeBookMetrics (book, bandPct = 0.005) {
     }
 }
 
-// Buy gates from live L2 (same thresholds as offered in chat):
-// - Skip place when imbalance < -0.4 (ask-heavy)
-// - Skip place when spread is wide OR near ask notional is thin vs this clip
-// Prefer (+0.2) is handled in thee_procedure ORDER BY, not here.
-const BOOK_SKIP_IMBALANCE = -0.4
-const BOOK_MAX_SPREAD_PCT = 0.75
-const BOOK_MIN_ASK_NOTIONAL_MULT = 5 // near_ask_usd must be >= 5x clip notional
+// 2026-10-05: the BOOK_SKIP_IMBALANCE (-0.4) / BOOK_MAX_SPREAD_PCT (0.75) /
+// BOOK_MIN_ASK_NOTIONAL_MULT (5) constants that lived here were removed. The
+// book buy gates now run inside thee_procedure, with the thresholds in the
+// config table: book_skip_imbalance, book_max_spread_pct,
+// book_min_ask_notional_mult (the procedure falls back to these same
+// defaults if a key is missing). computeBookMetrics() above still produces
+// the book_snapshot rows those gates read.
 
-// Read-only order-book logger + food for next-cycle SQL prefer.
-// Logs open fills AND pending buys. No place/cancel here.
+// 2026-10-05: load best bid / best ask for EVERY Coinbase product (one API
+// call, ~1000 products, ~200 ms) into bulk_best_bid_ask, replacing the
+// whole table in one transaction so readers never see a half-loaded copy.
+// thee_procedure (called later this run) rejects a new or existing planned
+// buy whose spread_pct > config.book_max_spread_pct -- but only while the
+// table is fresh (loaded_at within 3 minutes). On any failure the table is
+// emptied, so the procedure fails OPEN (skips the spread gate) instead of
+// judging on stale quotes. spread_pct = (ask - bid) / mid * 100; NULL when
+// either side is missing/<= 0 or the book is crossed (counts as failing
+// while the data is fresh). Read-only against Coinbase; writes only this
+// table. Never throws.
+async function processBestBidAsk () {
+    let client
+    try {
+        const books = await ca.getBestBidAskAll()
+        const byId = new Map()
+        for (const b of (books || [])) {
+            if (!b?.product_id || byId.has(b.product_id)) continue
+            const bid = Number(b.bids?.[0]?.price)
+            const bidSize = Number(b.bids?.[0]?.size)
+            const ask = Number(b.asks?.[0]?.price)
+            const askSize = Number(b.asks?.[0]?.size)
+            const okBid = Number.isFinite(bid) && bid > 0
+            const okAsk = Number.isFinite(ask) && ask > 0
+            const spread = (okBid && okAsk && ask >= bid) ? ((ask - bid) / ((ask + bid) / 2)) * 100 : null
+            byId.set(b.product_id, {
+                id: b.product_id,
+                bid: okBid ? bid : null,
+                bidSize: Number.isFinite(bidSize) ? bidSize : null,
+                ask: okAsk ? ask : null,
+                askSize: Number.isFinite(askSize) ? askSize : null,
+                spread,
+                time: (typeof b.time === 'string' && b.time) ? b.time : null,
+            })
+        }
+        const rows = [...byId.values()]
+        client = await db.connect()
+        await client.query('BEGIN')
+        await client.query('DELETE FROM bulk_best_bid_ask')
+        if (rows.length) {
+            await client.query(`
+                INSERT INTO bulk_best_bid_ask
+                    (product_id, best_bid, best_bid_size, best_ask, best_ask_size, spread_pct, quote_time)
+                SELECT * FROM UNNEST($1::text[], $2::float8[], $3::float8[], $4::float8[],
+                                     $5::float8[], $6::float8[], $7::timestamptz[])
+            `, [
+                rows.map(r => r.id), rows.map(r => r.bid), rows.map(r => r.bidSize),
+                rows.map(r => r.ask), rows.map(r => r.askSize), rows.map(r => r.spread),
+                rows.map(r => r.time),
+            ])
+        }
+        await client.query('COMMIT')
+        if (rows.length) {
+            console.log(`Best bid/ask: ${rows.length} products loaded`)
+        } else {
+            console.log('Best bid/ask: no data from Coinbase -- table emptied, procedure spread gate fails open this run')
+        }
+    } catch (error) {
+        console.log('processBestBidAsk() ERROR', error?.message || error)
+        if (client) {
+            try { await client.query('ROLLBACK') } catch (_) { /* already logged above */ }
+        }
+        // Fail open: an empty table makes thee_procedure skip the spread gate.
+        try {
+            await db.query('DELETE FROM bulk_best_bid_ask')
+        } catch (cleanupErr) {
+            console.log('processBestBidAsk() cleanup ERROR', cleanupErr?.message || cleanupErr)
+        }
+    } finally {
+        if (client) client.release()
+    }
+}
+
+// Read-only order-book logger (book_snapshot), the data source for
+// thee_procedure's imbalance / thin-ask gates. No place/cancel here.
+// 2026-10-05 retarget: runs BEFORE thee_procedure (was after) and picks,
+// in this order, up to MAX_PER_CYCLE coins:
+//   (a) every coin with an unfilled buy (planned or live) -- the clean-up
+//       judges planned rows on a < 3 min snapshot, so these always come first;
+//   (b) the top CANDIDATES coins the procedure could plan next (same core
+//       filters as its INSERTs: year trend > 0, day dip, tradable, no
+//       pending buy, and either not held or price under the add-on cap;
+//       spread OK when bulk_best_bid_ask is fresh), by priority -- before
+//       this, new picks were judged on hours-old snapshots or none;
+//   (c) held coins, oldest snapshot first, to fill the rest (rotation).
+// Before: open/pending coins only, alphabetical, first 40 -- so coins late in
+// the alphabet were never refreshed.
 async function processBookSnapshots () {
     try {
-        const rows = await db.executeQuery(`
-            SELECT DISTINCT ON (p.name) p.name, p.stock_id
+        const MAX_PER_CYCLE = 50
+        const CANDIDATES = 20
+        const pending = await db.executeQuery(`
+            SELECT DISTINCT p.name, p.stock_id
             FROM position p
+            JOIN stock s ON s.stock_id = p.stock_id
             WHERE p.buy_order_id IS NOT NULL
+            AND p.buy_filled_price IS NULL
             AND p.sell_filled_price IS NULL
-            ORDER BY p.name
-        `)
-        if (!rows?.length) {
+            AND s.trading_disabled IS NOT TRUE
+            AND p.name LIKE '%-USD'
+        `) || []
+        const candidates = await db.executeQuery(`
+            SELECT s.name, s.stock_id
+            FROM vw_signal s
+            JOIN stock st ON st.stock_id = s.stock_id
+            JOIN vw_signal d ON d.stock_id = s.stock_id AND d.period_type = 'day'
+            LEFT JOIN bulk_best_bid_ask bba ON bba.product_id = s.name
+            WHERE s.period_type = 'year'
+            AND s.historical_avg_change_percent > 0
+            AND d.current_change_percent < d.historical_avg_change_percent
+            AND st.trading_disabled IS NOT TRUE
+            AND st.name LIKE '%-USD'
+            AND NOT EXISTS (
+                SELECT 1 FROM position x
+                WHERE x.stock_id = s.stock_id
+                AND x.buy_order_id IS NOT NULL
+                AND x.buy_filled_price IS NULL
+            )
+            AND (
+                NOT EXISTS (
+                    SELECT 1 FROM position f
+                    WHERE f.stock_id = s.stock_id
+                    AND f.buy_filled_price IS NOT NULL
+                    AND f.sell_filled_price IS NULL
+                )
+                OR st.price < (
+                    SELECT MIN(f.buy_filled_price) FROM position f
+                    WHERE f.stock_id = s.stock_id
+                    AND f.buy_filled_price IS NOT NULL
+                    AND f.sell_filled_price IS NULL
+                ) * COALESCE((SELECT value::numeric FROM config WHERE key = 'add_buy_cap_ratio'), 0.99)
+            )
+            AND (
+                NOT EXISTS (SELECT 1 FROM bulk_best_bid_ask WHERE loaded_at > NOW() - INTERVAL '3 minutes')
+                OR bba.spread_pct <= COALESCE((SELECT value::double precision FROM config WHERE key = 'book_max_spread_pct'), 0.75)
+            )
+            ORDER BY s.priority DESC NULLS LAST
+            LIMIT ${CANDIDATES}
+        `) || []
+        const held = await db.executeQuery(`
+            SELECT h.name, h.stock_id
+            FROM (
+                SELECT DISTINCT p.name, p.stock_id
+                FROM position p
+                JOIN stock s ON s.stock_id = p.stock_id
+                WHERE p.buy_filled_price IS NOT NULL
+                AND p.sell_filled_price IS NULL
+                AND s.trading_disabled IS NOT TRUE
+                AND p.name LIKE '%-USD'
+            ) h
+            LEFT JOIN LATERAL (
+                SELECT MAX(bs.date_created) AS last_snap
+                FROM book_snapshot bs
+                WHERE bs.name = h.name
+            ) ls ON TRUE
+            ORDER BY ls.last_snap ASC NULLS FIRST, h.name
+        `) || []
+
+        // Merge in priority order (a) -> (b) -> (c), one snapshot per coin.
+        const seen = new Set()
+        const targets = []
+        const counts = { pending: 0, candidates: 0, held: 0 }
+        for (const [group, list] of [['pending', pending], ['candidates', candidates], ['held', held]]) {
+            for (const row of list) {
+                if (targets.length >= MAX_PER_CYCLE) break
+                if (seen.has(row.name)) continue
+                seen.add(row.name)
+                targets.push(row)
+                counts[group]++
+            }
+        }
+        if (!targets.length) {
             console.log('Book snapshots: 0 products')
             return
         }
-        const MAX_PER_CYCLE = 40
-        const targets = rows.slice(0, MAX_PER_CYCLE)
         let logged = 0
         for (const row of targets) {
             const book = await ca.getProductBook(row.name, 20)
@@ -1138,7 +1264,7 @@ async function processBookSnapshots () {
             logged++
         }
         await db.executeQuery(`DELETE FROM book_snapshot WHERE date_created < NOW() - INTERVAL '48 hours'`)
-        console.log(`Book snapshots: ${logged}/${targets.length} logged (cap ${MAX_PER_CYCLE})`)
+        console.log(`Book snapshots: ${logged}/${targets.length} logged (cap ${MAX_PER_CYCLE}; pending ${counts.pending}, candidates ${counts.candidates}, held ${counts.held})`)
     } catch (error) {
         console.log('processBookSnapshots() ERROR', error)
     }
