@@ -1116,6 +1116,12 @@ AND NOT EXISTS (
 )
 AND NOT EXISTS (
     SELECT 1 FROM unmatched_fills uf WHERE uf.order_id = bf.order_id
+)
+-- 2026-10-06: ETF orders (daily market buy and limit ladder) are tracked in
+-- etf_buy, not position, so they are not orphans. Without this every ETF
+-- fill logged "ERROR: unmatched fill detected" and tripped the health check.
+AND NOT EXISTS (
+    SELECT 1 FROM etf_buy eb WHERE eb.coinbase_order_id = bf.order_id
 );
 
 TRUNCATE TABLE bulk_stock;

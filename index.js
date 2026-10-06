@@ -9,12 +9,12 @@ var alpacaMd = require('./modules/alpacaMarketData.js')
 // Completed USD deposits/withdrawals -> usd_transfer (GET-only against
 // Coinbase; writes only that table). See modules/usdTransferSync.js.
 var usdTransferSync = require('./modules/usdTransferSync.js')
-// Set each run before thee_procedure. False means the equity session is
-// closed: do not buy ETFs, and do not reserve USD. When it is true,
-// etfAttemptsThisRun is the dip-eligible attempts this minute will send,
-// and config.etf_usd_reserve is their quote total so thee_procedure cannot
-// spend that Default USD on a new crypto plan. Crypto still places after
-// those attempts, in processBuyOrders. Nothing is transferred.
+// Set each run before thee_procedure. False means the equity NORMAL session
+// is closed: place no new ETF order and reserve no USD (resting limits are
+// still synced / expired every run). When it is true, etfAttemptsThisRun is
+// this minute's ETF orders (daily market buy and/or ladder limits, see the
+// ETF block below) and config.etf_usd_reserve is their total so
+// thee_procedure cannot spend that Default USD on a new crypto plan.
 let equitySessionOpen = false
 let etfAttemptsThisRun = []
 main()
@@ -54,10 +54,16 @@ async function main () {
         const usdTransfers = usdTransferSync.syncRecent(db);
         await syncEtfStockPrices();
 
+        // 2026-10-06 ETF limit ladder: every run (session open or not),
+        // move resting limit rows to FILLED / CANCELLED and cancel any whose
+        // bot-side expiry (expires_at) has passed. Places nothing; runs after
+        // processNewFills so this minute's fills are in bulk_fills.
+        await syncEtfLimitOrders();
+
         // Reserve before thee_procedure inserts crypto plans. The dollars
-        // are only the ETF attempts this run still needs (session open,
-        // dip rules passed, not already filled, and Default cash can cover
-        // them). A closed session writes 0. Crypto placement is later.
+        // are only the ETF orders this run will place (daily market buy not
+        // yet done today, ladder limits for tickers with none resting, and
+        // Default cash can cover them). A closed session writes 0.
         await reserveEtfCash();
 
         // 2026-10-05: moved here from after aggregate() so thee_procedure sees
@@ -241,11 +247,37 @@ async function refreshEquitySession() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ETF buys (2026-10-06 redesign). Two kinds of order, both tracked in etf_buy:
+//
+//  1. Daily market buy (order_type 'market'): one $1 market buy per enabled
+//     ticker per Chicago day, the first minute the NORMAL session is open
+//     and Default USD covers it. Unconditional (no dip / red P&L check).
+//  2. Limit ladder (order_type 'limit'): each enabled ticker keeps exactly
+//     ONE resting limit buy for ~$1 (quote_usd). Price = basis *
+//     (1 - etf_limit_step_pct/100), where basis = VWAP of the latest BUY
+//     order's real fills (fills.price; the morning market fill counts), or
+//     the best bid (Coinbase, else Alpaca IEX) if the ticker never filled.
+//     When it fills, the next one goes a step under that fill. Coinbase has
+//     no GTD for equities, so it is GTC and syncEtfLimitOrders cancels it at
+//     expires_at (placed + etf_limit_ttl_hours) and a fresh one is placed.
+//
+// RETIRED 2026-10-06 (they bought $1 at market nearly every minute because
+// a stale/wide IEX mid always sat under the last Coinbase fill):
+//  - the special same-day market dip re-buy ("price < last fill"),
+//  - the regular same-day market dip re-buy ("price < last fill * 0.99"),
+//  - the 2:45-3:00 PM CT special market catch-up,
+//  - the held-shares red-P&L / under-average gate on the first buy of the
+//    day (the daily market buy is now unconditional, per the 2026-10-06 spec).
+// ---------------------------------------------------------------------------
+
+// Insert one market-buy row. Limit rows are written by placeEtfLimit.
 async function recordEtfAttempt(row) {
     await db.query(
         `INSERT INTO etf_buy
-            (ticker, chicago_date, quote_usd, filled, closed_session, coinbase_order_id, client_order_id, error_message, dip_price, fill_price)
-         VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10)`,
+            (ticker, chicago_date, quote_usd, filled, closed_session, coinbase_order_id, client_order_id, error_message, dip_price, fill_price,
+             order_type, status)
+         VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10, 'market', $11)`,
         [
             row.ticker,
             row.chicagoDate,
@@ -255,17 +287,19 @@ async function recordEtfAttempt(row) {
             row.coinbaseOrderId || null,
             row.clientOrderId || null,
             row.errorMessage || null,
-            // dip_price is the live price the rule compared, or null when
-            // the rule did not need one. fill_price is the execution price.
-            row.dipPrice == null ? null : row.dipPrice,
+            // dip_price is legacy (retired dip rules); always null now.
+            null,
             row.fillPrice == null ? null : row.fillPrice,
+            // FILLED, OPEN (accepted, fill not confirmed yet; reconcile
+            // flips it to FILLED once fills land), or REJECTED.
+            row.status,
         ]
     )
 }
 
-// Upsert stock.price from Alpaca IEX for every enabled etf.ticker.
-// Failures log and leave prior stock.price alone; dip path may then
-// still miss a price and skip rather than invent one.
+// Upsert stock.price from Alpaca IEX for every enabled etf.ticker. No
+// longer drives any buy decision (the dip rules are retired); kept so
+// stock.price stays a fresh reference for dashboards.
 async function syncEtfStockPrices() {
     try {
         await alpacaMd.syncEnabledEtfStockPrices(db)
@@ -274,22 +308,21 @@ async function syncEtfStockPrices() {
     }
 }
 
-// Build this minute's ETF attempts and write config.etf_usd_reserve
-// before thee_procedure. pause_buys is not read here. A failure reserves
-// nothing and buys nothing, so a broken price check cannot both block
-// crypto and send an ETF order.
+// Build this minute's ETF orders and write config.etf_usd_reserve before
+// thee_procedure, so a new crypto plan cannot spend the dollars these
+// orders need. A failure reserves nothing and places nothing.
 async function reserveEtfCash() {
     etfAttemptsThisRun = []
     if (!equitySessionOpen) {
         await setEtfUsdReserve(0)
-        console.log('ETF reserve $0: equity session closed')
+        console.log('ETF reserve $0: equity session closed (resting limits stay; nothing new placed)')
         return
     }
     try {
         const plan = await buildEtfPlan()
         etfAttemptsThisRun = plan.attempts
         const reserved = await setEtfUsdReserve(plan.reserve)
-        const names = plan.attempts.map((row) => row.ticker).join(', ')
+        const names = plan.attempts.map((row) => `${row.ticker}(${row.kind})`).join(', ')
         console.log(`ETF reserve $${reserved.toFixed(2)} for ${names || 'none'}`)
         for (const note of plan.notes) console.log(note)
     } catch (error) {
@@ -310,26 +343,11 @@ async function setEtfUsdReserve(amount) {
     return Number(safe)
 }
 
-// Match a portfolio equity row to an etf row. Coinbase identifies the
-// position by cbrn, which we have not seen populated yet (no shares held).
-// Accept the ticker, the product id, or a cbrn whose last token is the ticker.
-function positionFor(positions, row) {
-    const ticker = String(row.ticker || '').toUpperCase()
-    const productId = String(row.product_id || '')
-    return (positions || []).find((pos) => {
-        const id = String(pos.cbrn || '')
-        if (!id) return false
-        if (id === row.ticker || id === productId) return true
-        const token = id.toUpperCase().split(/[^A-Z0-9.]+/).filter(Boolean).pop()
-        return token === ticker
-    }) || null
-}
-
-// True only when an etf_buy row may still be working. A zero fill
-// ("not filled (status CANCELLED/unknown)") is done and may be retried.
-// OPEN/PENDING/QUEUED may still fill. No status word and a non-empty
-// error (a reject such as INSUFFICIENT_FUND) is done. An order id with
-// no error at all is ambiguous, so it stays pending.
+// True only when a MARKET etf_buy row may still be working. A zero fill
+// ("not filled (status CANCELLED/unknown)") is done. OPEN/PENDING/QUEUED
+// may still fill. No status word and a non-empty error (a reject such as
+// INSUFFICIENT_FUND) is done. An order id with no error is ambiguous, so
+// it stays pending. Limit rows use etf_buy.status instead.
 function mightStillFill(errorMessage) {
     const text = String(errorMessage || '')
     const match = text.match(/status\s+([A-Za-z0-9_]+)/)
@@ -339,15 +357,15 @@ function mightStillFill(errorMessage) {
     return text.trim() === ''
 }
 
-// fills is the source of truth for whether an ETF order actually filled.
-// readFill often still sees OPEN right after place; processNewFills lands
-// the trade later. Reconcile today's etf_buy from fills before dip planning.
+// Market rows only: fills is the source of truth for whether the daily
+// market buy filled (readFill often still says OPEN right after place).
 async function reconcileEtfBuysFromFills(chicagoDate) {
     const result = await db.query(
         `UPDATE etf_buy AS e
          SET filled = true,
              fill_price = f.avg_price,
-             error_message = NULL
+             error_message = NULL,
+             status = 'FILLED'
          FROM (
              SELECT order_id,
                     AVG(price)::numeric AS avg_price
@@ -357,41 +375,31 @@ async function reconcileEtfBuysFromFills(chicagoDate) {
              GROUP BY order_id
          ) AS f
          WHERE e.coinbase_order_id = f.order_id
+           AND e.order_type = 'market'
            AND e.chicago_date = $1::date
            AND (
                e.filled IS NOT TRUE
                OR e.fill_price IS NULL
                OR e.error_message IS NOT NULL
+               OR e.status IS DISTINCT FROM 'FILLED'
            )
          RETURNING e.etf_buy_id, e.ticker, e.fill_price`,
         [chicagoDate]
     )
     for (const row of result?.rows || []) {
-        console.log(`ETF reconcile from fills: ${row.ticker} fill_price=${row.fill_price}`)
+        console.log(`ETF reconcile market buy from fills: ${row.ticker} fill_price=${row.fill_price}`)
     }
     return (result?.rows || []).length
 }
 
-// Avg fill price from fills for one Coinbase order id, or null.
-async function fillPriceFromFills(orderId) {
-    if (!orderId) return null
-    const result = await db.query(
-        `SELECT AVG(price)::numeric AS avg_price
-         FROM fills
-         WHERE order_id = $1 AND price IS NOT NULL`,
-        [orderId]
-    )
-    const avg = result?.rows?.[0]?.avg_price
-    return avg == null ? null : Number(avg)
-}
-
-// Still-open today's etf_buy with no fills row yet: ask Coinbase once.
-// Fills already covered by reconcileEtfBuysFromFills are skipped.
+// Market rows only: a still-open daily market buy with no fills row yet,
+// ask Coinbase once.
 async function probeOpenEtfBuys(chicagoDate) {
     const open = await db.query(
         `SELECT e.etf_buy_id, e.ticker, e.coinbase_order_id, e.error_message
          FROM etf_buy e
          WHERE e.chicago_date = $1::date
+           AND e.order_type = 'market'
            AND e.filled IS NOT TRUE
            AND e.closed_session IS NOT TRUE
            AND e.coinbase_order_id IS NOT NULL
@@ -414,244 +422,475 @@ async function probeOpenEtfBuys(chicagoDate) {
             `UPDATE etf_buy
              SET filled = true,
                  fill_price = COALESCE($2::numeric, fill_price),
-                 error_message = NULL
+                 error_message = NULL,
+                 status = 'FILLED'
              WHERE etf_buy_id = $1`,
             [row.etf_buy_id, fillPrice]
         )
         updated += 1
-        console.log(`ETF probe readFill: ${row.ticker} fill_price=${fillPrice}`)
+        console.log(`ETF probe readFill (market): ${row.ticker} fill_price=${fillPrice}`)
     }
     return updated
 }
 
+// Numeric config value, or the fallback when missing / not a number.
+async function configNumber(key, fallback) {
+    const result = await db.query(`SELECT value FROM config WHERE key = $1`, [key])
+    const n = Number(result?.rows?.[0]?.value)
+    return Number.isFinite(n) ? n : fallback
+}
+
+// Fills for one order from fills UNION this run's bulk_fills (thee_procedure
+// copies bulk_fills into fills later in the run, so a fill from this minute
+// is only in bulk_fills yet). De-duplicated by trade_id. Returns
+// { vwap, count }. sizeIsQuote: market $1 orders report fill size in USD,
+// limit orders (base_size) report shares, so the VWAP formula differs.
+async function orderFillVwap(orderId, sizeIsQuote) {
+    if (!orderId) return { vwap: null, count: 0 }
+    const result = await db.query(
+        `SELECT COUNT(*)::int AS n,
+                CASE WHEN $2::boolean
+                     THEN SUM(size) / NULLIF(SUM(size / price), 0)
+                     ELSE SUM(price * size) / NULLIF(SUM(size), 0)
+                END AS vwap
+         FROM (
+             SELECT DISTINCT ON (trade_id) trade_id, price, size
+             FROM (
+                 SELECT trade_id, price, size FROM fills WHERE order_id = $1
+                 UNION ALL
+                 SELECT trade_id, price, size FROM bulk_fills WHERE order_id = $1
+             ) u
+             WHERE price > 0 AND size > 0
+             ORDER BY trade_id
+         ) d`,
+        [orderId, sizeIsQuote === true]
+    )
+    const row = result?.rows?.[0] || {}
+    const vwap = row.vwap == null ? null : Number(row.vwap)
+    return { vwap: Number.isFinite(vwap) ? vwap : null, count: Number(row.n) || 0 }
+}
+
+// VWAP of the most recent BUY order for a product (by its latest fill
+// time), from fills UNION bulk_fills. This is the ladder's basis: the
+// morning market fill and every limit fill both land here. null if the
+// product has never filled.
+async function latestBuyFill(productId) {
+    const result = await db.query(
+        `WITH u AS (
+             SELECT DISTINCT ON (trade_id) order_id, trade_id, price, size, trade_time
+             FROM (
+                 SELECT order_id, trade_id, price, size, trade_time
+                 FROM fills WHERE product_id = $1 AND side = 'BUY'
+                 UNION ALL
+                 SELECT order_id, trade_id, price, size, created_at
+                 FROM bulk_fills WHERE product_id = $1 AND side = 'BUY'
+             ) x
+             WHERE price > 0 AND size > 0
+             ORDER BY trade_id
+         )
+         SELECT u.order_id,
+                MAX(u.trade_time) AS last_time,
+                -- size is USD for market $1 orders, shares for limit orders.
+                CASE WHEN MAX(eb.order_type) = 'limit'
+                     THEN SUM(u.price * u.size) / NULLIF(SUM(u.size), 0)
+                     ELSE SUM(u.size) / NULLIF(SUM(u.size / u.price), 0)
+                END AS vwap
+         FROM u
+         LEFT JOIN etf_buy eb ON eb.coinbase_order_id = u.order_id
+         GROUP BY u.order_id
+         ORDER BY MAX(u.trade_time) DESC
+         LIMIT 1`,
+        [productId]
+    )
+    const row = result?.rows?.[0]
+    const vwap = row?.vwap == null ? null : Number(row.vwap)
+    return Number.isFinite(vwap) && vwap > 0 ? { orderId: row.order_id, price: vwap } : null
+}
+
+// Every run, session open or not: walk PLACING/OPEN limit rows and move
+// them to FILLED / CANCELLED / EXPIRED. Cancels a resting limit once
+// expires_at has passed (our stand-in for GTD). Never places an order.
+// A failed GET leaves the row OPEN so a second limit is never stacked.
+async function syncEtfLimitOrders() {
+    try {
+        const open = await db.query(
+            `SELECT e.etf_buy_id, e.ticker, e.coinbase_order_id, e.client_order_id,
+                    e.status, e.expires_at, e.limit_price,
+                    (e.expires_at IS NOT NULL AND NOW() >= e.expires_at) AS expired,
+                    (NOW() - e.created_at::timestamptz) > INTERVAL '5 minutes' AS stale
+             FROM etf_buy e
+             WHERE e.order_type = 'limit' AND e.status IN ('PLACING', 'OPEN')
+             ORDER BY e.ticker`
+        )
+        for (const row of open?.rows || []) {
+            if (row.status === 'PLACING') {
+                // A PLACING row is normally flipped to OPEN/REJECTED within
+                // the same run. Older than 5 minutes means the run died
+                // between insert and create: adopt the order if Coinbase
+                // has it open (matched by client_order_id), else abandon
+                // the row so the ticker is not blocked forever.
+                if (!row.stale) continue
+                const found = await db.query(
+                    `SELECT order_id FROM bulk_open_orders WHERE client_order_id = $1 LIMIT 1`,
+                    [row.client_order_id]
+                )
+                const orderId = found?.rows?.[0]?.order_id
+                if (orderId) {
+                    await db.query(
+                        `UPDATE etf_buy SET status = 'OPEN', coinbase_order_id = $2 WHERE etf_buy_id = $1`,
+                        [row.etf_buy_id, orderId]
+                    )
+                    console.log(`ETF limit adopted stale PLACING row: ${row.ticker} order ${orderId}`)
+                } else {
+                    await db.query(
+                        `UPDATE etf_buy SET status = 'ABANDONED', closed_at = NOW(),
+                                error_message = 'PLACING row with no open order after 5 minutes'
+                         WHERE etf_buy_id = $1`,
+                        [row.etf_buy_id]
+                    )
+                    console.log(`ETF limit abandoned stale PLACING row: ${row.ticker}`)
+                }
+                continue
+            }
+            const state = await equity.readOrder(row.coinbase_order_id)
+            if (!state.ok) {
+                console.log(`ETF limit ${row.ticker}: order read failed (${state.reason}); treating as still open`)
+                continue
+            }
+            if (state.status === 'FILLED') {
+                // Prefer the real fills (VWAP of fills.price); Coinbase's own
+                // average_filled_price only when fills have not landed yet.
+                const fromFills = await orderFillVwap(row.coinbase_order_id, false)
+                const price = fromFills.vwap != null ? fromFills.vwap : state.avgFilledPrice
+                await db.query(
+                    `UPDATE etf_buy SET status = 'FILLED', filled = true, fill_price = $2,
+                            error_message = NULL, closed_at = NOW()
+                     WHERE etf_buy_id = $1`,
+                    [row.etf_buy_id, price]
+                )
+                console.log(`ETF limit FILLED: ${row.ticker} limit ${row.limit_price} fill ${price} (${fromFills.count > 0 ? 'fills VWAP' : 'Coinbase average_filled_price'})`)
+                continue
+            }
+            if (['CANCELLED', 'EXPIRED', 'FAILED'].includes(state.status)) {
+                // Closed by Coinbase or by hand. A partial fill still counts
+                // as a fill (filled = true) so the ladder steps from it.
+                const partial = state.filledSize > 0
+                const fromFills = partial ? await orderFillVwap(row.coinbase_order_id, false) : { vwap: null }
+                await db.query(
+                    `UPDATE etf_buy SET status = $2, filled = $3, fill_price = $4,
+                            error_message = $5, closed_at = NOW()
+                     WHERE etf_buy_id = $1`,
+                    [row.etf_buy_id, state.status === 'FAILED' ? 'REJECTED' : 'CANCELLED', partial,
+                        partial ? (fromFills.vwap != null ? fromFills.vwap : state.avgFilledPrice) : null,
+                        `Coinbase status ${state.status}${partial ? ` (partial ${state.filledSize})` : ''}`]
+                )
+                console.log(`ETF limit closed by Coinbase: ${row.ticker} status ${state.status}${partial ? ' (partial fill)' : ''}`)
+                continue
+            }
+            if (row.expired) {
+                // Our TTL passed and it is still working: cancel it. If the
+                // cancel fails (e.g. it just filled), leave the row OPEN and
+                // the next run reads the real status.
+                const cancel = await equity.cancelOrder(row.coinbase_order_id)
+                if (cancel.ok) {
+                    const partial = state.filledSize > 0
+                    await db.query(
+                        `UPDATE etf_buy SET status = 'EXPIRED', filled = $2, fill_price = $3, closed_at = NOW(),
+                                error_message = 'expired: cancelled by bot at expires_at'
+                         WHERE etf_buy_id = $1`,
+                        [row.etf_buy_id, partial, partial ? state.avgFilledPrice : null]
+                    )
+                    console.log(`ETF limit EXPIRED (cancelled by bot): ${row.ticker} limit ${row.limit_price}`)
+                } else {
+                    console.log(`ETF limit expiry cancel FAILED: ${row.ticker} ${cancel.reason}; will re-check next run`)
+                }
+            }
+        }
+    } catch (error) {
+        console.log('syncEtfLimitOrders() ERROR', error?.message || error)
+    }
+}
+
+// Best bid for a never-filled ticker: Coinbase product / best_bid_ask
+// first (usually blank on equities), then the Alpaca IEX bid.
+async function bidBasis(row, product) {
+    if (Number(product.bestBid) > 0) return { price: Number(product.bestBid), source: 'coinbase_bid' }
+    const cb = await equity.bestBid(row.product_id)
+    if (Number(cb) > 0) return { price: Number(cb), source: 'coinbase_bid' }
+    try {
+        const snap = await alpacaMd.fetchIexSnapshots([row.ticker])
+        const bid = Number(snap?.bySymbol?.[String(row.ticker).toUpperCase()]?.latestQuote?.bp)
+        if (bid > 0) return { price: bid, source: 'iex_bid' }
+    } catch (error) {
+        // fall through: no basis, the ticker is skipped this run
+    }
+    return null
+}
+
+// Session is open. Decide this minute's orders: the daily market buy for
+// tickers that have not had one today, and a ladder limit for tickers
+// with no resting limit. Returns funded attempts + the reserve.
 async function buildEtfPlan() {
     const today = chicagoToday()
     const notes = []
-    // Sync etf_buy from fills (and probe any still-open leftovers) before
-    // pending / boughtToday / lastFillPrice so dips are not blocked by a
-    // stale "status OPEN" row whose fill already landed.
     await reconcileEtfBuysFromFills(today)
     await probeOpenEtfBuys(today)
     const listed = await db.query(
-        `SELECT ticker, product_id, quote_usd, is_special
-         FROM etf
-         WHERE enabled
-         ORDER BY ticker`
+        `SELECT ticker, product_id, quote_usd FROM etf WHERE enabled ORDER BY ticker`
     )
     const rows = listed?.rows || []
     const book = await equity.equitySnapshot()
     if (!book.ok) {
-        notes.push(`ETF plan skipped: holdings unreadable (${book.reason})`)
+        notes.push(`ETF plan skipped: Default USD unreadable (${book.reason})`)
         return { attempts: [], reserve: 0, notes }
     }
-    const openOrders = await db.query(
-        `SELECT DISTINCT product_id
-         FROM bulk_open_orders
-         WHERE side = 'BUY' AND status = 'OPEN' AND product_id IS NOT NULL`
-    )
-    const openProducts = new Set((openOrders?.rows || []).map((row) => row.product_id))
-    const latest = await db.query(
-        `SELECT DISTINCT ON (ticker)
-                ticker, filled, closed_session, coinbase_order_id, error_message
+    const stepPct = await configNumber('etf_limit_step_pct', 0.10)
+    // Today's market rows: filled = the daily buy is done; an unfilled one
+    // that might still fill blocks a second market send.
+    const market = await db.query(
+        `SELECT DISTINCT ON (ticker) ticker, filled, closed_session, coinbase_order_id, error_message,
+                bool_or(filled) OVER (PARTITION BY ticker) AS any_filled
          FROM etf_buy
-         ORDER BY ticker, created_at DESC, etf_buy_id DESC`
-    )
-    const pendingTickers = new Set()
-    for (const row of latest?.rows || []) {
-        // A zero fill or a closed-market reject is terminal: filled stays
-        // false so it does not count as today's buy, and it may be retried.
-        // An order id that is still OPEN, or whose status was never shown
-        // to be done, might still fill, so it blocks another send.
-        if (row.filled || row.closed_session || !row.coinbase_order_id) continue
-        if (!mightStillFill(row.error_message)) continue
-        pendingTickers.add(row.ticker)
-    }
-    const bought = await db.query(
-        `SELECT ticker
-         FROM etf_buy
-         WHERE chicago_date = $1::date AND filled`,
+         WHERE order_type = 'market' AND chicago_date = $1::date
+         ORDER BY ticker, created_at DESC, etf_buy_id DESC`,
         [today]
     )
-    const boughtToday = new Set((bought?.rows || []).map((row) => row.ticker))
-    const lastFills = await db.query(
-        `SELECT DISTINCT ON (ticker) ticker, fill_price
-         FROM etf_buy
-         WHERE filled AND fill_price IS NOT NULL
-         ORDER BY ticker, created_at DESC, etf_buy_id DESC`
-    )
-    const lastFillByTicker = new Map((lastFills?.rows || []).map((row) => [row.ticker, Number(row.fill_price)]))
-    const info = {}
-    for (const row of rows) {
-        const held = positionFor(book.positions, row)
-        const sharesKnown = !held || held.shares != null
-        info[row.ticker] = {
-            boughtToday: boughtToday.has(row.ticker),
-            pending: openProducts.has(row.product_id) || pendingTickers.has(row.ticker),
-            sharesKnown,
-            shares: held && held.shares != null ? held.shares : 0,
-            averageEntry: held ? held.averageEntry : null,
-            unrealizedPnl: held ? held.unrealizedPnl : null,
-            lastFillPrice: lastFillByTicker.get(row.ticker) || null,
-            price: null,
-        }
+    const marketDone = new Set()
+    const marketPending = new Set()
+    for (const r of market?.rows || []) {
+        if (r.any_filled) marketDone.add(r.ticker)
+        else if (!r.closed_session && r.coinbase_order_id && mightStillFill(r.error_message)) marketPending.add(r.ticker)
     }
-    const needPrice = rows.filter((row) => {
-        const state = info[row.ticker]
-        if (!state || state.pending || !state.sharesKnown) return false
-        // First $1 with no shares does not need a price. A held position
-        // or a later buy the same day does.
-        return state.boughtToday || Number(state.shares) > 0
-    })
-    // Coinbase product price/mid/bid/ask first. When those are blank
-    // (common on these ETF products), use stock.price written by the
-    // Alpaca IEX sync earlier this run. Session open / not-halted is
-    // already required before we get here via equitySessionOpen.
-    await Promise.all(needPrice.map(async (row) => {
-        const quote = await equity.equityPrice(row.product_id)
-        if (quote.ok) info[row.ticker].price = quote.price
-        else notes.push(`ETF Coinbase price blank ${row.ticker}: ${quote.reason}`)
-    }))
-    const stillNeed = needPrice.filter((row) => !(Number(info[row.ticker]?.price) > 0))
-    if (stillNeed.length > 0) {
-        const fromStock = await alpacaMd.readStockPrices(db, stillNeed.map((r) => r.ticker))
-        for (const row of stillNeed) {
-            const p = fromStock.get(String(row.ticker).toUpperCase())
-            if (Number(p) > 0) {
-                info[row.ticker].price = p
-                notes.push(`ETF price from stock (Alpaca IEX) ${row.ticker}: ${p}`)
-            } else {
-                notes.push(`ETF price unavailable ${row.ticker}: Coinbase blank and no stock.price`)
+    const openLimits = await db.query(
+        `SELECT ticker FROM etf_buy WHERE order_type = 'limit' AND status IN ('PLACING', 'OPEN')`
+    )
+    const limitOpen = new Set((openLimits?.rows || []).map((r) => r.ticker))
+    // Coinbase BUY orders on these products that etf_buy does not track as
+    // a limit (e.g. placed by hand). They block both kinds of order.
+    const untracked = await db.query(
+        `SELECT DISTINCT o.product_id
+         FROM bulk_open_orders o
+         WHERE o.side = 'BUY' AND o.status = 'OPEN' AND o.product_id IS NOT NULL
+           AND NOT EXISTS (
+               SELECT 1 FROM etf_buy e WHERE e.coinbase_order_id = o.order_id AND e.order_type = 'limit'
+           )`
+    )
+    const untrackedOpen = new Set((untracked?.rows || []).map((r) => r.product_id))
+    // A filled order in the last 10 minutes whose fills have not landed in
+    // fills/bulk_fills yet: wait, so the next limit steps from the real fill
+    // price and not from the previous fill.
+    const recentFilled = await db.query(
+        `SELECT DISTINCT ON (ticker) ticker, coinbase_order_id, order_type
+         FROM etf_buy
+         WHERE filled AND coinbase_order_id IS NOT NULL
+           AND created_at > NOW() - INTERVAL '12 hours'
+           AND COALESCE(closed_at, created_at::timestamptz) > NOW() - INTERVAL '10 minutes'
+         ORDER BY ticker, COALESCE(closed_at, created_at::timestamptz) DESC`
+    )
+    const recentByTicker = new Map((recentFilled?.rows || []).map((r) => [r.ticker, r]))
+
+    const chosen = []
+    for (const row of rows) {
+        const t = row.ticker
+        if (untrackedOpen.has(row.product_id)) {
+            notes.push(`ETF skip ${t}: an untracked open BUY order exists on Coinbase`)
+            continue
+        }
+        if (marketPending.has(t)) {
+            notes.push(`ETF skip ${t}: today's market buy might still fill`)
+            continue
+        }
+        if (!marketDone.has(t)) {
+            // The ladder waits for this fill; it steps from it next minute.
+            chosen.push({ kind: 'market', ticker: t, product_id: row.product_id, notional: Number(row.quote_usd), reason: 'daily $1 market buy (first of the Chicago day)' })
+            continue
+        }
+        if (limitOpen.has(t)) {
+            notes.push(`ETF hold ${t}: a limit is already resting`)
+            continue
+        }
+        const recent = recentByTicker.get(t)
+        if (recent) {
+            const f = await orderFillVwap(recent.coinbase_order_id, recent.order_type === 'market')
+            if (f.count === 0) {
+                notes.push(`ETF wait ${t}: fill of ${recent.coinbase_order_id} not in fills yet`)
+                continue
             }
         }
+        const product = await equity.equityProduct(row.product_id)
+        if (!product.ok) {
+            notes.push(`ETF skip ${t}: product read failed (${product.reason})`)
+            continue
+        }
+        if (product.blocked) {
+            notes.push(`ETF skip ${t}: ${product.blocked}`)
+            continue
+        }
+        let basis = null
+        const last = await latestBuyFill(row.product_id)
+        if (last) basis = { price: last.price, source: 'last_fill' }
+        else basis = await bidBasis(row, product)
+        if (!basis) {
+            notes.push(`ETF skip ${t}: no fill and no bid to price a limit from`)
+            continue
+        }
+        const limitPrice = etfPlan.limitPriceFrom(basis.price, stepPct, product.priceIncrement)
+        // Notional: quote_usd ($1), raised to Coinbase's minimums if higher.
+        const target = Math.max(Number(row.quote_usd) || 0, product.notionalMin || 0, product.quoteMinSize || 0)
+        const baseSize = limitPrice ? etfPlan.baseSizeFor(target, limitPrice, product.baseIncrement) : null
+        if (!limitPrice || !baseSize) {
+            notes.push(`ETF skip ${t}: could not size a limit (basis ${basis.price})`)
+            continue
+        }
+        chosen.push({
+            kind: 'limit',
+            ticker: t,
+            product_id: row.product_id,
+            limitPrice,
+            baseSize,
+            notional: Number(baseSize) * Number(limitPrice),
+            basisPrice: basis.price,
+            priceBasis: basis.source,
+            reason: `limit ${stepPct}% under ${basis.source} ${Number(basis.price).toFixed(4)}`,
+        })
     }
-    const planned = etfPlan.planAttempts(rows, info, etfPlan.inCatchUpWindow())
-    notes.push(...planned.notes)
-    const funded = etfPlan.fundAttempts(planned.chosen, book.available)
+    const funded = etfPlan.fundAttempts(chosen, book.available)
+    for (const c of chosen) notes.push(`ETF plan ${c.ticker}: ${c.kind} — ${c.reason}${c.kind === 'limit' ? ` → ${c.baseSize} @ ${c.limitPrice}` : ''}`)
     notes.push(...funded.notes)
     return { attempts: funded.attempts, reserve: funded.reserve, notes }
 }
 
-// Send the attempts reserved at the start of this run. Does not re-pick
-// tickers: a dip that appears only after thee_procedure would spend cash
-// the crypto plans were already allowed to use. Does not re-reserve.
-// A closed-market reject or a zero fill stays filled=false. A failed
-// fill GET is still recorded filled=true so the $1 is not sent twice.
+// Mark the equity session closed after a closed-market reject.
+async function markEquitySessionClosed() {
+    equitySessionOpen = false
+    await db.query(`UPDATE config SET value = 'false' WHERE key = 'equity_session_open'`)
+}
+
+// Reserve the PLACING row first (the unique index refuses a second
+// PLACING/OPEN limit for the ticker), then create the GTC limit, then
+// flip the row to OPEN (or REJECTED). expires_at = NOW() + ttl hours.
+async function placeEtfLimit(row, today, ttlHours) {
+    const clientOrderId = crypto.randomUUID()
+    let inserted
+    try {
+        inserted = await db.query(
+            `INSERT INTO etf_buy
+                (ticker, chicago_date, quote_usd, filled, closed_session, client_order_id,
+                 order_type, status, limit_price, base_size, basis_price, price_basis, expires_at)
+             VALUES ($1, $2::date, $3, false, false, $4,
+                     'limit', 'PLACING', $5, $6, $7, $8, NOW() + ($9::numeric * INTERVAL '1 hour'))
+             RETURNING etf_buy_id, expires_at`,
+            [row.ticker, today, Number(row.notional).toFixed(4), clientOrderId,
+                row.limitPrice, row.baseSize, row.basisPrice, row.priceBasis, ttlHours]
+        )
+    } catch (error) {
+        if (error?.code === '23505') {
+            console.log(`ETF limit skipped: ${row.ticker} already has a PLACING/OPEN limit (unique index)`)
+            return { placed: false }
+        }
+        throw error
+    }
+    const id = inserted.rows[0].etf_buy_id
+    const expiresAt = inserted.rows[0].expires_at
+    const response = await equity.createLimitBuy(row.product_id, row.baseSize, row.limitPrice, clientOrderId)
+    if (response?.success === true) {
+        const orderId = response.success_response?.order_id
+        await db.query(
+            `UPDATE etf_buy SET status = 'OPEN', coinbase_order_id = $2 WHERE etf_buy_id = $1`,
+            [id, orderId]
+        )
+        const expCt = new Date(expiresAt).toLocaleString('en-US', { timeZone: 'America/Chicago' })
+        console.log(`ETF limit placed: ${row.ticker} ${row.baseSize} @ ${row.limitPrice} (~$${Number(row.notional).toFixed(2)}; ${row.reason}) expires ${expCt} CT, order ${orderId}`)
+        return { placed: true }
+    }
+    const closed = equity.isClosedMarket(response)
+    const message = response?.error_response?.message || 'unknown'
+    await db.query(
+        `UPDATE etf_buy SET status = 'REJECTED', closed_session = $2, error_message = $3, closed_at = NOW()
+         WHERE etf_buy_id = $1`,
+        [id, closed, message]
+    )
+    console.log(`ETF limit FAILED: ${row.ticker} ${row.baseSize} @ ${row.limitPrice}: ${message}`)
+    if (closed) await markEquitySessionClosed()
+    return { placed: false, closed }
+}
+
+// Daily $1 market buy (kept from the pre-2026-10-06 morning path).
+async function placeEtfMarket(row, today) {
+    const quote = Number(row.notional)
+    console.log(`ETF buy attempt: ${row.ticker} $${quote.toFixed(2)} market (${row.reason})`)
+    const clientOrderId = crypto.randomUUID()
+    const response = await equity.createMarketBuy(row.product_id, quote, clientOrderId)
+    if (equity.isClosedMarket(response)) {
+        const message = response?.error_response?.message || 'equity session closed'
+        await recordEtfAttempt({ ticker: row.ticker, chicagoDate: today, quoteUsd: quote, filled: false,
+            closedSession: true, clientOrderId, errorMessage: message, status: 'REJECTED' })
+        await markEquitySessionClosed()
+        console.log(`ETF session closed on ${row.ticker} (${message}); not today's buy`)
+        return { filled: false, closed: true }
+    }
+    if (response?.success !== true) {
+        const message = response?.error_response?.message || 'unknown'
+        await recordEtfAttempt({ ticker: row.ticker, chicagoDate: today, quoteUsd: quote, filled: false,
+            closedSession: false, clientOrderId, errorMessage: message, status: 'REJECTED' })
+        console.log(`ETF buy FAILED: ${row.ticker} ${message}`)
+        return { filled: false }
+    }
+    const orderId = response.success_response?.order_id
+    // Prefer fills when the trade already landed; otherwise readFill. A
+    // later minute's reconcileEtfBuysFromFills repairs OPEN rows. A failed
+    // fill GET is recorded filled = true so the $1 is not sent twice.
+    const fromFills = await orderFillVwap(orderId, true)
+    let filled = false
+    let fillPrice = null
+    let fillStatus = null
+    if (fromFills.vwap != null) {
+        filled = true
+        fillPrice = fromFills.vwap
+    } else {
+        const fill = await equity.readFill(orderId)
+        filled = fill.unknown || fill.filledSize > 0 || fill.filledQuote > 0
+        fillPrice = fill.filledSize > 0 && fill.filledQuote > 0 ? fill.filledQuote / fill.filledSize : null
+        fillStatus = fill.status
+    }
+    await recordEtfAttempt({ ticker: row.ticker, chicagoDate: today, quoteUsd: quote, filled,
+        closedSession: false, coinbaseOrderId: orderId, clientOrderId,
+        errorMessage: filled ? null : `not filled (status ${fillStatus || 'unknown'})`,
+        fillPrice: filled ? fillPrice : null, status: filled ? 'FILLED' : 'OPEN' })
+    console.log(filled ? `ETF buy filled: ${row.ticker} $${quote.toFixed(2)} market` : `ETF market buy accepted, fill not confirmed yet: ${row.ticker} status ${fillStatus}`)
+    return { filled }
+}
+
+// Send the orders reserved at the start of this run (no re-pick, no
+// re-reserve). Runs first inside processBuyOrders, before crypto.
 async function processEquityEtfBuys() {
     if (!equitySessionOpen) return
     if (etfAttemptsThisRun.length === 0) {
-        console.log('ETF buys: nothing reserved this run')
+        console.log('ETF orders: nothing to place this run')
         return
     }
-    let cash = 0
     try {
         const bal = await equity.defaultUsdAvailable()
         if (!bal.ok) {
-            console.log(`ETF buys skipped: Default USD unreadable (${bal.reason})`)
+            console.log(`ETF orders skipped: Default USD unreadable (${bal.reason})`)
             return
         }
-        cash = bal.available
+        let cash = bal.available
         console.log(`ETF Default USD available: $${cash.toFixed(2)}`)
         const today = chicagoToday()
+        const ttlHours = await configNumber('etf_limit_ttl_hours', 12)
         for (const row of etfAttemptsThisRun) {
             if (!equitySessionOpen) break
-            const quote = Number(row.quote_usd)
-            if (!(cash >= quote) || !(quote > 0)) {
-                console.log(`ETF buy skipped: ${row.ticker} needs $${quote.toFixed(2)} Default USD, have $${cash.toFixed(2)}`)
+            const cost = Number(row.notional)
+            if (!(cost > 0) || !(cash >= cost)) {
+                console.log(`ETF ${row.kind} skipped: ${row.ticker} needs $${cost.toFixed(2)}, have $${cash.toFixed(2)}`)
                 continue
             }
-            console.log(`ETF buy attempt: ${row.ticker} $${quote.toFixed(2)} (${row.reason})`)
-            const clientOrderId = crypto.randomUUID()
-            const response = await equity.createMarketBuy(row.product_id, quote, clientOrderId)
-            if (equity.isClosedMarket(response)) {
-                const message = response?.error_response?.message || 'equity session closed'
-                await recordEtfAttempt({
-                    ticker: row.ticker,
-                    chicagoDate: today,
-                    quoteUsd: quote,
-                    filled: false,
-                    closedSession: true,
-                    clientOrderId,
-                    errorMessage: message,
-                    dipPrice: row.dipPrice,
-                })
-                equitySessionOpen = false
-                await db.query(
-                    `UPDATE config SET value = 'false' WHERE key = 'equity_session_open'`
-                )
-                console.log(`ETF session closed on ${row.ticker} (${message}); not today's buy`)
-                break
-            }
-            if (response?.success === true) {
-                const orderId = response.success_response?.order_id
-                // Prefer fills when a trade already landed; otherwise readFill.
-                // A later minute's reconcileEtfBuysFromFills repairs OPEN rows.
-                const fromFills = await fillPriceFromFills(orderId)
-                let filled = false
-                let fillPrice = null
-                let fillStatus = null
-                if (fromFills != null && Number.isFinite(fromFills)) {
-                    filled = true
-                    fillPrice = fromFills
-                } else {
-                    const fill = await equity.readFill(orderId)
-                    const closedFill = equity.isClosedMarket(fill.raw || fill)
-                    if (closedFill) {
-                        await recordEtfAttempt({
-                            ticker: row.ticker,
-                            chicagoDate: today,
-                            quoteUsd: quote,
-                            filled: false,
-                            closedSession: true,
-                            coinbaseOrderId: orderId,
-                            clientOrderId,
-                            errorMessage: 'order viewing is not available',
-                            dipPrice: row.dipPrice,
-                        })
-                        equitySessionOpen = false
-                        await db.query(
-                            `UPDATE config SET value = 'false' WHERE key = 'equity_session_open'`
-                        )
-                        console.log(`ETF session closed after accept ${row.ticker}; not today's buy`)
-                        break
-                    }
-                    filled = fill.unknown || fill.filledSize > 0 || fill.filledQuote > 0
-                    fillPrice = fill.filledSize > 0 && fill.filledQuote > 0
-                        ? fill.filledQuote / fill.filledSize
-                        : null
-                    fillStatus = fill.status
-                }
-                await recordEtfAttempt({
-                    ticker: row.ticker,
-                    chicagoDate: today,
-                    quoteUsd: quote,
-                    filled,
-                    closedSession: false,
-                    coinbaseOrderId: orderId,
-                    clientOrderId,
-                    errorMessage: filled ? null : `not filled (status ${fillStatus || 'unknown'})`,
-                    dipPrice: row.dipPrice,
-                    fillPrice: filled ? fillPrice : null,
-                })
-                if (filled) {
-                    cash -= quote
-                    console.log(`ETF buy filled: ${row.ticker} $${quote.toFixed(2)}`)
-                } else {
-                    console.log(`ETF buy not filled, will retry: ${row.ticker} status ${fillStatus}`)
-                }
-            } else {
-                const message = response?.error_response?.message || 'unknown'
-                await recordEtfAttempt({
-                    ticker: row.ticker,
-                    chicagoDate: today,
-                    quoteUsd: quote,
-                    filled: false,
-                    closedSession: false,
-                    clientOrderId,
-                    errorMessage: message,
-                    dipPrice: row.dipPrice,
-                })
-                console.log(`ETF buy FAILED: ${row.ticker} ${message}`)
-            }
+            const result = row.kind === 'market'
+                ? await placeEtfMarket(row, today)
+                : await placeEtfLimit(row, today, ttlHours)
+            if (result.closed) break
+            if (result.filled || result.placed) cash -= cost
         }
     } catch (error) {
         console.log('processEquityEtfBuys() ERROR', error?.message || error)

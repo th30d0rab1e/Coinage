@@ -146,6 +146,9 @@ function isClosedMarket(payload) {
         || blob.includes('untradable product')
 }
 
+// 2026-10-06: KEPT for the once-per-Chicago-day morning $1 market buy of
+// each enabled ETF (index.js buildEtfPlan). The per-minute market dip
+// re-buys and the 2:45 PM market catch-up that also used it are retired.
 // Market buy for exactly quoteUsd. No retail_portfolio_id: the equity key's
 // default portfolio is implicit, and setting it is not part of this order.
 async function createMarketBuy(productId, quoteUsd, clientOrderId) {
@@ -200,6 +203,80 @@ async function readFill(orderId) {
     }
 }
 
+
+// 2026-10-06 limit ladder: one resting LIMIT buy per enabled ticker,
+// alongside the morning market buy above.
+//
+// Why GTC and not GTD: the spec asked for limit_limit_gtd with end_time =
+// now + 12h, but Coinbase rejects GTD for equities ("only market and limit
+// orders are supported for CCM", HTTP 400, tested 2026-10-06 on BLOX).
+// The equity API only takes limit_limit_gtc with displayed_order_config
+// LIMIT_GFD or LIMIT_GTC. So we place LIMIT_GTC and the bot emulates the
+// expiry: etf_buy.expires_at = placed + config.etf_limit_ttl_hours, and
+// index.js syncEtfLimitOrders cancels the order once that time passes.
+// Fractional base_size is only allowed in EQUITY_TRADING_SESSION_NORMAL,
+// so the order is NORMAL-session (it is not eligible pre/after/overnight).
+async function createLimitBuy(productId, baseSize, limitPrice, clientOrderId) {
+    const body = {
+        client_order_id: clientOrderId,
+        product_id: productId,
+        side: 'BUY',
+        order_configuration: {
+            limit_limit_gtc: {
+                base_size: String(baseSize),
+                limit_price: String(limitPrice),
+                // Not post-only: if the price already fell through the
+                // limit, fill now (at or under the limit) instead of being
+                // rejected and re-placed every minute.
+                post_only: false,
+            },
+        },
+        equity_order_metadata: {
+            equity_trading_session: 'EQUITY_TRADING_SESSION_NORMAL',
+            displayed_order_config: 'LIMIT_GTC',
+        },
+    }
+    const response = await equityRequest('POST', '/api/v3/brokerage/orders', '', body)
+    const data = response.data
+    if (response.status === 200 && data?.success) return data
+    const message = data?.error_response?.message
+        || data?.message
+        || (typeof data === 'string' ? data.slice(0, 300) : `HTTP ${response.status}`)
+    return {
+        success: false,
+        error_response: {
+            message,
+            error: data?.error_response?.error || data?.error,
+            preview_failure_reason: data?.error_response?.preview_failure_reason,
+            error_details: data?.error_response?.error_details,
+        },
+    }
+}
+
+// One order's live state. ok=false (HTTP error) means "unknown": callers
+// must treat the order as still open so a second limit is never stacked.
+// avgFilledPrice is Coinbase's own VWAP, used only when the fills table
+// has not caught up yet (fills.price is preferred).
+async function readOrder(orderId) {
+    const response = await equityRequest('GET', `/api/v3/brokerage/orders/historical/${orderId}`, '')
+    if (response.status !== 200) return { ok: false, reason: `HTTP ${response.status}` }
+    const order = response.data?.order || response.data || {}
+    return {
+        ok: true,
+        status: order.status || null,
+        filledSize: parseFloat(order.filled_size || 0) || 0,
+        filledValue: parseFloat(order.filled_value || 0) || 0,
+        avgFilledPrice: parseFloat(order.average_filled_price || 0) || null,
+    }
+}
+
+// Cancel one order. ok=true only when Coinbase confirms the cancel.
+async function cancelOrder(orderId) {
+    const response = await equityRequest('POST', '/api/v3/brokerage/orders/batch_cancel', '', { order_ids: [orderId] })
+    const result = response.data?.results?.[0]
+    if (response.status === 200 && result?.success === true) return { ok: true, reason: null }
+    return { ok: false, reason: result?.failure_reason || response.data?.message || `HTTP ${response.status}` }
+}
 
 // Spendable USD in the Default portfolio only. That breakdown lists more
 // than one USD row (fiat, derivatives cash, prediction-markets cash). The
@@ -272,32 +349,50 @@ async function defaultUsdAvailable() {
     }
 }
 
-// Live Coinbase quote for the dip check. Last-close and other session-empty
-// fields are not used: a blank weekend product must not become a made-up
-// price. When price/mid/bid/ask are all blank (common on these ETF products
-// even in NORMAL session), callers fall back to stock.price populated by
-// modules/alpacaMarketData.js from Alpaca IEX — this function stays
-// Coinbase-only so auth and market-data stay separate.
-async function equityPrice(productId) {
+// Product rules for sizing a limit: increments, the $1 fractional notional
+// minimum, and whether a fractional buy is allowed at all. A product that
+// is liquidate_only (sell-only, e.g. YETH on 2026-10-06), not fractionable,
+// halted, or has buy_fractional_shares=false is reported as not buyable so
+// the caller skips and logs it instead of sending an order that must fail.
+async function equityProduct(productId) {
     try {
         const response = await equityRequest('GET', `/api/v3/brokerage/products/${productId}`, '')
-        if (response.status !== 200) {
-            return { ok: false, price: null, reason: `HTTP ${response.status}` }
+        if (response.status !== 200) return { ok: false, reason: `HTTP ${response.status}` }
+        const p = response.data?.product || response.data || {}
+        const d = p.equity_product_details || {}
+        const flags = p.equity_trading_flags || {}
+        let blocked = null
+        if (p.trading_disabled || p.is_disabled || p.cancel_only || p.view_only) blocked = 'product disabled / cancel-only / view-only'
+        else if (d.liquidate_only === true) blocked = 'liquidate_only (sell-only)'
+        else if (d.fractionable === false || flags.buy_fractional_shares === false) blocked = 'whole shares only (not fractionable)'
+        else if (flags.buy_enabled === false) blocked = 'buy disabled'
+        else if (d.trading_halted === true) blocked = 'trading halted'
+        return {
+            ok: true,
+            blocked,
+            baseIncrement: p.base_increment || '0.00001',
+            priceIncrement: p.price_increment || p.quote_increment || '0.01',
+            quoteMinSize: Number(p.quote_min_size) || 0,
+            notionalMin: Number(d.fractional_notional_min_size) || 0,
+            bestBid: amountValue(p.best_bid_price),
         }
-        const product = response.data?.product || response.data || {}
-        const direct = [product.price, product.mid_market_price]
-        for (const value of direct) {
-            const n = amountValue(value)
-            if (n != null && n > 0) return { ok: true, price: n, reason: null }
-        }
-        const bid = amountValue(product.best_bid_price)
-        const ask = amountValue(product.best_ask_price)
-        if (bid != null && ask != null && bid > 0 && ask > 0) {
-            return { ok: true, price: (bid + ask) / 2, reason: null }
-        }
-        return { ok: false, price: null, reason: 'no live price on product' }
     } catch (error) {
-        return { ok: false, price: null, reason: error?.message || 'request failed' }
+        return { ok: false, reason: error?.message || 'request failed' }
+    }
+}
+
+// Coinbase top-of-book bid for one product, or null. On these equity
+// products it is usually blank (same as product.best_bid_price), in which
+// case the caller falls back to the Alpaca IEX bid.
+async function bestBid(productId) {
+    try {
+        const response = await equityRequest('GET', '/api/v3/brokerage/best_bid_ask', `?product_ids=${productId}`)
+        if (response.status !== 200) return null
+        const book = (response.data?.pricebooks || []).find((b) => b.product_id === productId)
+        const bid = amountValue(book?.bids?.[0]?.price)
+        return bid != null && bid > 0 ? bid : null
+    } catch (error) {
+        return null
     }
 }
 
@@ -310,9 +405,16 @@ module.exports = {
     interpretEquitySession,
     equitySession,
     isClosedMarket,
+    // Morning $1 market buy (kept 2026-10-06).
     createMarketBuy,
     readFill,
+    // 2026-10-06 limit ladder. equityPrice (the dip check's Coinbase quote)
+    // was removed with the market dip re-buys.
+    createLimitBuy,
+    readOrder,
+    cancelOrder,
+    equityProduct,
+    bestBid,
     defaultUsdAvailable,
     equitySnapshot,
-    equityPrice,
 }

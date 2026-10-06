@@ -2,10 +2,13 @@
 -- product_id is the canonical Advanced Trade id (64-hex), not the ticker.
 -- Orders must use product_id; the ticker is only a label.
 -- is_special distinguishes the Alpaca-style repeat rules. BLOX, CHPY,
--- TOPW, TSLW, XDTE, and SPCX are specials.
+-- TOPW, TSLW, XDTE, SPCX, and YBTC are specials.
 -- XDTE was made a special on 2026-10-04 so it gets same-day dip rebuys and the 2:45 PM CT catch-up.
 -- SPCX (SpaceX common stock, not an ETF) was added 2026-10-05 as a $1
 -- special; see db/migrations/2026-10-05_add_spcx_etf.sql for the product_id check.
+-- YBTC (Roundhill Bitcoin Covered Call ETF) was added 2026-10-06 as a $1
+-- special; YETH was requested too but skipped because Coinbase lists it
+-- liquidate_only (sell-only). See db/migrations/2026-10-06_add_ybtc_etf.sql.
 CREATE TABLE IF NOT EXISTS public.etf (
     ticker     text PRIMARY KEY,
     product_id text NOT NULL,
@@ -26,4 +29,4 @@ COMMENT ON COLUMN public.etf.product_id IS
 COMMENT ON COLUMN public.etf.quote_usd IS
     'Quote USD notional for one market buy. Default $1.';
 COMMENT ON COLUMN public.etf.is_special IS
-    'True for BLOX, CHPY, TOPW, TSLW, XDTE, and SPCX. XDTE was made a special on 2026-10-04 so it gets same-day dip rebuys and the 2:45 PM CT catch-up. SPCX (SpaceX common stock) added as a special on 2026-10-05.';
+    'True for BLOX, CHPY, TOPW, TSLW, XDTE, SPCX, and YBTC. XDTE was made a special on 2026-10-04 so it gets same-day dip rebuys and the 2:45 PM CT catch-up. SPCX (SpaceX common stock) added as a special on 2026-10-05. YBTC (Roundhill Bitcoin Covered Call ETF) added as a special on 2026-10-06; YETH skipped (Coinbase liquidate_only).';

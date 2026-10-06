@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 2pmlQxTXYPucyHEIyUE5K3HUUxNdr7p6n5tVnjZDQ06NNZqXRJsmf10Hi4BUsB4
+\restrict vZYhcav7px7DIXSNw77LLiS14I2wxWNRKKzTmiXbsGa3tq83SgYHnw17oc4aGP1
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -1434,6 +1434,12 @@ AND NOT EXISTS (
 )
 AND NOT EXISTS (
     SELECT 1 FROM unmatched_fills uf WHERE uf.order_id = bf.order_id
+)
+-- 2026-10-06: ETF orders (daily market buy and limit ladder) are tracked in
+-- etf_buy, not position, so they are not orphans. Without this every ETF
+-- fill logged "ERROR: unmatched fill detected" and tripped the health check.
+AND NOT EXISTS (
+    SELECT 1 FROM etf_buy eb WHERE eb.coinbase_order_id = bf.order_id
 );
 
 TRUNCATE TABLE bulk_stock;
@@ -1842,7 +1848,7 @@ COMMENT ON COLUMN public.etf.quote_usd IS 'Quote USD notional for one market buy
 -- Name: COLUMN etf.is_special; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.etf.is_special IS 'True for BLOX, CHPY, TOPW, TSLW, XDTE, and SPCX. XDTE was made a special on 2026-10-04 so it gets same-day dip rebuys and the 2:45 PM CT catch-up. SPCX (SpaceX common stock) added as a special on 2026-10-05.';
+COMMENT ON COLUMN public.etf.is_special IS 'True for BLOX, CHPY, TOPW, TSLW, XDTE, SPCX, and YBTC. XDTE was made a special on 2026-10-04 so it gets same-day dip rebuys and the 2:45 PM CT catch-up. SPCX (SpaceX common stock) added as a special on 2026-10-05. YBTC (Roundhill Bitcoin Covered Call ETF) added as a special on 2026-10-06; YETH skipped (Coinbase liquidate_only).';
 
 
 --
@@ -1861,7 +1867,15 @@ CREATE TABLE public.etf_buy (
     error_message text,
     created_at timestamp without time zone DEFAULT now() NOT NULL,
     dip_price numeric,
-    fill_price numeric
+    fill_price numeric,
+    order_type text,
+    status text,
+    limit_price numeric,
+    base_size numeric,
+    expires_at timestamp with time zone,
+    basis_price numeric,
+    price_basis text,
+    closed_at timestamp with time zone
 );
 
 
@@ -1891,6 +1905,62 @@ COMMENT ON COLUMN public.etf_buy.dip_price IS 'Live price the dip rule compared.
 --
 
 COMMENT ON COLUMN public.etf_buy.fill_price IS 'Execution price from filled value / filled size. The next same-day dip uses the latest non-null value. Null when size was not returned.';
+
+
+--
+-- Name: COLUMN etf_buy.order_type; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.etf_buy.order_type IS 'market = the once-per-Chicago-day $1 market buy (and pre-2026-10-06 dip re-buys). limit = a resting ladder limit buy.';
+
+
+--
+-- Name: COLUMN etf_buy.status; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.etf_buy.status IS 'PLACING (row reserved, order not yet confirmed), OPEN (resting on Coinbase), FILLED, EXPIRED (bot cancelled it at expires_at), CANCELLED (cancelled by Coinbase/user, or a market IOC that did not fill), REJECTED (create failed), ABANDONED (PLACING row whose order never appeared).';
+
+
+--
+-- Name: COLUMN etf_buy.limit_price; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.etf_buy.limit_price IS 'Limit price sent to Coinbase (limit rows only), floored to price_increment.';
+
+
+--
+-- Name: COLUMN etf_buy.base_size; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.etf_buy.base_size IS 'Shares sent to Coinbase (limit rows only): quote_usd / limit_price rounded UP to base_increment so notional >= $1.';
+
+
+--
+-- Name: COLUMN etf_buy.expires_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.etf_buy.expires_at IS 'Bot-side expiry for limit rows: placed + config.etf_limit_ttl_hours. Coinbase has no GTD for equities, so index.js cancels the GTC order after this time.';
+
+
+--
+-- Name: COLUMN etf_buy.basis_price; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.etf_buy.basis_price IS 'Price the limit was stepped down from: the latest buy fill VWAP (fills.price) or, with no fill ever, the best bid.';
+
+
+--
+-- Name: COLUMN etf_buy.price_basis; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.etf_buy.price_basis IS 'Where basis_price came from: last_fill, coinbase_bid, or iex_bid.';
+
+
+--
+-- Name: COLUMN etf_buy.closed_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.etf_buy.closed_at IS 'When the bot saw the limit reach a terminal status (FILLED / EXPIRED / CANCELLED / ABANDONED).';
 
 
 --
@@ -2937,6 +3007,13 @@ CREATE INDEX etf_buy_filled_day_idx ON public.etf_buy USING btree (ticker, chica
 
 
 --
+-- Name: etf_buy_one_open_limit_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX etf_buy_one_open_limit_idx ON public.etf_buy USING btree (ticker) WHERE ((order_type = 'limit'::text) AND (status = ANY (ARRAY['PLACING'::text, 'OPEN'::text])));
+
+
+--
 -- Name: idx_fills_order_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2997,5 +3074,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 2pmlQxTXYPucyHEIyUE5K3HUUxNdr7p6n5tVnjZDQ06NNZqXRJsmf10Hi4BUsB4
+\unrestrict vZYhcav7px7DIXSNw77LLiS14I2wxWNRKKzTmiXbsGa3tq83SgYHnw17oc4aGP1
 
