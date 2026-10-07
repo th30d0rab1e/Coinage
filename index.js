@@ -1755,12 +1755,19 @@ async function processBookSnapshots () {
                     AND f.buy_filled_price IS NOT NULL
                     AND f.sell_filled_price IS NULL
                 )
+                -- 2026-10-07: held coin only while price is under the highest
+                -- stop the below-lowest-paid rule allows (fn_buy_below_paid,
+                -- same bound as thee_procedure clean-up (e)); replaces the
+                -- old add_buy_cap_ratio (0.99 x cheapest bag) test.
                 OR st.price < (
-                    SELECT MIN(f.buy_filled_price) FROM position f
-                    WHERE f.stock_id = s.stock_id
-                    AND f.buy_filled_price IS NOT NULL
-                    AND f.sell_filled_price IS NULL
-                ) * COALESCE((SELECT value::numeric FROM config WHERE key = 'add_buy_cap_ratio'), 0.99)
+                    SELECT (fn_buy_below_paid(NULL, m.min_paid, m.min_paid, st.price_rounding::integer)).stop_price
+                    FROM (
+                        SELECT MIN(f.buy_filled_price)::numeric AS min_paid FROM position f
+                        WHERE f.stock_id = s.stock_id
+                        AND f.buy_filled_price IS NOT NULL
+                        AND f.sell_filled_price IS NULL
+                    ) m
+                )
             )
             AND (
                 NOT EXISTS (SELECT 1 FROM bulk_best_bid_ask WHERE loaded_at > NOW() - INTERVAL '3 minutes')
