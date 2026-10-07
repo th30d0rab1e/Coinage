@@ -308,6 +308,28 @@ function sumUsdAvailable(positions) {
     return { ok: true, available }
 }
 
+// 2026-10-07: spendable USDC in the Default portfolio, for ETFs bought on
+// their USDC-quoted product (etf.usdc_product_id). Same breakdown as USD
+// above; USDC is one ACCOUNT_TYPE_WALLET row (asset 'USDC'). Uses
+// available_to_trade_crypto (USDC units, which is what a USDC order spends)
+// and falls back to available_to_trade_fiat (1:1). Held USDC stays out.
+// No USDC row = 0 spendable, not an error. Kept separate from
+// sumUsdAvailable on purpose: USD and USDC are budgeted as two pots, and
+// nothing that reads USD (crypto buy gates, the USD sweep reserve) sees USDC.
+function sumUsdcAvailable(positions) {
+    let available = 0
+    for (const pos of positions || []) {
+        if (pos.asset !== 'USDC') continue
+        let n = Number(pos.available_to_trade_crypto)
+        if (!Number.isFinite(n)) n = Number(pos.available_to_trade_fiat)
+        if (!Number.isFinite(n)) {
+            return { ok: false, available: 0, reason: 'USDC available missing' }
+        }
+        available += n
+    }
+    return { ok: true, available }
+}
+
 // One portfolio read for the reserve. USD is the same sum defaultUsdAvailable
 // uses. equity_positions is where Coinbase reports stock/ETF shares,
 // average entry, and unrealized_pnl. An empty list means no equity shares,
@@ -320,12 +342,12 @@ async function equitySnapshot() {
             '?currency=USD'
         )
         if (response.status !== 200) {
-            return { ok: false, available: 0, positions: [], reason: `HTTP ${response.status}` }
+            return { ok: false, available: 0, usdcAvailable: 0, positions: [], reason: `HTTP ${response.status}` }
         }
         const breakdown = response.data?.breakdown || {}
         const usd = sumUsdAvailable(breakdown.spot_positions)
         if (!usd.ok) {
-            return { ok: false, available: 0, positions: [], reason: usd.reason }
+            return { ok: false, available: 0, usdcAvailable: 0, positions: [], reason: usd.reason }
         }
         const positions = (breakdown.equity_positions || []).map((pos) => ({
             cbrn: pos.cbrn || null,
@@ -333,19 +355,32 @@ async function equitySnapshot() {
             averageEntry: amountValue(pos.average_entry_price),
             unrealizedPnl: amountValue(pos.unrealized_pnl),
         }))
-        return { ok: true, available: usd.available, positions, reason: null }
+        // 2026-10-07: USDC pot for USDC-quoted ETF buys. An unreadable USDC
+        // row does not fail the snapshot (USD buys keep working); it reads
+        // as 0 USDC, so USDC-capable ETFs fall back to USD or skip.
+        const usdc = sumUsdcAvailable(breakdown.spot_positions)
+        return {
+            ok: true,
+            available: usd.available,
+            usdcAvailable: usdc.ok ? usdc.available : 0,
+            usdcReason: usdc.ok ? null : usdc.reason,
+            positions,
+            reason: null,
+        }
     } catch (error) {
-        return { ok: false, available: 0, positions: [], reason: error?.message || 'request failed' }
+        return { ok: false, available: 0, usdcAvailable: 0, positions: [], reason: error?.message || 'request failed' }
     }
 }
 
 async function defaultUsdAvailable() {
     try {
         const snap = await equitySnapshot()
-        if (!snap.ok) return { ok: false, available: 0, reason: snap.reason }
-        return { ok: true, available: snap.available }
+        if (!snap.ok) return { ok: false, available: 0, usdcAvailable: 0, reason: snap.reason }
+        // available stays USD only (unchanged meaning); usdcAvailable is the
+        // separate USDC pot (2026-10-07).
+        return { ok: true, available: snap.available, usdcAvailable: snap.usdcAvailable, usdcReason: snap.usdcReason }
     } catch (error) {
-        return { ok: false, available: 0, reason: error?.message || 'request failed' }
+        return { ok: false, available: 0, usdcAvailable: 0, reason: error?.message || 'request failed' }
     }
 }
 

@@ -362,8 +362,8 @@ async function recordEtfAttempt(row) {
     await db.query(
         `INSERT INTO etf_buy
             (ticker, chicago_date, quote_usd, filled, closed_session, coinbase_order_id, client_order_id, error_message, dip_price, fill_price,
-             order_type, status)
-         VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10, 'market', $11)`,
+             order_type, status, quote_currency, product_id)
+         VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10, 'market', $11, $12, $13)`,
         [
             row.ticker,
             row.chicagoDate,
@@ -379,6 +379,10 @@ async function recordEtfAttempt(row) {
             // FILLED, OPEN (accepted, fill not confirmed yet; reconcile
             // flips it to FILLED once fills land), or REJECTED.
             row.status,
+            // 2026-10-07: USD or USDC, and the product id the order went to
+            // (etf.product_id or etf.usdc_product_id).
+            row.quoteCurrency || null,
+            row.productId || null,
         ]
     )
 }
@@ -424,9 +428,12 @@ async function reserveEtfCash() {
     try {
         const plan = await buildEtfPlan()
         etfAttemptsThisRun = plan.attempts
+        // plan.reserve is USD only; USDC-funded attempts (2026-10-07) are
+        // not reserved from USD, they spend the separate USDC pot.
         const reserved = await setEtfUsdReserve(plan.reserve)
-        const names = plan.attempts.map((row) => `${row.ticker}(${row.kind})`).join(', ')
-        console.log(`ETF reserve $${reserved.toFixed(2)} for ${names || 'none'}`)
+        const names = plan.attempts.map((row) => `${row.ticker}(${row.kind}/${row.quoteCurrency})`).join(', ')
+        const usdcText = plan.usdcPlanned > 0 ? ` + ${plan.usdcPlanned.toFixed(2)} USDC` : ''
+        console.log(`ETF reserve $${reserved.toFixed(2)} USD${usdcText} for ${names || 'none'}`)
         for (const note of plan.notes) console.log(note)
     } catch (error) {
         etfAttemptsThisRun = []
@@ -543,6 +550,15 @@ async function configNumber(key, fallback) {
     return Number.isFinite(n) ? n : fallback
 }
 
+// 2026-10-07: 'true' / 'false' config value, or the fallback when missing.
+async function configBool(key, fallback) {
+    const result = await db.query(`SELECT value FROM config WHERE key = $1`, [key])
+    const v = String(result?.rows?.[0]?.value ?? '').trim().toLowerCase()
+    if (v === 'true') return true
+    if (v === 'false') return false
+    return fallback
+}
+
 // Fills for one order from fills UNION this run's bulk_fills (thee_procedure
 // copies bulk_fills into fills later in the run, so a fill from this minute
 // is only in bulk_fills yet). De-duplicated by trade_id. Returns
@@ -577,16 +593,20 @@ async function orderFillVwap(orderId, sizeIsQuote) {
 // time), from fills UNION bulk_fills. This is the ladder's basis: the
 // morning market fill and every limit fill both land here. null if the
 // product has never filled.
-async function latestBuyFill(productId) {
+// 2026-10-07: takes one id or a list. ETFs pass both their USD and USDC
+// product ids, so the ladder steps from the latest fill whichever product
+// (currency) it was bought on -- same order book, same price.
+async function latestBuyFill(productIds) {
+    const ids = (Array.isArray(productIds) ? productIds : [productIds]).filter(Boolean)
     const result = await db.query(
         `WITH u AS (
              SELECT DISTINCT ON (trade_id) order_id, trade_id, price, size, trade_time
              FROM (
                  SELECT order_id, trade_id, price, size, trade_time
-                 FROM fills WHERE product_id = $1 AND side = 'BUY'
+                 FROM fills WHERE product_id = ANY($1::text[]) AND side = 'BUY'
                  UNION ALL
                  SELECT order_id, trade_id, price, size, created_at
-                 FROM bulk_fills WHERE product_id = $1 AND side = 'BUY'
+                 FROM bulk_fills WHERE product_id = ANY($1::text[]) AND side = 'BUY'
              ) x
              WHERE price > 0 AND size > 0
              ORDER BY trade_id
@@ -603,7 +623,7 @@ async function latestBuyFill(productId) {
          GROUP BY u.order_id
          ORDER BY MAX(u.trade_time) DESC
          LIMIT 1`,
-        [productId]
+        [ids]
     )
     const row = result?.rows?.[0]
     const vwap = row?.vwap == null ? null : Number(row.vwap)
@@ -739,7 +759,9 @@ async function buildEtfPlan() {
     await reconcileEtfBuysFromFills(today)
     await probeOpenEtfBuys(today)
     const listed = await db.query(
-        `SELECT ticker, product_id, quote_usd FROM etf WHERE enabled ORDER BY ticker`
+        // usdc_product_id (2026-10-07): set = buy on the USDC product with
+        // USDC; NULL (TOPW) = USD only.
+        `SELECT ticker, product_id, usdc_product_id, quote_usd FROM etf WHERE enabled ORDER BY ticker`
     )
     const rows = listed?.rows || []
     const book = await equity.equitySnapshot()
@@ -795,7 +817,8 @@ async function buildEtfPlan() {
     const chosen = []
     for (const row of rows) {
         const t = row.ticker
-        if (untrackedOpen.has(row.product_id)) {
+        // Either product (USD or USDC) counts: both share one order book.
+        if (untrackedOpen.has(row.product_id) || (row.usdc_product_id && untrackedOpen.has(row.usdc_product_id))) {
             notes.push(`ETF skip ${t}: an untracked open BUY order exists on Coinbase`)
             continue
         }
@@ -805,7 +828,7 @@ async function buildEtfPlan() {
         }
         if (!marketDone.has(t)) {
             // The ladder waits for this fill; it steps from it next minute.
-            chosen.push({ kind: 'market', ticker: t, product_id: row.product_id, notional: Number(row.quote_usd), reason: 'daily $1 market buy (first of the Chicago day)' })
+            chosen.push({ kind: 'market', ticker: t, product_id: row.product_id, usdcProductId: row.usdc_product_id || null, notional: Number(row.quote_usd), reason: 'daily $1 market buy (first of the Chicago day)' })
             continue
         }
         if (limitOpen.has(t)) {
@@ -820,6 +843,10 @@ async function buildEtfPlan() {
                 continue
             }
         }
+        // Rules / increments are read from the USD product: it carries
+        // equity_trading_flags (the USDC alias does not) and the two
+        // products have identical increments and $1 minimum (checked
+        // 2026-10-07), so the same limit works on either.
         const product = await equity.equityProduct(row.product_id)
         if (!product.ok) {
             notes.push(`ETF skip ${t}: product read failed (${product.reason})`)
@@ -830,7 +857,7 @@ async function buildEtfPlan() {
             continue
         }
         let basis = null
-        const last = await latestBuyFill(row.product_id)
+        const last = await latestBuyFill([row.product_id, row.usdc_product_id])
         if (last) basis = { price: last.price, source: 'last_fill' }
         else basis = await bidBasis(row, product)
         if (!basis) {
@@ -849,6 +876,7 @@ async function buildEtfPlan() {
             kind: 'limit',
             ticker: t,
             product_id: row.product_id,
+            usdcProductId: row.usdc_product_id || null,
             limitPrice,
             baseSize,
             notional: Number(baseSize) * Number(limitPrice),
@@ -858,18 +886,38 @@ async function buildEtfPlan() {
         })
     }
     // 2026-10-07: profit queued for the USDC sweep is not spendable on ETFs.
+    // That reserve is USD still waiting to be converted, so it comes off the
+    // USD pot only.
     const sweepReserve = await usdcSweepReserve()
     if (sweepReserve > 0) notes.push(`ETF cash minus $${sweepReserve.toFixed(2)} profit queued for USDC`)
-    const funded = etfPlan.fundAttempts(chosen, Math.max(0, book.available - sweepReserve))
-    for (const c of chosen) notes.push(`ETF plan ${c.ticker}: ${c.kind} — ${c.reason}${c.kind === 'limit' ? ` → ${c.baseSize} @ ${c.limitPrice}` : ''}`)
+    // 2026-10-07 (Theodore): USDC-capable ETFs pay with USDC. Spendable USDC
+    // = Default portfolio USDC available_to_trade (held USDC excluded). No
+    // sweep state holds USDC back: the sweep only spends USD and adds USDC,
+    // and its unconverted profit is already reserved on the USD side above,
+    // so nothing is double-counted.
+    const usdcPot = Math.max(0, Number(book.usdcAvailable) || 0)
+    const fallbackUsd = await configBool('etf_usdc_fallback_usd', true)
+    if (book.usdcReason) notes.push(`ETF USDC unreadable (${book.usdcReason}); treating USDC as 0`)
+    notes.push(`ETF pots: $${Math.max(0, book.available - sweepReserve).toFixed(2)} USD, ${usdcPot.toFixed(2)} USDC (USD fallback ${fallbackUsd ? 'on' : 'off'})`)
+    const funded = etfPlan.fundAttemptsByCurrency(chosen, { usd: Math.max(0, book.available - sweepReserve), usdc: usdcPot }, fallbackUsd)
+    for (const c of chosen) notes.push(`ETF plan ${c.ticker}: ${c.kind} — ${c.reason}${c.kind === 'limit' ? ` → ${c.baseSize} @ ${c.limitPrice}` : ''}${c.usdcProductId ? ' [USDC-capable]' : ' [USD only]'}`)
+    // Remember the fallback setting on each attempt for the send step.
+    for (const a of funded.attempts) a.fallbackUsd = fallbackUsd
     notes.push(...funded.notes)
-    return { attempts: funded.attempts, reserve: funded.reserve, notes }
+    return { attempts: funded.attempts, reserve: funded.reserve, usdcPlanned: funded.usdcPlanned, notes }
 }
 
 // Mark the equity session closed after a closed-market reject.
 async function markEquitySessionClosed() {
     equitySessionOpen = false
     await db.query(`UPDATE config SET value = 'false' WHERE key = 'equity_session_open'`)
+}
+
+// 2026-10-07: the product id an ETF attempt is sent to. orderProductId is
+// set by etfPlan.fundAttemptsByCurrency (the USDC product for a USDC-funded
+// row, else the USD product); product_id (USD) is the safe default.
+function etfOrderProductId(row) {
+    return row.orderProductId || row.product_id
 }
 
 // Reserve the PLACING row first (the unique index refuses a second
@@ -882,12 +930,16 @@ async function placeEtfLimit(row, today, ttlHours) {
         inserted = await db.query(
             `INSERT INTO etf_buy
                 (ticker, chicago_date, quote_usd, filled, closed_session, client_order_id,
-                 order_type, status, limit_price, base_size, basis_price, price_basis, expires_at)
+                 order_type, status, limit_price, base_size, basis_price, price_basis, expires_at,
+                 quote_currency, product_id)
              VALUES ($1, $2::date, $3, false, false, $4,
-                     'limit', 'PLACING', $5, $6, $7, $8, NOW() + ($9::numeric * INTERVAL '1 hour'))
+                     'limit', 'PLACING', $5, $6, $7, $8, NOW() + ($9::numeric * INTERVAL '1 hour'),
+                     $10, $11)
              RETURNING etf_buy_id, expires_at`,
             [row.ticker, today, Number(row.notional).toFixed(4), clientOrderId,
-                row.limitPrice, row.baseSize, row.basisPrice, row.priceBasis, ttlHours]
+                row.limitPrice, row.baseSize, row.basisPrice, row.priceBasis, ttlHours,
+                // 2026-10-07: which currency / product this limit uses.
+                row.quoteCurrency || 'USD', etfOrderProductId(row)]
         )
     } catch (error) {
         if (error?.code === '23505') {
@@ -898,7 +950,8 @@ async function placeEtfLimit(row, today, ttlHours) {
     }
     const id = inserted.rows[0].etf_buy_id
     const expiresAt = inserted.rows[0].expires_at
-    const response = await equity.createLimitBuy(row.product_id, row.baseSize, row.limitPrice, clientOrderId)
+    // 2026-10-07: USDC product id when funded with USDC, else the USD one.
+    const response = await equity.createLimitBuy(etfOrderProductId(row), row.baseSize, row.limitPrice, clientOrderId)
     if (response?.success === true) {
         const orderId = response.success_response?.order_id
         await db.query(
@@ -906,7 +959,7 @@ async function placeEtfLimit(row, today, ttlHours) {
             [id, orderId]
         )
         const expCt = new Date(expiresAt).toLocaleString('en-US', { timeZone: 'America/Chicago' })
-        console.log(`ETF limit placed: ${row.ticker} ${row.baseSize} @ ${row.limitPrice} (~$${Number(row.notional).toFixed(2)}; ${row.reason}) expires ${expCt} CT, order ${orderId}`)
+        console.log(`ETF limit placed: ${row.ticker} ${row.baseSize} @ ${row.limitPrice} (~${Number(row.notional).toFixed(2)} ${row.quoteCurrency || 'USD'}; ${row.reason}) expires ${expCt} CT, order ${orderId}`)
         return { placed: true }
     }
     const closed = equity.isClosedMarket(response)
@@ -916,7 +969,7 @@ async function placeEtfLimit(row, today, ttlHours) {
          WHERE etf_buy_id = $1`,
         [id, closed, message]
     )
-    console.log(`ETF limit FAILED: ${row.ticker} ${row.baseSize} @ ${row.limitPrice}: ${message}`)
+    console.log(`ETF limit FAILED: ${row.ticker} ${row.baseSize} @ ${row.limitPrice} (${row.quoteCurrency || 'USD'}): ${message}`)
     if (closed) await markEquitySessionClosed()
     return { placed: false, closed }
 }
@@ -924,13 +977,18 @@ async function placeEtfLimit(row, today, ttlHours) {
 // Daily $1 market buy (kept from the pre-2026-10-06 morning path).
 async function placeEtfMarket(row, today) {
     const quote = Number(row.notional)
-    console.log(`ETF buy attempt: ${row.ticker} $${quote.toFixed(2)} market (${row.reason})`)
+    // 2026-10-07: quote_size is in the product's quote currency, so on the
+    // USDC product this spends USDC.
+    const currency = row.quoteCurrency || 'USD'
+    const productId = etfOrderProductId(row)
+    console.log(`ETF buy attempt: ${row.ticker} ${quote.toFixed(2)} ${currency} market (${row.reason})`)
     const clientOrderId = crypto.randomUUID()
-    const response = await equity.createMarketBuy(row.product_id, quote, clientOrderId)
+    const response = await equity.createMarketBuy(productId, quote, clientOrderId)
     if (equity.isClosedMarket(response)) {
         const message = response?.error_response?.message || 'equity session closed'
         await recordEtfAttempt({ ticker: row.ticker, chicagoDate: today, quoteUsd: quote, filled: false,
-            closedSession: true, clientOrderId, errorMessage: message, status: 'REJECTED' })
+            closedSession: true, clientOrderId, errorMessage: message, status: 'REJECTED',
+            quoteCurrency: currency, productId })
         await markEquitySessionClosed()
         console.log(`ETF session closed on ${row.ticker} (${message}); not today's buy`)
         return { filled: false, closed: true }
@@ -938,8 +996,9 @@ async function placeEtfMarket(row, today) {
     if (response?.success !== true) {
         const message = response?.error_response?.message || 'unknown'
         await recordEtfAttempt({ ticker: row.ticker, chicagoDate: today, quoteUsd: quote, filled: false,
-            closedSession: false, clientOrderId, errorMessage: message, status: 'REJECTED' })
-        console.log(`ETF buy FAILED: ${row.ticker} ${message}`)
+            closedSession: false, clientOrderId, errorMessage: message, status: 'REJECTED',
+            quoteCurrency: currency, productId })
+        console.log(`ETF buy FAILED: ${row.ticker} (${currency}) ${message}`)
         return { filled: false }
     }
     const orderId = response.success_response?.order_id
@@ -962,8 +1021,9 @@ async function placeEtfMarket(row, today) {
     await recordEtfAttempt({ ticker: row.ticker, chicagoDate: today, quoteUsd: quote, filled,
         closedSession: false, coinbaseOrderId: orderId, clientOrderId,
         errorMessage: filled ? null : `not filled (status ${fillStatus || 'unknown'})`,
-        fillPrice: filled ? fillPrice : null, status: filled ? 'FILLED' : 'OPEN' })
-    console.log(filled ? `ETF buy filled: ${row.ticker} $${quote.toFixed(2)} market` : `ETF market buy accepted, fill not confirmed yet: ${row.ticker} status ${fillStatus}`)
+        fillPrice: filled ? fillPrice : null, status: filled ? 'FILLED' : 'OPEN',
+        quoteCurrency: currency, productId })
+    console.log(filled ? `ETF buy filled: ${row.ticker} ${quote.toFixed(2)} ${currency} market` : `ETF market buy accepted, fill not confirmed yet: ${row.ticker} (${currency}) status ${fillStatus}`)
     return { filled }
 }
 
@@ -999,16 +1059,35 @@ async function processEquityEtfBuys() {
             return
         }
         // 2026-10-07: minus profit queued for the USDC sweep (same reserve
-        // the crypto buy gates in thee_procedure subtract).
+        // the crypto buy gates in thee_procedure subtract). USD pot only.
         const sweepReserve = await usdcSweepReserve()
         let cash = Math.max(0, bal.available - sweepReserve)
-        console.log(`ETF Default USD available: $${cash.toFixed(2)}${sweepReserve > 0 ? ` (after $${sweepReserve.toFixed(2)} profit queued for USDC)` : ''}`)
+        // 2026-10-07: separate USDC pot for rows planned on the USDC product.
+        let usdcCash = Math.max(0, Number(bal.usdcAvailable) || 0)
+        console.log(`ETF Default USD available: $${cash.toFixed(2)}${sweepReserve > 0 ? ` (after $${sweepReserve.toFixed(2)} profit queued for USDC)` : ''} | USDC available: ${usdcCash.toFixed(2)}`)
         const today = chicagoToday()
         const ttlHours = await configNumber('etf_limit_ttl_hours', 12)
-        for (const row of etfAttemptsThisRun) {
+        for (const planned of etfAttemptsThisRun) {
             if (!equitySessionOpen) break
+            let row = planned
             const cost = Number(row.notional)
-            if (!(cost > 0) || !(cash >= cost)) {
+            if (!(cost > 0)) {
+                console.log(`ETF ${row.kind} skipped: ${row.ticker} bad notional ${row.notional}`)
+                continue
+            }
+            // Re-check the planned pot with live balances. USDC moved since
+            // the plan (rare: a manual convert) -> same fallback rule as the
+            // plan: USD on the USD product if allowed and affordable.
+            if (row.quoteCurrency === 'USDC' && !(usdcCash >= cost)) {
+                if (row.fallbackUsd && cash >= cost) {
+                    console.log(`ETF ${row.ticker}: USDC short at send (${usdcCash.toFixed(2)} < ${cost.toFixed(2)}), falling back to USD`)
+                    row = { ...row, quoteCurrency: 'USD', orderProductId: row.product_id }
+                } else {
+                    console.log(`ETF ${row.kind} skipped: ${row.ticker} needs ${cost.toFixed(2)} USDC, have ${usdcCash.toFixed(2)} USDC`)
+                    continue
+                }
+            }
+            if (row.quoteCurrency !== 'USDC' && !(cash >= cost)) {
                 console.log(`ETF ${row.kind} skipped: ${row.ticker} needs $${cost.toFixed(2)}, have $${cash.toFixed(2)}`)
                 continue
             }
@@ -1016,7 +1095,10 @@ async function processEquityEtfBuys() {
                 ? await placeEtfMarket(row, today)
                 : await placeEtfLimit(row, today, ttlHours)
             if (result.closed) break
-            if (result.filled || result.placed) cash -= cost
+            if (result.filled || result.placed) {
+                if (row.quoteCurrency === 'USDC') usdcCash -= cost
+                else cash -= cost
+            }
         }
     } catch (error) {
         console.log('processEquityEtfBuys() ERROR', error?.message || error)
