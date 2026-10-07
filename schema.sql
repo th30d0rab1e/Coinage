@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict IJvo3cIzpJuRYUEKmdofkAa0tihcvdf0fowV4NASef7gjh7F9Z4XuiCWJoRuKb6
+\restrict lmulK5pI9mxet53CND2FrItJCiLrcqXCZvDPcK2fn0q5oaNzSctrsK602aTsYn4
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -2473,7 +2473,8 @@ CREATE TABLE public."position" (
     buy_placed_at timestamp without time zone,
     buy_released_at timestamp without time zone,
     creation_hierarchy integer,
-    profit_converted_usdc numeric
+    profit_converted_usdc numeric,
+    buy_quote_currency text
 );
 
 
@@ -2489,6 +2490,13 @@ COMMENT ON COLUMN public."position".creation_hierarchy IS 'Per-coin sequence of 
 --
 
 COMMENT ON COLUMN public."position".profit_converted_usdc IS 'Net profit to sweep to USDC: GREATEST(0, TRUNC((sell_filled_price*shares - sell_fee) - (buy_filled_price*shares + buy_fee), 2)). Fees are the summed fill commissions. Losses = 0. Set by thee_procedure; the close-out waits for it.';
+
+
+--
+-- Name: COLUMN "position".buy_quote_currency; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public."position".buy_quote_currency IS 'Currency that paid for the BUY: NULL = USD on position.name (<COIN>-USD); ''USDC'' = listing snipe sent to <COIN>-USDC because free USD was short (config.listing_usdc_fallback). The sell always goes on position.name (-USD).';
 
 
 --
@@ -2681,6 +2689,7 @@ CREATE TABLE public.profit_history (
     usdc_convert_status text,
     usdc_convert_trade_id text,
     usdc_converted_at timestamp with time zone,
+    buy_quote_currency text,
     CONSTRAINT profit_history_usdc_convert_status_check CHECK (((usdc_convert_status IS NULL) OR (usdc_convert_status = ANY (ARRAY['pending'::text, 'completed'::text, 'failed'::text]))))
 );
 
@@ -2711,6 +2720,13 @@ COMMENT ON COLUMN public.profit_history.usdc_convert_trade_id IS 'Coinbase conve
 --
 
 COMMENT ON COLUMN public.profit_history.usdc_converted_at IS 'When Coinbase confirmed the USD -> USDC convert for this row.';
+
+
+--
+-- Name: COLUMN profit_history.buy_quote_currency; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.profit_history.buy_quote_currency IS 'Copied from position.buy_quote_currency at close: NULL = bought with USD, ''USDC'' = listing snipe bought on <COIN>-USDC with USDC.';
 
 
 --
@@ -3562,5 +3578,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict IJvo3cIzpJuRYUEKmdofkAa0tihcvdf0fowV4NASef7gjh7F9Z4XuiCWJoRuKb6
+\unrestrict lmulK5pI9mxet53CND2FrItJCiLrcqXCZvDPcK2fn0q5oaNzSctrsK602aTsYn4
 

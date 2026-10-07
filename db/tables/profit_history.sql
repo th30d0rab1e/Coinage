@@ -21,7 +21,11 @@ CREATE TABLE IF NOT EXISTS public.profit_history (
     -- Coinbase convert trade id of the latest attempt (set just before commit).
     usdc_convert_trade_id  text,
     -- when Coinbase confirmed the convert.
-    usdc_converted_at      timestamptz
+    usdc_converted_at      timestamptz,
+    -- 2026-10-07 (migrations/2026-10-07_listing_usdc_fallback.sql):
+    -- copied from position.buy_quote_currency at close. NULL = bought with
+    -- USD, 'USDC' = listing snipe bought on <COIN>-USDC with USDC.
+    buy_quote_currency     text
 );
 
 CREATE INDEX IF NOT EXISTS profit_history_usdc_unswept

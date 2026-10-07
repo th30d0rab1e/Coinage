@@ -37,5 +37,11 @@ CREATE TABLE IF NOT EXISTS public.position (
     -- to sweep to USDC, GREATEST(0, TRUNC((sell*shares - sell_fee) -
     -- (buy*shares + buy_fee), 2)). NULL until thee_procedure fills it in;
     -- a closed row is not moved to profit_history / deleted before that.
-    profit_converted_usdc    numeric
+    profit_converted_usdc    numeric,
+    -- 2026-10-07 (migrations/2026-10-07_listing_usdc_fallback.sql):
+    -- currency that paid for the BUY. NULL = USD on position.name
+    -- (<COIN>-USD); 'USDC' = listing snipe sent to <COIN>-USDC because free
+    -- USD was short (config.listing_usdc_fallback). The sell always goes on
+    -- position.name (-USD) and returns USD.
+    buy_quote_currency       text
 );
