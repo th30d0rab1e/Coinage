@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict vZYhcav7px7DIXSNw77LLiS14I2wxWNRKKzTmiXbsGa3tq83SgYHnw17oc4aGP1
+\restrict 9RIop4rEaZJ7nZaHYFQMnXvHFgRA2NULmm9FB7VxxKNE9OEqTMgZgieAH3DLdFp
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -2669,11 +2669,13 @@ UNION ALL
     o.order_id,
     NULL::text AS currency,
     NULL::double precision AS balance,
-    (((((('bulk_open_orders has '::text || o.side) || ' order '::text) || o.order_id) || ' for '::text) || o.product_id) || ' not referenced by any position'::text) AS detail
+    (((((('bulk_open_orders has '::text || o.side) || ' order '::text) || o.order_id) || ' for '::text) || o.product_id) || ' not referenced by any position or unfilled etf_buy'::text) AS detail
    FROM public.bulk_open_orders o
-  WHERE (NOT (EXISTS ( SELECT 1
+  WHERE ((NOT (EXISTS ( SELECT 1
            FROM public."position" p
-          WHERE ((p.buy_coinbase_order_id = o.order_id) OR (p.sell_coinbase_order_id = o.order_id)))));
+          WHERE ((p.buy_coinbase_order_id = o.order_id) OR (p.sell_coinbase_order_id = o.order_id))))) AND (NOT (EXISTS ( SELECT 1
+           FROM public.etf_buy e
+          WHERE ((e.coinbase_order_id = o.order_id) AND (e.filled = false))))));
 
 
 --
@@ -3118,5 +3120,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict vZYhcav7px7DIXSNw77LLiS14I2wxWNRKKzTmiXbsGa3tq83SgYHnw17oc4aGP1
+\unrestrict 9RIop4rEaZJ7nZaHYFQMnXvHFgRA2NULmm9FB7VxxKNE9OEqTMgZgieAH3DLdFp
 

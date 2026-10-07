@@ -10,6 +10,14 @@
 -- bulk_currency and bulk_open_orders are refreshed once per cycle by
 -- insertCurrency()/insertOpenOrders() in modules/database.js (truncate +
 -- insert, atomic) -- this view is safe to query anytime, not just mid-cycle.
+--
+-- ETF resting limit buys (etf_buy rows with a Coinbase order id, not yet
+-- filled) are tracked outside the position table. The orphaned_coinbase_order
+-- branch therefore also treats a bulk_open_orders row as tracked when its
+-- order_id matches etf_buy.coinbase_order_id with filled = false. Without
+-- that check, the hourly health audit falsely flagged every open ETF $1
+-- limit (e.g. XDTE) as an orphaned order. Dust / untracked_holding logic is
+-- unchanged.
 CREATE OR REPLACE VIEW public.vw_position_order_balance_audit AS
 
 -- A position thinks it has a live buy order; Coinbase disagrees.
@@ -69,6 +77,11 @@ UNION ALL
 -- Coinbase has a real open order; no position references it at all (the
 -- reverse of ghost_buy_order/ghost_sell_order -- e.g. an order placed
 -- manually on the website that the bot never recorded).
+--
+-- Exception: ETF resting limit buys live in etf_buy, not position. If this
+-- open order's id is already on an unfilled etf_buy row, the bot is tracking
+-- it — do not flag as orphaned. (filled = false = still the open/resting
+-- attempt; cancelled or filled ETF rows are not open on Coinbase anyway.)
 SELECT
     'orphaned_coinbase_order'::text,
     o.product_id,
@@ -76,9 +89,14 @@ SELECT
     NULL::text,
     NULL::double precision,
     'bulk_open_orders has ' || o.side || ' order ' || o.order_id || ' for ' || o.product_id
-        || ' not referenced by any position'
+        || ' not referenced by any position or unfilled etf_buy'
 FROM bulk_open_orders o
 WHERE NOT EXISTS (
     SELECT 1 FROM position p
     WHERE p.buy_coinbase_order_id = o.order_id OR p.sell_coinbase_order_id = o.order_id
+)
+AND NOT EXISTS (
+    SELECT 1 FROM etf_buy e
+    WHERE e.coinbase_order_id = o.order_id
+    AND e.filled = false
 );
