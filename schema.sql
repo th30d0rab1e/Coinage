@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict JR61thqrescJUchbcUMohCnQoGTC56GfXOG9RSIdaoilBcbLTimPOUCfEXpJCHm
+\restrict 0F9gceXPnW7sJP3ZsuHBVolW3aRBqP3JYYfYZP0FEYp8cwf74VSaIP8tOgIxGLr
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -357,6 +357,44 @@ WHERE stock.name = bs.id
 AND bs.id LIKE '%-USD'
 AND bs.price != '';
 
+-- 2026-10-07 STABLECOIN FLAG (Theodore: never buy stablecoins). Coinbase does
+-- not label stablecoins (no field in the Advanced Trade products API), so it
+-- is derived from price behavior in this minute's products feed (bulk_stock,
+-- loaded by index.js processNewCoins()): a coin is a stablecoin when
+--     price BETWEEN 1 - band AND 1 + band    (band = stablecoin_price_band_pct, default 3%  -> 0.97 .. 1.03)
+--     AND (high_24h - low_24h) / price < max (max  = stablecoin_max_range_pct,  default 2%)
+-- On 2026-10-07 live data this matched exactly USDT, USD1, USDS, PAX, DAI.
+-- STICKY: only ever sets TRUE, never clears it -- a de-peg/spike day (PAX hit
+-- $1.83 on 2026-09-27) must not make a stablecoin buyable again. Un-flag a
+-- coin by hand if ever needed. Runs before every buy INSERT below, so a coin
+-- flagged this minute is already excluded this minute.
+-- Guards: values are cast only when they look like plain numbers (a bad or
+-- empty string must never abort the whole procedure), price/high/low must
+-- be > 0 with high >= low, and volume_24h must be > 0 -- a coin with no
+-- trades in 24h reports a flat range that would look "stable" at any price
+-- near $1.
+UPDATE stock
+SET is_stablecoin = TRUE
+FROM bulk_stock bs
+CROSS JOIN LATERAL (
+    SELECT CASE WHEN bs.price                ~ '^[0-9]+(\.[0-9]+)?$' THEN bs.price::numeric                END AS px,
+           CASE WHEN bs.json->>'high_24h'    ~ '^[0-9]+(\.[0-9]+)?$' THEN (bs.json->>'high_24h')::numeric   END AS hi,
+           CASE WHEN bs.json->>'low_24h'     ~ '^[0-9]+(\.[0-9]+)?$' THEN (bs.json->>'low_24h')::numeric    END AS lo,
+           CASE WHEN bs.json->>'volume_24h'  ~ '^[0-9]+(\.[0-9]+)?$' THEN (bs.json->>'volume_24h')::numeric END AS vol
+) v
+CROSS JOIN LATERAL (
+    -- thresholds in percent, from config (defaults if a key is missing)
+    SELECT COALESCE((SELECT value::numeric FROM config WHERE key = 'stablecoin_price_band_pct'), 3) AS band_pct,
+           COALESCE((SELECT value::numeric FROM config WHERE key = 'stablecoin_max_range_pct'), 2)  AS range_pct
+) cfg
+WHERE stock.name = bs.id
+AND bs.id LIKE '%-USD'
+AND stock.is_stablecoin IS NOT TRUE          -- sticky: only FALSE -> TRUE, never back
+AND v.px > 0 AND v.hi > 0 AND v.lo > 0 AND v.hi >= v.lo
+AND v.vol > 0
+AND v.px BETWEEN 1 - cfg.band_pct / 100 AND 1 + cfg.band_pct / 100
+AND (v.hi - v.lo) / v.px < cfg.range_pct / 100;
+
 -- 2026-09-25: flag coins that have vanished from Coinbase's product catalog.
 -- The UPDATE above only touches stocks that still appear in bulk_stock, so a
 -- coin removed from the catalog entirely (LRC-USD) kept trading_disabled NULL
@@ -434,6 +472,10 @@ WHERE config.key = 'fee_percent'
 
 -- Recover orphaned buy orders: open on Coinbase but missing from position table.
 -- Skip if an unfilled buy position already exists for that coin + period_type.
+-- 2026-10-07: deliberately NOT filtered on stock.is_stablecoin. This is not a
+-- buy decision -- it only records an order that is already LIVE on Coinbase;
+-- skipping a stablecoin here would leave a real resting order untracked (a
+-- ghost order in vw_position_order_balance_audit).
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, buy_coinbase_order_id, period_type)
 SELECT
     s.stock_id,
@@ -580,6 +622,10 @@ AND NOT EXISTS (
 --      x the row's own dollar size). No fresh snapshot = allow. index.js
 --      processBookSnapshots() now runs before this procedure and always
 --      snapshots coins with a planned buy.
+--  (h) 2026-10-07: coin is flagged stock.is_stablecoin (see the STABLECOIN
+--      FLAG update near the top). Stablecoins are never bought, so an
+--      unplaced planned row on one is dropped (placed / live orders are
+--      never touched, same guards as every reason here).
 DELETE FROM position p
 USING stock s
 WHERE s.stock_id = p.stock_id
@@ -597,6 +643,8 @@ AND (
     (SELECT value FROM config WHERE key = 'pause_buys') IS DISTINCT FROM 'false'
     -- (b) delisted / trading disabled
     OR s.trading_disabled IS TRUE
+    -- (h) stablecoin (stock.is_stablecoin) -- never bought
+    OR s.is_stablecoin IS TRUE
     -- (c) released by far-buy cash release
     OR p.buy_released_at IS NOT NULL
     -- (d) below Coinbase minimum order size
@@ -819,6 +867,9 @@ AND lw.first_trade_price > 0
 -- plain limit order is accepted there. Not during the auction, cancel-only
 -- or post-only (a taker limit would be rejected).
 AND s.trading_disabled IS NOT TRUE
+-- 2026-10-07: never snipe a stablecoin (stock.is_stablecoin, price-behavior
+-- flag set near the top of this procedure).
+AND s.is_stablecoin IS NOT TRUE
 AND COALESCE(bs.trading_disabled, bs.json->>'trading_disabled', 'false') NOT IN ('true', 't', '1')
 AND COALESCE(bs.status, bs.json->>'status', '') = 'online'
 AND COALESCE(bs.json->>'product_type', 'SPOT') = 'SPOT'
@@ -1022,6 +1073,10 @@ AND p.buy_order_id IS NULL
 AND s.historical_avg_change_percent > 0
 AND d.current_change_percent < d.historical_avg_change_percent
 AND stock.trading_disabled IS NOT TRUE
+-- 2026-10-07: never open a position in a stablecoin (stock.is_stablecoin,
+-- price-behavior flag set near the top of this procedure). stock., not s.:
+-- s is vw_signal in this INSERT.
+AND stock.is_stablecoin IS NOT TRUE
 AND (
     NOT EXISTS (
         SELECT 1 FROM position existing
@@ -1199,6 +1254,9 @@ AND b.available
 AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
 AND TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) < sized.last_filled_price
 AND s.trading_disabled IS NOT TRUE
+-- 2026-10-07: never average down into a stablecoin (stock.is_stablecoin,
+-- price-behavior flag set near the top of this procedure).
+AND s.is_stablecoin IS NOT TRUE
 AND NOT EXISTS (
     SELECT 1 FROM position existing
     WHERE existing.stock_id = sized.stock_id
@@ -1656,8 +1714,16 @@ CREATE TABLE public.stock (
     max_price double precision,
     share_rounding integer,
     price_rounding integer,
-    trading_disabled boolean
+    trading_disabled boolean,
+    is_stablecoin boolean DEFAULT false NOT NULL
 );
+
+
+--
+-- Name: COLUMN stock.is_stablecoin; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.stock.is_stablecoin IS 'TRUE = behaves like a $1 stablecoin (price within config.stablecoin_price_band_pct of $1 and 24h high-low range under config.stablecoin_max_range_pct of price, from the Coinbase products feed). Set by thee_procedure, sticky (never auto-cleared). Every buy INSERT in thee_procedure skips these coins.';
 
 
 --
@@ -3341,5 +3407,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict JR61thqrescJUchbcUMohCnQoGTC56GfXOG9RSIdaoilBcbLTimPOUCfEXpJCHm
+\unrestrict 0F9gceXPnW7sJP3ZsuHBVolW3aRBqP3JYYfYZP0FEYp8cwf74VSaIP8tOgIxGLr
 
