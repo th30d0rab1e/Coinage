@@ -107,6 +107,10 @@ async function main () {
         //surface anything thee_procedure just logged to unmatched_fills so the
         //30-min health check (greps outputLog.txt for ERROR/FAILED) catches it
         await checkUnmatchedFills();
+        // 2026-10-07: print (once) any new listing coin the procedure skipped
+        // because its smallest order costs more than listing_max_buy_usd.
+        // Read + stamp listing_watch only; never throws.
+        await logListingSkips();
         // 2026-10-07: move realized profit (profit_history.profit_converted_usdc,
         // filled in by thee_procedure at close) from USD to USDC once the
         // unswept total reaches config.usdc_sweep_min_usd (state is kept on
@@ -180,6 +184,26 @@ async function main () {
 //     filled part is kept as the position and the normal sell logic sells
 //     what was actually bought.
 //   * OPEN / FILLED / unknown -> nothing (fill matching runs in thee_procedure).
+// 2026-10-07: thee_procedure writes listing_watch.snipe_skip_reason when a
+// new coin inside its 24h window is skipped ONLY because its smallest valid
+// order costs more than config.listing_max_buy_usd ($5). Print each such
+// skip once (snipe_skip_logged_at stamps it), worded without ERROR/FAILED
+// so the health check's grep is not tripped by a deliberate skip.
+async function logListingSkips() {
+    try {
+        const rows = await db.executeQuery(`
+            UPDATE listing_watch SET snipe_skip_logged_at = now()
+            WHERE snipe_skip_reason IS NOT NULL AND snipe_skip_logged_at IS NULL
+            RETURNING product_id, snipe_skip_reason
+        `)
+        for (const r of rows || []) {
+            console.log(`Listing snipe skipped (over max): ${r.product_id} | ${r.snipe_skip_reason}`)
+        }
+    } catch (error) {
+        console.log('logListingSkips() problem', error?.message || error)
+    }
+}
+
 async function reconcileListingBuys() {
     try {
         const rows = await db.executeQuery(`
@@ -2255,4 +2279,4 @@ async function transferProfit (accounts, fills) {
 
 // 2026-10-07: exported only for test harnesses (require does not run main,
 // see the require.main guard at the top). Not used by the live cron run.
-module.exports = { processBuyOrders, listingBuyProductId, reserveEtfCash, reconcileListingBuys }
+module.exports = { processBuyOrders, listingBuyProductId, reserveEtfCash, reconcileListingBuys, logListingSkips }
