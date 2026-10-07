@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict GmYTbJ5jbhiZl5Qq6OqBRIFfb2yn3GsYkrdpCSqlR1mZYnBHeFhgcEdZjh3i1T6
+\restrict yVByGQqwzacUAwRkPr7bRuC8MPMcYtpVW9gqaPMl6aRae1ja32MARHkho2XvavC
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -2534,7 +2534,10 @@ CREATE TABLE public.listing_watch (
     trading_open_at timestamp with time zone,
     trading_open_source text,
     last_error text,
-    snipe_cancelled_at timestamp with time zone
+    snipe_cancelled_at timestamp with time zone,
+    snipe_skip_reason text,
+    snipe_skipped_at timestamp with time zone,
+    snipe_skip_logged_at timestamp with time zone
 );
 
 
@@ -2585,6 +2588,27 @@ COMMENT ON COLUMN public.listing_watch.trading_open_at IS 'Window start = LEAST(
 --
 
 COMMENT ON COLUMN public.listing_watch.snipe_cancelled_at IS 'Set by index.js reconcileListingBuys() when this coin''s listing buy ended with no fill (cancelled / expired / failed) and its position row was deleted. thee_procedure never re-snipes a coin with this set (24h window).';
+
+
+--
+-- Name: COLUMN listing_watch.snipe_skip_reason; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.listing_watch.snipe_skip_reason IS 'Set by thee_procedure when this coin, inside its listing window, is skipped only because its smallest valid order costs more than config.listing_max_buy_usd. Refreshed each minute while it lasts.';
+
+
+--
+-- Name: COLUMN listing_watch.snipe_skipped_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.listing_watch.snipe_skipped_at IS 'First time thee_procedure noted snipe_skip_reason for this coin.';
+
+
+--
+-- Name: COLUMN listing_watch.snipe_skip_logged_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.listing_watch.snipe_skip_logged_at IS 'When index.js logListingSkips() printed the skip to the output log (printed once).';
 
 
 --
@@ -3751,5 +3775,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict GmYTbJ5jbhiZl5Qq6OqBRIFfb2yn3GsYkrdpCSqlR1mZYnBHeFhgcEdZjh3i1T6
+\unrestrict yVByGQqwzacUAwRkPr7bRuC8MPMcYtpVW9gqaPMl6aRae1ja32MARHkho2XvavC
 

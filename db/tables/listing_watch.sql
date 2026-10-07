@@ -32,5 +32,13 @@ CREATE TABLE IF NOT EXISTS public.listing_watch (
     -- index.js reconcileListingBuys() when this coin's listing buy ended with
     -- NO fill (cancelled / expired / failed) and its row was deleted;
     -- thee_procedure never re-snipes a coin with this set (24h window).
-    snipe_cancelled_at      timestamptz
+    snipe_cancelled_at      timestamptz,
+    -- 2026-10-07 (migrations/2026-10-07_listing_buy_immediately.sql): set by
+    -- thee_procedure when this coin, inside its window, is skipped only
+    -- because its smallest valid order costs more than
+    -- config.listing_max_buy_usd (refreshed each minute while it lasts);
+    -- first time noted; when index.js logListingSkips() printed it (once).
+    snipe_skip_reason       text,
+    snipe_skipped_at        timestamptz,
+    snipe_skip_logged_at    timestamptz
 );
