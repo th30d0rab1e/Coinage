@@ -49,7 +49,8 @@ async function main () {
         const [productsPayload] = await Promise.all([pnc, pnb, pnf, poo, ppd, pba]);
 
         // 2026-10-07: listing snipe window now starts when trading ACTUALLY
-        // opens (first trade / restrictions cleared), not Coinbase new_at.
+        // opens (first trade / restrictions cleared), not Coinbase new_at,
+        // and lasts a rolling config.listing_buy_window_hours (24).
         // Must run BEFORE thee_procedure so the listing INSERT sees this
         // minute's listing_watch.trading_open_at. Reuses this minute's
         // products payload; only candidate new listings cost an API call
@@ -168,11 +169,13 @@ async function main () {
 // is no longer in this minute's open-orders snapshot, placed > 3 minutes ago
 // (fills of an order that just closed are archived by then), and whose fills
 // do not already cover the planned shares. For each, ask Coinbase for the
-// order's real status (one GET; normally 0-1 rows thanks to the one-listing
-// mutex):
+// order's real status (one GET; at most config.listing_max_open_bags rows):
 //   * CANCELLED / EXPIRED / FAILED with 0 filled -> delete the row (guarded:
-//     never filled, no sell order). Frees the one-listing slot and the ETF
-//     skip gate; the coin can never be re-sniped because its window is over.
+//     never filled, no sell order) and stamp listing_watch.snipe_cancelled_at.
+//     Frees the listing_max_open_bags slot and the ETF skip gate. The stamp
+//     keeps "a cancelled snipe means that coin is done": with the 24h window
+//     (2026-10-07) the coin would otherwise be re-sniped the next minute;
+//     thee_procedure skips coins with snipe_cancelled_at set.
 //   * CANCELLED / EXPIRED with a partial fill -> shares = filled size, so the
 //     filled part is kept as the position and the normal sell logic sells
 //     what was actually bought.
@@ -199,7 +202,9 @@ async function reconcileListingBuys() {
                 console.log(`Listing buy ${status} after partial fill: ${r.name} | kept ${filled} of ${r.shares} shares as the position`)
             } else {
                 await db.query(`DELETE FROM position WHERE buy_order_id = $1 AND period_type = 'listing' AND buy_filled_price IS NULL AND sell_coinbase_order_id IS NULL`, [r.buy_order_id])
-                console.log(`Listing buy ${status} with no fill: ${r.name} | row removed (listing slot / ETF gate freed)`)
+                // 2026-10-07: tombstone so the 24h window never re-snipes it.
+                await db.query(`UPDATE listing_watch SET snipe_cancelled_at = COALESCE(snipe_cancelled_at, now()) WHERE product_id = $1`, [r.name])
+                console.log(`Listing buy ${status} with no fill: ${r.name} | row removed (listing slot / ETF gate freed; coin not re-sniped)`)
             }
         }
     } catch (error) {
@@ -407,18 +412,22 @@ async function syncEtfStockPrices() {
 // orders need. A failure reserves nothing and places nothing.
 async function reserveEtfCash() {
     etfAttemptsThisRun = []
-    // 2026-10-06: listing snipe is priority one. If any listing bag is still
-    // open (pending buy or filled-unsold), reserve $0 so ETF-hours buys do
+    // 2026-10-06: listing snipe is priority one. While a listing BUY is
+    // planned or resting (not filled yet), reserve $0 so ETF-hours buys do
     // not take cash ahead of it.
+    // 2026-10-07 (24h window): a FILLED listing bag waiting to sell no longer
+    // pauses ETFs -- it needs no more cash, and with up to
+    // listing_max_open_bags bags held for days the pause would never end.
     try {
         const listingOpen = await db.query(
             `SELECT 1 FROM position
-             WHERE period_type = 'listing' AND sell_filled_price IS NULL
+             WHERE period_type = 'listing'
+             AND buy_filled_price IS NULL AND sell_filled_price IS NULL
              LIMIT 1`
         )
         if ((listingOpen?.rows || []).length > 0) {
             await setEtfUsdReserve(0)
-            console.log('ETF reserve $0: active listing position (priority one)')
+            console.log('ETF reserve $0: listing buy planned/resting (priority one)')
             return
         }
     } catch (error) {
@@ -1041,16 +1050,19 @@ async function processEquityEtfBuys() {
     if (!equitySessionOpen) return
     // 2026-10-06: listing snipe is priority one over ETF-hours. Re-check after
     // thee_procedure so a listing row inserted this same minute still blocks
-    // ETF placement (covers pending buy and filled-unsold).
+    // ETF placement.
+    // 2026-10-07 (24h window): only while a listing BUY is planned or resting
+    // (buy_filled_price IS NULL); a filled-unsold bag no longer pauses ETFs.
     try {
         const listingOpen = await db.query(
             `SELECT 1 FROM position
-             WHERE period_type = 'listing' AND sell_filled_price IS NULL
+             WHERE period_type = 'listing'
+             AND buy_filled_price IS NULL AND sell_filled_price IS NULL
              LIMIT 1`
         )
         if ((listingOpen?.rows || []).length > 0) {
             etfAttemptsThisRun = []
-            console.log('ETF orders skipped: active listing position (priority one)')
+            console.log('ETF orders skipped: listing buy planned/resting (priority one)')
             return
         }
     } catch (error) {
@@ -1178,10 +1190,10 @@ async function processBuyOrders () {
             -- it just freed; thee_procedure deletes it at the start of the next
             -- run, so it never sits.
             AND p.buy_released_at IS NULL
-            -- 2026-10-07: a listing snipe row (at most one, inserted by
-            -- thee_procedure only inside the first listing_window_minutes
-            -- after trading opened) goes FIRST so normal rows cannot spend
-            -- the cash it was gated on.
+            -- 2026-10-07: listing snipe rows (at most one new per minute,
+            -- inserted by thee_procedure only inside the rolling
+            -- listing_buy_window_hours (24h) after trading opened) go FIRST so
+            -- normal rows cannot spend the cash they were gated on.
             ORDER BY (p.period_type = 'listing') DESC, s.priority DESC NULLS LAST
         `)
         // Low USD: keep ONLY the USDC-funded listing row (see usdLow above).
@@ -1215,8 +1227,10 @@ async function processBuyOrders () {
             // Coinbase's launch LIMIT-ONLY phase (CT-USD: first match 10:16
             // UTC, market orders only from ~15:15 UTC), where only limit
             // orders are accepted. thee_procedure already set buy_price =
-            // first trade price + listing_limit_cushion_pct (rounded to the
-            // price increment) and shares = ~$listing_buy_usd at that limit.
+            // first trade price (first listing_window_minutes) or fresh best
+            // ask (rest of the 24h window) + listing_limit_cushion_pct
+            // (rounded up to the price increment) and shares =
+            // ~$listing_buy_usd at that limit.
             // GTC per Theodore: it rests until it fills or he cancels it --
             // the bot never auto-cancels it (see the listing exemptions in
             // processFarBuyCashRelease / processObseleteBuyOrders /
@@ -1240,10 +1254,10 @@ async function processBuyOrders () {
                 // 2026-10-07: a listing rejection (e.g. still auction / cancel-
                 // only, post-only, or a size/price rule) needs no special path:
                 // thee_procedure drops the unsent listing row next minute and
-                // re-inserts it with fresh gates only while the window is
-                // still open, so it is retried each minute inside the window
-                // and simply stops after.
-                console.log(isListing ? `Listing Buy FAILED (retried next minute only while the window is open): ${element.name} via ${buyProductId} (${buyCurrency})` : `Buy Order FAILED: ${element.name}`, response)
+                // re-inserts it with fresh gates (and a fresh price) only while
+                // the coin's 24h window is still open, so it is retried each
+                // minute inside the window and simply stops after.
+                console.log(isListing ? `Listing Buy FAILED (retried next minute while the 24h window is open): ${element.name} via ${buyProductId} (${buyCurrency})` : `Buy Order FAILED: ${element.name}`, response)
                 // 2026-09-25: 'Invalid product_id' means the product no longer exists
                 // on Coinbase (delisted, e.g. LRC-USD) -- retrying can never succeed.
                 // Flag the coin so nothing picks it again, and drop this planned row.
@@ -2241,4 +2255,4 @@ async function transferProfit (accounts, fills) {
 
 // 2026-10-07: exported only for test harnesses (require does not run main,
 // see the require.main guard at the top). Not used by the live cron run.
-module.exports = { processBuyOrders, listingBuyProductId }
+module.exports = { processBuyOrders, listingBuyProductId, reserveEtfCash, reconcileListingBuys }
