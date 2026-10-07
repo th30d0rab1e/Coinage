@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict yVByGQqwzacUAwRkPr7bRuC8MPMcYtpVW9gqaPMl6aRae1ja32MARHkho2XvavC
+\restrict rIxXH64IU70jCXOdmSD6s4jzIdtuImB3POStvEi85eeUt4DhDNnkg8UJneomw8Q
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -759,25 +759,38 @@ AND w.drop_row IS TRUE;
 -- product first watched after it had already traded gets its real (old)
 -- first-trade time, so a listing older than the window never qualifies.
 --
--- Two phases inside the window (config.listing_window_minutes, default 5,
--- now ONLY marks the first phase):
---   * first listing_window_minutes after open: limit = first trade price
---     * (1 + listing_limit_cushion_pct / 100) (the move is front-loaded:
---     minute-1 buys hit +3% within an hour 80% of the time).
---   * after that, up to listing_buy_window_hours: limit = CURRENT best ask
---     (bulk_best_bid_ask, loaded this run, < 3 minutes old, ask > 0)
---     * (1 + cushion) -- hours later the first trade price can be far from
---     market. Stale / missing ask -> no row this minute (re-tried next
---     minute). No pump guard (Theodore).
---   Either way rounded UP to the product's price increment (price_increment,
---   falling back to quote_increment) so the cushion is never lost to rounding.
+-- 2026-10-07 (later still, migrations/2026-10-07_listing_buy_immediately.sql):
+-- Theodore: "I dont want the new coins to have a restriction if its too high
+-- in price. I want the buy order in immediately." So inside the window:
+--   * ONE pricing rule (the 5-minute first-trade phase is gone;
+--     config.listing_window_minutes is no longer read):
+--       reference = fresh best ask (bulk_best_bid_ask, loaded < 3 min ago,
+--                   ask > 0), else this minute's last trade price
+--                   (products payload bulk_stock.price), else the first
+--                   trade price (listing_watch.first_trade_price);
+--       limit     = reference * (1 + listing_limit_cushion_pct / 100)
+--                   (2% -> limit is ABOVE the ask, so the plain limit buy
+--                   crosses the book and fills right away at the real ask
+--                   price), rounded UP to the price increment
+--                   (price_increment, falling back to quote_increment).
+--   * no high-price skip: the old "order <= 1.25 x listing_buy_usd" cap
+--     dropped every coin whose smallest lot cost more than $1.25 (e.g. any
+--     base_increment 0.1 coin above $12.50). Now the only ceiling is
+--     config.listing_max_buy_usd (5); a coin over it is skipped AND noted on
+--     listing_watch.snipe_skip_reason (index.js logs it once).
+--   * the stablecoin flag is NOT applied to listing coins inside their
+--     window (a $1.00 launch with a quiet first hours could be flagged).
+--   * a coin may be bought before the watcher has its first trade, as long
+--     as restrictions are cleared and a fresh ask exists.
 --
 -- The buy (index.js processBuyOrders sends it as a PLAIN LIMIT, GTC, no
--- stop, no expiry; it rests until it fills or Theodore cancels it):
---   * shares = listing_buy_usd ($1) / limit, rounded UP to base_increment
---     (and at least base_min_size) so the order is >= $1 and clears
---     Coinbase's quote_min_size (usually $1) -- rounding down would land
---     just under $1 and be rejected.
+-- stop, no expiry; it rests until it fills or Theodore cancels it; market
+-- orders are not accepted while Coinbase has the pair limit-only):
+--   * shares = GREATEST(listing_buy_usd, quote_min_size) / limit, rounded UP
+--     to base_increment, and at least base_min_size -- rounding down would
+--     land under Coinbase's quote_min_size and be rejected. A high-priced
+--     coin whose smallest lot costs more than $1 is bought at that smallest
+--     lot, up to listing_max_buy_usd.
 --   * buy_stop_price = NULL: no stop trigger. NULL also keeps the row out of
 --     every stop-based path (stale-candidate refresh, add-on cap, safety-net
 --     delete, vw_edit_orders remakes, far-buy cash release); each of those
@@ -828,15 +841,16 @@ JOIN bulk_stock bs     ON bs.id = s.name
 JOIN listing_watch lw  ON lw.product_id = s.name
 -- The tunables (config keys; defaults if a key is missing):
 --   listing_buy_window_hours  = 24   rolling buy window after trading_open_at
---   listing_window_minutes    = 5    first-trade PRICING phase only (then best ask)
---   listing_buy_usd           = 1.00 dollars per snipe
---   listing_limit_cushion_pct = 0.5  limit = reference price + 0.5%
+--   listing_buy_usd           = 1.00 target dollars per snipe
+--   listing_max_buy_usd       = 5    most one snipe may cost (smallest lot of a high-priced coin)
+--   listing_limit_cushion_pct = 2    limit = reference price + 2%
 --   listing_max_open_bags     = 3    max listing rows open at once
+-- (listing_window_minutes is no longer read: no first-trade pricing phase.)
 CROSS JOIN LATERAL (
     SELECT COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_buy_window_hours'), 24)   AS buy_window_hours,
-           COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_window_minutes'), 5)      AS window_minutes,
            COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_buy_usd'), 1.00)         AS buy_usd,
-           COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_limit_cushion_pct'), 0.5) AS cushion_pct,
+           COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_max_buy_usd'), 5)        AS max_buy_usd,
+           COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_limit_cushion_pct'), 2)   AS cushion_pct,
            COALESCE((SELECT value::int     FROM config WHERE key = 'listing_max_open_bags'), 3)      AS max_open_bags
 ) cfg
 -- Product increments straight from Coinbase's products payload.
@@ -857,24 +871,27 @@ LEFT JOIN LATERAL (
     AND bba.best_ask > 0
     LIMIT 1
 ) ask ON TRUE
--- Reference price by phase: the first trade inside the first
--- listing_window_minutes after open, the fresh best ask after that (NULL
--- when the ask is stale/missing -> limit NULL -> "px.limit_price > 0"
--- below drops the row this minute). Limit = reference + cushion, rounded
--- UP to the price tick.
+-- Reference price (2026-10-07, one rule for the whole window): fresh best
+-- ask, else this minute's last trade price from the products payload
+-- (bulk_stock.price; '' / non-numeric / 0 -> NULL), else the first trade
+-- price. Limit = reference + cushion (2%), rounded UP to the price tick, so
+-- with a fresh ask the limit is always >= the ask (crosses -> fills now).
 CROSS JOIN LATERAL (
-    SELECT CASE
-               WHEN NOW() - lw.trading_open_at <= cfg.window_minutes * INTERVAL '1 minute'
-               THEN lw.first_trade_price
-               ELSE ask.best_ask
-           END AS ref_price
+    SELECT COALESCE(
+               ask.best_ask,
+               NULLIF(CASE WHEN bs.price ~ '^[0-9]+(\.[0-9]+)?$' THEN bs.price::numeric END, 0),
+               NULLIF(lw.first_trade_price, 0)
+           ) AS ref_price
 ) ref
 CROSS JOIN LATERAL (
     SELECT CEIL(ref.ref_price * (1 + cfg.cushion_pct / 100) / inc.tick) * inc.tick AS limit_price
 ) px
--- Size = $buy_usd at the limit, rounded UP to the base increment, >= base_min_size.
+-- Size = GREATEST($buy_usd, quote_min_size) at the limit, rounded UP to the
+-- base increment, >= base_min_size. For a high-priced coin this is simply
+-- its smallest valid lot (may cost more than $1; capped by
+-- listing_max_buy_usd below).
 CROSS JOIN LATERAL (
-    SELECT GREATEST(CEIL(cfg.buy_usd / px.limit_price / inc.lot) * inc.lot, inc.base_min) AS shares
+    SELECT GREATEST(CEIL(GREATEST(cfg.buy_usd, inc.quote_min) / px.limit_price / inc.lot) * inc.lot, inc.base_min) AS shares
 ) sz
 -- 2026-10-07: cash for the snipe, both currencies. (Replaces the old
 -- CROSS JOIN vw_balance b / WHERE b.name = 'USD' gate.)
@@ -969,18 +986,24 @@ AND NOW() - lw.trading_open_at <= cfg.buy_window_hours * INTERVAL '1 hour'
 -- reconcileListingBuys() deleted the row and stamped snipe_cancelled_at, so
 -- the 24h window must not re-snipe it.
 AND lw.snipe_cancelled_at IS NULL
--- A real first trade must exist (the first phase is priced off it, and it
--- proves the pair actually trades) even if the window was opened by
--- "restrictions cleared".
-AND lw.first_trade_price > 0
+-- Proof the pair really trades (2026-10-07, relaxed): a real first trade
+-- exists, OR the watcher saw the launch restrictions cleared AND there is a
+-- fresh best ask to price off -- so the buy does not wait for the watcher's
+-- first-trade lookup.
+AND (lw.first_trade_price > 0
+     OR (lw.restrictions_cleared_at IS NOT NULL AND ask.best_ask IS NOT NULL))
 -- Tradable now. limit_only is ALLOWED on purpose: the first minutes after
 -- the first trade are normally Coinbase's launch limit-only phase, and a
 -- plain limit order is accepted there. Not during the auction, cancel-only
 -- or post-only (a taker limit would be rejected).
 AND s.trading_disabled IS NOT TRUE
--- 2026-10-07: never snipe a stablecoin (stock.is_stablecoin, price-behavior
--- flag set near the top of this procedure).
-AND s.is_stablecoin IS NOT TRUE
+-- 2026-10-07 (later): stock.is_stablecoin is deliberately NOT checked here.
+-- Every coin reaching this INSERT is inside its 24h listing window, and the
+-- price-behavior flag (set near the top of this procedure: price within 3%
+-- of $1 and a < 2% 24h range) can wrongly tag a new coin that launches at
+-- ~$1.00 and trades quietly at first -- and the flag is sticky. Theodore:
+-- buy new coins immediately, no such restriction. Normal (non-listing) buys
+-- still honor the flag.
 AND COALESCE(bs.trading_disabled, bs.json->>'trading_disabled', 'false') NOT IN ('true', 't', '1')
 AND COALESCE(bs.status, bs.json->>'status', '') = 'online'
 AND COALESCE(bs.json->>'product_type', 'SPOT') = 'SPOT'
@@ -1006,14 +1029,79 @@ AND inc.lot IS NOT NULL
 AND px.limit_price > 0
 AND sz.shares > 0
 AND sz.shares * px.limit_price >= inc.quote_min
--- Keep it ~$buy_usd: skip a coin whose base increment / minimum would force
--- a much bigger order (> 1.25x listing_buy_usd).
-AND sz.shares * px.limit_price <= cfg.buy_usd * 1.25
+-- 2026-10-07: the only cost ceiling is config.listing_max_buy_usd ($5) --
+-- replaces the old "<= 1.25 x listing_buy_usd" cap that skipped every
+-- high-priced coin. A coin over it is noted on listing_watch by the UPDATE
+-- right after this INSERT.
+AND sz.shares * px.limit_price <= cfg.max_buy_usd
 -- Cash: USD (minus the sweep reserve) or, as the fallback, USDC must cover
 -- the order incl. the ~1.2% fee pad -- decided in the "fund" lateral above.
 AND fund.funding IS NOT NULL
 ORDER BY lw.trading_open_at DESC
 LIMIT 1;
+
+-- 2026-10-07: note a listing coin skipped ONLY because its smallest valid
+-- order costs more than config.listing_max_buy_usd, so it is visible
+-- (index.js logListingSkips() prints it once; the reason is refreshed each
+-- minute while it lasts). Same reference price / limit / size formulas as
+-- the INSERT above -- KEEP THEM IN SYNC. Only coins that would otherwise be
+-- live candidates (in window, not cancelled, never sniped, tradable now).
+-- (Target aliased "tgt" and joined to its own row "lw" because an UPDATE's
+-- target table cannot be referenced from the LATERAL subqueries.)
+UPDATE listing_watch tgt
+SET snipe_skip_reason = 'smallest order $' || ROUND(sz.shares * px.limit_price, 2)
+                        || ' (' || sz.shares || ' @ ' || px.limit_price
+                        || ') exceeds listing_max_buy_usd $' || cfg.max_buy_usd,
+    snipe_skipped_at  = COALESCE(tgt.snipe_skipped_at, NOW())
+FROM listing_watch lw
+JOIN stock s       ON s.name = lw.product_id
+JOIN bulk_stock bs ON bs.id = s.name
+CROSS JOIN LATERAL (
+    SELECT COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_buy_window_hours'), 24)   AS buy_window_hours,
+           COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_buy_usd'), 1.00)         AS buy_usd,
+           COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_max_buy_usd'), 5)        AS max_buy_usd,
+           COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_limit_cushion_pct'), 2)   AS cushion_pct
+) cfg
+CROSS JOIN LATERAL (
+    SELECT NULLIF(COALESCE(NULLIF(bs.json->>'price_increment', ''), NULLIF(bs.json->>'quote_increment', ''))::numeric, 0) AS tick,
+           NULLIF(NULLIF(bs.json->>'base_increment', '')::numeric, 0)                                                      AS lot,
+           COALESCE(NULLIF(bs.json->>'base_min_size', '')::numeric, 0)                                                     AS base_min,
+           COALESCE(NULLIF(bs.json->>'quote_min_size', '')::numeric, 0)                                                    AS quote_min
+) inc
+LEFT JOIN LATERAL (
+    SELECT bba.best_ask::numeric AS best_ask
+    FROM bulk_best_bid_ask bba
+    WHERE bba.product_id = s.name
+    AND bba.loaded_at > NOW() - INTERVAL '3 minutes'
+    AND bba.best_ask > 0
+    LIMIT 1
+) ask ON TRUE
+CROSS JOIN LATERAL (
+    SELECT CEIL(COALESCE(
+               ask.best_ask,
+               NULLIF(CASE WHEN bs.price ~ '^[0-9]+(\.[0-9]+)?$' THEN bs.price::numeric END, 0),
+               NULLIF(lw.first_trade_price, 0)
+           ) * (1 + cfg.cushion_pct / 100) / inc.tick) * inc.tick AS limit_price
+) px
+CROSS JOIN LATERAL (
+    SELECT GREATEST(CEIL(GREATEST(cfg.buy_usd, inc.quote_min) / px.limit_price / inc.lot) * inc.lot, inc.base_min) AS shares
+) sz
+WHERE tgt.product_id = lw.product_id
+AND s.name LIKE '%-USD'
+AND lw.trading_open_at IS NOT NULL
+AND lw.trading_open_at <= NOW()
+AND NOW() - lw.trading_open_at <= cfg.buy_window_hours * INTERVAL '1 hour'
+AND lw.snipe_cancelled_at IS NULL
+AND NOT EXISTS (SELECT 1 FROM position p WHERE p.stock_id = s.stock_id)
+AND NOT EXISTS (SELECT 1 FROM profit_history h WHERE h.stock_id = s.stock_id AND h.period_type = 'listing')
+AND COALESCE(bs.status, bs.json->>'status', '') = 'online'
+AND COALESCE(bs.trading_disabled, bs.json->>'trading_disabled', 'false') NOT IN ('true', 't', '1')
+AND COALESCE(bs.cancel_only, bs.json->>'cancel_only', 'false') NOT IN ('true', 't', '1')
+AND COALESCE(bs.auction_mode, bs.json->>'auction_mode', 'false') NOT IN ('true', 't', '1')
+AND inc.tick IS NOT NULL
+AND inc.lot IS NOT NULL
+AND px.limit_price > 0
+AND sz.shares * px.limit_price > cfg.max_buy_usd;
 
 -- New position: $1 into the highest year-basis-priority coin not already
 -- held, gated only on the coin's year-basis trend being positive -- no
@@ -3775,5 +3863,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict yVByGQqwzacUAwRkPr7bRuC8MPMcYtpVW9gqaPMl6aRae1ja32MARHkho2XvavC
+\unrestrict rIxXH64IU70jCXOdmSD6s4jzIdtuImB3POStvEi85eeUt4DhDNnkg8UJneomw8Q
 
