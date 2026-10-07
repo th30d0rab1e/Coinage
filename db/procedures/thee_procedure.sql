@@ -1187,6 +1187,64 @@ AND (
     * (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
     - (position.buy_filled_price::numeric * position.shares::numeric + COALESCE(position.buy_fee::numeric, 0))
 ) > 0;
+-- NOTE: the UPDATE above can never price a period_type 'listing' bag: it
+-- joins price_aggregate_total on pat.period_type = position.period_type
+-- (only day / month / year rows exist) and needs a vw_signal day row, which
+-- a brand-new coin does not have. Listing bags get the block below instead.
+
+-- 2026-10-07 LISTING SELL PRICING (Theodore; PONS-USD position 1391 sat
+-- filled with no sell price because of the joins noted above). A filled
+-- listing snipe bag gets its sell priced ONCE, from its own settled buy:
+--   sell_price      = fee breakeven * (1 + config.sell_net_cushion), rounded UP
+--   sell_stop_price = fee breakeven * (1 + sell_net_cushion) * 1.01, rounded UP
+-- Fee breakeven = buy_filled_price * (1 + r) / (1 - r), r = this bag's own
+-- buy fee rate (buy_fee / (buy_filled_price * shares)), falling back to
+-- config.fee_percent / 100 -- the SAME formula and rounding as the UPDATE
+-- above, minus its price-history / day-signal requirements and its
+-- volatility branch (a new coin has no history). Same "never sell at a net
+-- loss" profit check. The sell itself is unchanged: processSellOrders
+-- places the normal STOP_DOWN stop-limit on position.name (<COIN>-USD, also
+-- for a bag bought on <COIN>-USDC -- same coin wallet) once the price is
+-- above sell_stop_price, and vw_edit_orders sell branch 1 trails the stop
+-- up (fixed 0.99 ratio) because listing bags are included there.
+UPDATE position
+SET sell_stop_price =
+        CEIL(
+            (position.buy_filled_price::numeric
+                * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
+                / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100)))
+                * (1 + COALESCE((SELECT value::numeric FROM config WHERE key = 'sell_net_cushion'), 0.015))
+                * 1.01
+            * POWER(10::numeric, stock.price_rounding::int)
+        ) / POWER(10::numeric, stock.price_rounding::int),
+    sell_price =
+        CEIL(
+            (position.buy_filled_price::numeric
+                * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
+                / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100)))
+                * (1 + COALESCE((SELECT value::numeric FROM config WHERE key = 'sell_net_cushion'), 0.015))
+            * POWER(10::numeric, stock.price_rounding::int)
+        ) / POWER(10::numeric, stock.price_rounding::int)
+FROM stock
+WHERE position.stock_id = stock.stock_id
+AND position.period_type = 'listing'
+AND position.buy_filled_price IS NOT NULL
+AND position.sell_price IS NULL
+AND stock.price_rounding IS NOT NULL
+-- Same profit check as the UPDATE above: at the rounded fee breakeven,
+-- proceeds after an estimated sell fee (same buy-side fee rate) must exceed
+-- total cost (buy_filled_price * shares + buy_fee).
+AND (
+    (CEIL(
+        (position.buy_filled_price::numeric
+            * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
+            / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100)))
+        * POWER(10::numeric, stock.price_rounding::int)
+    ) / POWER(10::numeric, stock.price_rounding::int))
+    * position.shares::numeric
+    * (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
+    - (position.buy_filled_price::numeric * position.shares::numeric + COALESCE(position.buy_fee::numeric, 0))
+) > 0;
 
 -- Refresh stale buy candidates: a pending buy that has never gotten a
 -- Coinbase order ID keeps its original buy_stop_price forever, since
