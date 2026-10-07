@@ -631,7 +631,11 @@ async function latestBuyFill(productIds) {
 }
 
 // Every run, session open or not: walk PLACING/OPEN limit rows and move
-// them to FILLED / CANCELLED / EXPIRED. Cancels a resting limit once
+// them to FILLED / CANCELLED / EXPIRED. This deliberately covers EVERY
+// ticker, including ones later disabled (etf.enabled = false, e.g. SPCX
+// 2026-10-07): a limit that was already resting is still tracked to a fill
+// or to its expires_at cancel, but never re-placed (placements come only
+// from enabled rows in buildEtfPlan). Cancels a resting limit once
 // expires_at has passed (our stand-in for GTD). Never places an order.
 // A failed GET leaves the row OPEN so a second limit is never stacked.
 async function syncEtfLimitOrders() {

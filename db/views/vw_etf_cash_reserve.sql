@@ -3,7 +3,8 @@
 -- Priority (2026-10-06 afternoon, kept 2026-10-07): 
 --   1) new-listing snipe (period_type='listing') — index.js sets the reserve to 0
 --      and skips ETF placement while any listing bag is open;
---   2) ETF buys (BLOX, CHPY, YBTC, TOPW, SPCX, TSLW, XDTE) during equity hours —
+--   2) ETF buys (enabled etf rows: BLOX, CHPY, YBTC, TOPW, TSLW, XDTE; SPCX
+--      disabled 2026-10-07) during equity hours —
 --      reserveEtfCash() writes the dollar total for this run's ETF plan into
 --      config.etf_usd_reserve BEFORE thee_procedure runs;
 --   3) regular crypto / add-on buys — thee_procedure subtracts reserve_usd from

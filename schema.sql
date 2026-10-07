@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 9yshWXHxyny2TU2e0bqCIlMYBSrN0KfZ0GbMvpUQA7jCSRJJe5IzmwIYZ1U81eZ
+\restrict IJvo3cIzpJuRYUEKmdofkAa0tihcvdf0fowV4NASef7gjh7F9Z4XuiCWJoRuKb6
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -2149,6 +2149,13 @@ COMMENT ON COLUMN public.etf.quote_usd IS 'Quote USD notional for one market buy
 
 
 --
+-- Name: COLUMN etf.enabled; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.etf.enabled IS 'false = the bot neither buys this ticker (no daily market buy, no new ladder limit) nor syncs its IEX price. History and any already-resting limit stay tracked. SPCX disabled 2026-10-07 at Theodore''s request; re-enable with UPDATE etf SET enabled = true.';
+
+
+--
 -- Name: COLUMN etf.is_special; Type: COMMENT; Schema: public; Owner: -
 --
 
@@ -3555,5 +3562,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 9yshWXHxyny2TU2e0bqCIlMYBSrN0KfZ0GbMvpUQA7jCSRJJe5IzmwIYZ1U81eZ
+\unrestrict IJvo3cIzpJuRYUEKmdofkAa0tihcvdf0fowV4NASef7gjh7F9Z4XuiCWJoRuKb6
 

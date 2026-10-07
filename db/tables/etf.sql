@@ -6,6 +6,9 @@
 -- XDTE was made a special on 2026-10-04 so it gets same-day dip rebuys and the 2:45 PM CT catch-up.
 -- SPCX (SpaceX common stock, not an ETF) was added 2026-10-05 as a $1
 -- special; see db/migrations/2026-10-05_add_spcx_etf.sql for the product_id check.
+-- SPCX was DISABLED (enabled = false) 2026-10-07 at Theodore's request: no new
+-- buys or price sync; row and etf_buy history kept. See
+-- db/migrations/2026-10-07_disable_spcx_etf.sql (re-enable: SET enabled = true).
 -- YBTC (Roundhill Bitcoin Covered Call ETF) was added 2026-10-06 as a $1
 -- special; YETH was requested too but skipped because Coinbase lists it
 -- liquidate_only (sell-only). See db/migrations/2026-10-06_add_ybtc_etf.sql.
@@ -14,6 +17,7 @@ CREATE TABLE IF NOT EXISTS public.etf (
     product_id text NOT NULL,
     -- Notional of one market buy. Not a share count.
     quote_usd  numeric NOT NULL DEFAULT 1,
+    -- false = not bought and not price-synced; history / resting limits stay tracked.
     enabled    boolean NOT NULL DEFAULT true,
     -- Specials may all buy in one minute and repeat when price < last fill.
     -- Regulars (default) need price < last fill * 0.99 and only one attempt
@@ -36,3 +40,5 @@ COMMENT ON COLUMN public.etf.is_special IS
     'True for BLOX, CHPY, TOPW, TSLW, XDTE, SPCX, and YBTC. XDTE was made a special on 2026-10-04 so it gets same-day dip rebuys and the 2:45 PM CT catch-up. SPCX (SpaceX common stock) added as a special on 2026-10-05. YBTC (Roundhill Bitcoin Covered Call ETF) added as a special on 2026-10-06; YETH skipped (Coinbase liquidate_only).';
 COMMENT ON COLUMN public.etf.usdc_product_id IS
     'USDC-quoted EQUITY product id for this ticker (its alias = product_id). When set, index.js buys on this id and pays with USDC (falls back to product_id / USD when USDC is short and config.etf_usdc_fallback_usd = true). NULL = Coinbase has no USDC version; buy with USD.';
+COMMENT ON COLUMN public.etf.enabled IS
+    'false = the bot neither buys this ticker (no daily market buy, no new ladder limit) nor syncs its IEX price. History and any already-resting limit stay tracked. SPCX disabled 2026-10-07 at Theodore''s request; re-enable with UPDATE etf SET enabled = true.';
