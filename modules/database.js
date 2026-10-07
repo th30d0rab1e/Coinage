@@ -4,7 +4,10 @@ const { Pool } = require('pg');
 const con = new Pool({
   user: 'theodorecross', // Homebrew default: your macOS username (run `whoami`)
   host: 'localhost',
-  database: 'coinbase',      // Default database, or use one you created (e.g., 'mydb')
+  // 2026-10-07: COINAGE_DB overrides the database for test runs only (e.g.
+  // COINAGE_DB=coinbase_scratch for a dry run). Cron never sets it, so the
+  // live bot always uses 'coinbase'.
+  database: process.env.COINAGE_DB || 'coinbase',
   password: '',              // Homebrew default: blank; EDB: your set password
   port: 5432,                // Default PostgreSQL port
 });

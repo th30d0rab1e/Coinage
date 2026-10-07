@@ -24,7 +24,11 @@ var convertUsdc = require('./modules/convert.js')
 // thee_procedure cannot spend that Default USD on a new crypto plan.
 let equitySessionOpen = false
 let etfAttemptsThisRun = []
-main()
+// 2026-10-07: run the minute only when started as `node index.js` (cron).
+// require('./index.js') from a test harness loads the functions without
+// running a live cycle (used to dry-run processBuyOrders against a scratch
+// DB with stubbed order calls; see module.exports at the bottom).
+if (require.main === module) main()
 
 ///Volumes/2TBSSD/theodorecrossX/Coinbase tedTosterone/
 
@@ -1131,12 +1135,29 @@ async function processBuyOrders () {
         const accounts = await ca.gatherBalance();
         const usd = accounts?.find(a => a.currency === 'USD');
         const available = usd ? parseFloat(usd.available_balance.value) : 0;
-        if (!(available > 1)) {
-            console.log(`processBuyOrders() skipped: only $${available.toFixed(2)} available`);
-            return;
+        // 2026-10-07 (listing USDC fallback): with $1 or less USD free, the
+        // only row that may still go out is a listing snipe that
+        // thee_procedure already funded with USDC (buy_quote_currency =
+        // 'USDC', cash-gated there on free USDC). Every other row -- normal
+        // USD buys AND a USD-funded listing row -- is still skipped exactly
+        // as before. The cheap DB check below runs only in that low-USD case.
+        const usdLow = !(available > 1)
+        if (usdLow) {
+            const usdcListing = await db.executeQuery(`
+                SELECT 1 FROM position
+                WHERE period_type = 'listing' AND buy_quote_currency = 'USDC'
+                AND buy_coinbase_order_id IS NULL AND error_message IS NULL
+                AND buy_filled_price IS NULL AND buy_released_at IS NULL
+                LIMIT 1
+            `)
+            if (!(usdcListing?.length > 0)) {
+                console.log(`processBuyOrders() skipped: only $${available.toFixed(2)} available`);
+                return;
+            }
+            console.log(`processBuyOrders(): only $${available.toFixed(2)} USD free -- placing the USDC-funded listing snipe only`);
         }
 
-        const orders = await db.executeQuery(`
+        let orders = await db.executeQuery(`
             SELECT p.* FROM position p
             JOIN stock s ON s.stock_id = p.stock_id
             WHERE p.buy_coinbase_order_id IS NULL AND p.error_message IS NULL
@@ -1163,6 +1184,8 @@ async function processBuyOrders () {
             -- the cash it was gated on.
             ORDER BY (p.period_type = 'listing') DESC, s.priority DESC NULLS LAST
         `)
+        // Low USD: keep ONLY the USDC-funded listing row (see usdLow above).
+        if (usdLow) orders = (orders || []).filter(o => o.period_type === 'listing' && o.buy_quote_currency === 'USDC')
         console.log(`Buy Orders to Process: ${orders.length}`);
 
         // 2026-10-05: the per-row cashLeft skip (2026-09-27) and the live L2
@@ -1200,13 +1223,17 @@ async function processBuyOrders () {
             // vw_edit_orders / thee_procedure). Every other row keeps the
             // normal stop-limit buy.
             const isListing = element.period_type === 'listing'
+            // 2026-10-07: a USDC-funded listing row goes to <COIN>-USDC
+            // (listingBuyProductId); everything else uses position.name.
+            const buyProductId = isListing ? listingBuyProductId(element) : element.name
+            const buyCurrency = isListing && element.buy_quote_currency === 'USDC' ? 'USDC' : 'USD'
             let response = isListing
-                ? await ca.createLimitOrder('buy', element.buy_price, element.shares, element.name, newOrderId)
+                ? await ca.createLimitOrder('buy', element.buy_price, element.shares, buyProductId, newOrderId)
                 : await ca.createStopLimitOrder('buy', element.buy_price, element.shares, element.name, element.buy_stop_price, newOrderId);
             if(response?.success == true) {
                 // buy_placed_at (2026-09-25): order age, so far-release won't cancel a fresh order
                 await db.executeQuery(`UPDATE position SET buy_order_id = '${newOrderId}', buy_coinbase_order_id = '${response.success_response.order_id}', buy_placed_at = NOW() WHERE buy_order_id = '${element.buy_order_id}'`)
-                console.log(`${isListing ? 'Listing LIMIT Buy Created (GTC, no expiry)' : 'Buy Order Created'}: ${element.name} | shares: ${element.shares} | price: ${element.buy_price}`)
+                console.log(`${isListing ? `Listing LIMIT Buy Created (GTC, no expiry, paid in ${buyCurrency} on ${buyProductId})` : 'Buy Order Created'}: ${element.name} | shares: ${element.shares} | price: ${element.buy_price}`)
             } else {
                 const errMsg = (response?.error_response?.message || 'unknown').replace(/'/g, "''")
                 await db.executeQuery(`UPDATE position SET error_message = '${errMsg}' WHERE buy_order_id = '${element.buy_order_id}'`)
@@ -1216,7 +1243,7 @@ async function processBuyOrders () {
                 // re-inserts it with fresh gates only while the window is
                 // still open, so it is retried each minute inside the window
                 // and simply stops after.
-                console.log(isListing ? `Listing Buy FAILED (retried next minute only while the window is open): ${element.name}` : `Buy Order FAILED: ${element.name}`, response)
+                console.log(isListing ? `Listing Buy FAILED (retried next minute only while the window is open): ${element.name} via ${buyProductId} (${buyCurrency})` : `Buy Order FAILED: ${element.name}`, response)
                 // 2026-09-25: 'Invalid product_id' means the product no longer exists
                 // on Coinbase (delisted, e.g. LRC-USD) -- retrying can never succeed.
                 // Flag the coin so nothing picks it again, and drop this planned row.
@@ -1233,6 +1260,19 @@ async function processBuyOrders () {
     } catch (error) {
         console.log("processBuyOrders() ERROR", error)
     }
+}
+
+// 2026-10-07 (listing USDC fallback): product id for a listing snipe BUY.
+// thee_procedure sets position.buy_quote_currency = 'USDC' when it funded
+// the snipe with USDC (free USD short, config.listing_usdc_fallback on);
+// that order goes to the coin's -USDC twin (alias of the -USD pair, same
+// order book, paid in USDC). NULL = USD = position.name, as before. Only
+// the BUY uses this: the sell still goes on position.name (<COIN>-USD) and
+// returns USD (approved: no sell-side change).
+function listingBuyProductId(row) {
+    const name = String(row?.name || '')
+    if (row?.buy_quote_currency === 'USDC' && name.endsWith('-USD')) return name.slice(0, -4) + '-USDC'
+    return name
 }
 
 async function processSellOrders () {
@@ -2198,3 +2238,7 @@ async function transferProfit (accounts, fills) {
         console.log('transferProfit()', error)
     }
 }
+
+// 2026-10-07: exported only for test harnesses (require does not run main,
+// see the require.main guard at the top). Not used by the live cron run.
+module.exports = { processBuyOrders, listingBuyProductId }
