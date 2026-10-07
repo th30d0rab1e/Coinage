@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict hAU5O1dShPB1jN4XCk2b3Y8AaWKpQ6Z4A5EVPPCk1RDdXf2dbdtIig7z1pH8Jun
+\restrict 9yshWXHxyny2TU2e0bqCIlMYBSrN0KfZ0GbMvpUQA7jCSRJJe5IzmwIYZ1U81eZ
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -717,6 +717,7 @@ WITH RECURSIVE cand AS (
 ),
 walk AS (
     SELECT 0::bigint AS rn,
+           -- 2026-10-07: USD only on purpose; USDC is not crypto buy cash.
            (SELECT available::numeric FROM vw_balance WHERE name = 'USD')
              - COALESCE((SELECT reserve_usd FROM vw_etf_cash_reserve), 0)
              -- 2026-10-07: profit queued for the USDC sweep is not spendable.
@@ -847,6 +848,10 @@ LEFT JOIN (
     WHERE period_type = 'listing'
     GROUP BY stock_id
 ) ph ON ph.stock_id = s.stock_id
+-- 2026-10-07: crypto buys stay USD ONLY on purpose. USDC (vw_balance
+-- name = 'USDC') is never cash here: it is profit parked by the USDC sweep
+-- and the pot USDC-capable ETFs buy with (index.js fundAttemptsByCurrency).
+-- vw_etf_cash_reserve holds only USD-funded ETF attempts.
 WHERE b.name = 'USD'
 AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
 AND s.name LIKE '%-USD'
@@ -1050,6 +1055,10 @@ CROSS JOIN LATERAL (
 JOIN vw_signal d
   ON d.stock_id = s.stock_id
  AND d.period_type = 'day'
+-- 2026-10-07: crypto buys stay USD ONLY on purpose. USDC (vw_balance
+-- name = 'USDC') is never cash here: it is profit parked by the USDC sweep
+-- and the pot USDC-capable ETFs buy with (index.js fundAttemptsByCurrency).
+-- vw_etf_cash_reserve holds only USD-funded ETF attempts.
 WHERE b.name = 'USD'
 AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
 -- 2026-09-25 cash-backlog gate: free USD minus what is already promised to
@@ -1239,6 +1248,10 @@ CROSS JOIN LATERAL (
         plan.shares * LEAST(plan.buy_price, addcap.cap_limit)         AS cost_usd,
         plan.shares * LEAST(plan.buy_price, addcap.cap_limit) * 1.012 AS cost_with_fee
 ) eff
+-- 2026-10-07: crypto buys stay USD ONLY on purpose. USDC (vw_balance
+-- name = 'USDC') is never cash here: it is profit parked by the USDC sweep
+-- and the pot USDC-capable ETFs buy with (index.js fundAttemptsByCurrency).
+-- vw_etf_cash_reserve holds only USD-funded ETF attempts.
 WHERE b.name = 'USD'
 -- 2026-09-25 cash-backlog gate (same as the new-position insert above):
 -- don't add another planned buy the free cash can't cover once the
@@ -3542,5 +3555,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict hAU5O1dShPB1jN4XCk2b3Y8AaWKpQ6Z4A5EVPPCk1RDdXf2dbdtIig7z1pH8Jun
+\unrestrict 9yshWXHxyny2TU2e0bqCIlMYBSrN0KfZ0GbMvpUQA7jCSRJJe5IzmwIYZ1U81eZ
 
