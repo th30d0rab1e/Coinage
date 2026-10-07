@@ -1,6 +1,24 @@
 CREATE OR REPLACE PROCEDURE public.thee_procedure()
 LANGUAGE sql
 AS $$
+-- ===========================================================================
+-- 2026-10-07 BUY STOPS (Theodore; migrations/2026-10-07_buy_stop_cash_scaled.sql)
+-- ===========================================================================
+-- Every crypto buy (not listing snipes) is priced from ONE cash-scaled gap,
+-- vw_buy_stop_gap.gap = buy_stop_base_pct/100 * sqrt(total_equity / free USD)
+-- (USD only, no maximum; free USD 0/NULL -> $0.01):
+--   * signal insert:       stop = close x (1 + gap), limit = stop x 1.01
+--   * average-down insert: stop = price x (1 + gap), limit = stop x 1.01
+--                          (was a flat price x 1.01 / x 1.011)
+--   * stale refresh:       stop = price x (1 + gap), limit = stop x 1.01
+--   * remake:              vw_edit_orders buy branch (same gap view)
+-- Below-lowest-paid rule (fn_buy_below_paid) replaces the 0.99 x cheapest-bag
+-- cap (config add_buy_cap_ratio, left in place but no longer read): on a coin
+-- with open filled bags the LIMIT must be below the lowest buy_filled_price,
+-- else limit = largest tick below it, stop = limit / 1.01 rounded down. The
+-- inserts write the final stop/limit and judge the cash and thin-ask checks
+-- on shares x that final limit; the add-on UPDATE re-applies the rule after
+-- the stale refresh; clean-up (e) uses the highest stop the rule allows.
 
 INSERT INTO stock (name, date_created)
 SELECT bs.id, NOW()
@@ -286,10 +304,11 @@ AND NOT EXISTS (
 --  (d) below Coinbase minimum order size: shares < stock.min_shares
 --      (base_min_size) or shares * buy_price < stock.min_price
 --      (quote_min_size). Coinbase rejects these forever.
---  (e) trigger no longer above price on a coin already held: the add-on cap
---      below (add_buy_cap_ratio, default 0.99 x cheapest open bag) pins the
---      trigger, so once price is at/above that cap the stop-buy cannot be
---      placed (Coinbase needs the stop above market). Uncapped rows are not
+--  (e) trigger no longer above price on a coin already held: the
+--      below-lowest-paid rule (fn_buy_below_paid; 2026-10-07, replaced the
+--      add_buy_cap_ratio 0.99 cap) allows at most stop = (largest tick below
+--      the lowest paid) / 1.01, so once price is at/above that the stop-buy
+--      cannot be placed (Coinbase needs the stop above market). Uncapped rows are not
 --      deleted here: the "refresh stale buy candidates" UPDATE further down
 --      re-prices them above market, and a safety DELETE after the cap
 --      catches anything still at/below price.
@@ -334,15 +353,18 @@ AND (
     OR p.shares <= 0
     OR p.shares < COALESCE(s.min_shares, 0)
     OR (p.shares * p.buy_price) < COALESCE(s.min_price, 0)
-    -- (e) held coin: price at/above the capped trigger
+    -- (e) held coin: price at/above the highest stop the below-lowest-paid
+    -- rule allows (fn_buy_below_paid with limit = lowest paid forces the
+    -- clamp). NULL when the coin has no open filled bag -> not deleted.
     OR s.price::numeric >= (
-        SELECT TRUNC(MIN(f.buy_filled_price)::numeric
-                     * COALESCE((SELECT value::numeric FROM config WHERE key = 'add_buy_cap_ratio'), 0.99),
-                     s.price_rounding::integer)
-        FROM position f
-        WHERE f.stock_id = p.stock_id
-        AND f.buy_filled_price IS NOT NULL
-        AND f.sell_filled_price IS NULL
+        SELECT (fn_buy_below_paid(NULL, m.min_paid, m.min_paid, s.price_rounding::integer)).stop_price
+        FROM (
+            SELECT MIN(f.buy_filled_price)::numeric AS min_paid
+            FROM position f
+            WHERE f.stock_id = p.stock_id
+            AND f.buy_filled_price IS NOT NULL
+            AND f.sell_filled_price IS NULL
+        ) m
     )
     -- (f) wide spread (only with fresh best-bid/ask data)
     OR (
@@ -804,8 +826,10 @@ SELECT s.stock_id, s.name,
     -- 2026-10-05: price / trigger / size now come from the "plan" lateral
     -- below (same formulas as before, computed once) so the new gates can
     -- check the exact order this INSERT will create.
-    plan.buy_price,
-    plan.buy_stop_price,
+    -- 2026-10-07: the FINAL stop/limit (after the below-lowest-paid rule,
+    -- lateral "fin") are written directly.
+    fin.limit_price AS buy_price,
+    fin.stop_price  AS buy_stop_price,
     plan.shares,
     NOW() AS date_created,
     gen_random_uuid(),
@@ -813,41 +837,10 @@ SELECT s.stock_id, s.name,
 FROM vw_signal s
 JOIN stock ON s.stock_id = stock.stock_id
 CROSS JOIN vw_balance b
-CROSS JOIN LATERAL (
-    -- Cash-scaled new-buy stop gap: base 2%, stretched by total program
-    -- equity / available USD (same components as the equity calc: filled
-    -- bags at stock.price, USD available, USD hold in open buys, priced
-    -- untracked dust). stop_mult = 1 + 0.02 * (equity / available).
-    -- Falls back to 1.02 when available USD is 0/NULL.
-    SELECT COALESCE(
-        1 + 0.02 * (
-            (
-                COALESCE((
-                    SELECT SUM(p2.shares::numeric * s2.price::numeric)
-                    FROM position p2
-                    JOIN stock s2 ON s2.stock_id = p2.stock_id
-                    WHERE p2.buy_filled_price IS NOT NULL
-                    AND p2.sell_filled_price IS NULL
-                ), 0)
-                + COALESCE((SELECT available::numeric FROM vw_balance WHERE name = 'USD'), 0)
-                + COALESCE((SELECT hold::numeric FROM vw_balance WHERE name = 'USD'), 0)
-                + COALESCE((
-                    SELECT SUM(
-                        CASE
-                            WHEN a.currency IN ('USDS', 'USD1', 'PAX') THEN a.balance::numeric
-                            WHEN st.price IS NOT NULL THEN a.balance::numeric * st.price::numeric
-                            ELSE 0
-                        END
-                    )
-                    FROM vw_position_order_balance_audit a
-                    LEFT JOIN stock st ON st.name = a.name
-                    WHERE a.issue_type = 'untracked_holding'
-                ), 0)
-            ) / NULLIF((SELECT available::numeric FROM vw_balance WHERE name = 'USD'), 0)
-        ),
-        1.02
-    ) AS stop_mult
-) gap
+-- 2026-10-07: cash-scaled gap from the ONE shared place (vw_buy_stop_gap:
+-- buy_stop_base_pct/100 * sqrt(equity / free USD), USD only, no max).
+-- Replaces the inline 1 + 0.02 * (equity / free USD) of 2026-10-05.
+CROSS JOIN vw_buy_stop_gap g
 LEFT JOIN position p ON p.stock_id = s.stock_id
     AND p.period_type = 'day'
     AND p.buy_order_id IS NOT NULL
@@ -887,40 +880,36 @@ CROSS JOIN LATERAL (
     AND open_sz.buy_order_id IS NOT NULL
     AND open_sz.sell_filled_price IS NULL
 ) clip
--- 2026-10-05 the order this INSERT will create (formulas unchanged from the
--- old inline SELECT list): trigger = signal close * cash-scaled stop gap,
--- limit 1% above, shares = clip dollars / close.
+-- 2026-10-05 the order this INSERT will create: trigger = signal close x
+-- (1 + cash-scaled gap), limit = trigger x 1.01, shares = clip dollars /
+-- close. (2026-10-07: gap from vw_buy_stop_gap.)
 CROSS JOIN LATERAL (
     SELECT
-        TRUNC((s.close::numeric * gap.stop_mult * 1.01), stock.price_rounding::integer) AS buy_price,
-        TRUNC((s.close::numeric * gap.stop_mult),        stock.price_rounding::integer) AS buy_stop_price,
-        TRUNC(clip.clip_usd / s.close::numeric, stock.share_rounding::integer)          AS shares
+        TRUNC((s.close::numeric * (1 + g.gap) * 1.01), stock.price_rounding::integer) AS buy_price,
+        TRUNC((s.close::numeric * (1 + g.gap)),        stock.price_rounding::integer) AS buy_stop_price,
+        TRUNC(clip.clip_usd / s.close::numeric, stock.share_rounding::integer)        AS shares
 ) plan
--- 2026-10-05 add-on cap preview: the "add-on buy cap" UPDATE near the end
--- of this procedure pins an unsent buy on a coin already held to
--- add_buy_cap_ratio (default 0.99) x the cheapest open bag (limit 1% above).
--- Computed here so the gates judge the trigger/limit the row will really
--- have. NULLs when the coin has no open filled bag (no cap applies).
+-- 2026-10-07 below-lowest-paid rule (replaces the add_buy_cap_ratio 0.99
+-- cap preview): lowest price paid among this coin's open filled bags (NULL
+-- = not held), then fn_buy_below_paid gives the final stop/limit this row
+-- is written with (unchanged when not held or already below).
 CROSS JOIN LATERAL (
-    SELECT
-        TRUNC(MIN(f.buy_filled_price)::numeric
-              * COALESCE((SELECT value::numeric FROM config WHERE key = 'add_buy_cap_ratio'), 0.99),
-              stock.price_rounding::integer) AS cap_stop,
-        TRUNC(MIN(f.buy_filled_price)::numeric
-              * COALESCE((SELECT value::numeric FROM config WHERE key = 'add_buy_cap_ratio'), 0.99) * 1.01,
-              stock.price_rounding::integer) AS cap_limit
+    SELECT MIN(f.buy_filled_price)::numeric AS min_paid
     FROM position f
     WHERE f.stock_id = s.stock_id
     AND f.buy_filled_price IS NOT NULL
     AND f.sell_filled_price IS NULL
-) addcap
--- Effective limit price after the cap (LEAST ignores the NULL cap) and the
--- dollar cost of the order, plain and with the ~1.2% taker-fee pad (1.012,
--- the same pad index.js used for its old per-row cash check).
+) paid
+CROSS JOIN LATERAL fn_buy_below_paid(plan.buy_stop_price, plan.buy_price, paid.min_paid, stock.price_rounding::integer) fin
+-- Dollar cost of the REAL order: shares x the final limit (2026-10-07: was
+-- LEAST(pre-cap limit, cap limit)), plain and with the ~1.2% taker-fee pad
+-- (1.012, the same pad index.js used for its old per-row cash check).
+-- Shares are sized at close, so a $1 clip costs $1 x (1 + gap) x 1.01 at
+-- the limit (what Coinbase holds for the order).
 CROSS JOIN LATERAL (
     SELECT
-        plan.shares * LEAST(plan.buy_price, addcap.cap_limit)         AS cost_usd,
-        plan.shares * LEAST(plan.buy_price, addcap.cap_limit) * 1.012 AS cost_with_fee
+        plan.shares * fin.limit_price         AS cost_usd,
+        plan.shares * fin.limit_price * 1.012 AS cost_with_fee
 ) eff
 -- Day row of vw_signal: today's close-vs-yesterday % vs this coin's
 -- average historical day-over-day %. Keeps the year-basis priority pick
@@ -997,11 +986,13 @@ AND (NOT bookcfg.bba_fresh OR bba.spread_pct <= bookcfg.max_spread_pct)
 AND (book.imbalance IS NULL OR book.imbalance >= bookcfg.skip_imbalance)
 AND (book.near_ask_usd IS NULL OR book.near_ask_usd >= eff.cost_usd * bookcfg.min_ask_mult)
 -- 2026-10-05 (#3) trigger must already be above price: on a coin already
--- held the cap pins the trigger at addcap.cap_stop, so only create the row
--- when price is under it (was: inserted anyway, then index.js waited for
--- price to fall -- the PNG/DOGE/VVV/GFI/QI rows). No cap = no limit here
--- (the refresh UPDATE keeps uncapped triggers above market).
-AND stock.price::numeric < COALESCE(addcap.cap_stop, 'Infinity'::numeric)  -- stock.price: s is vw_signal here
+-- held the trigger is the final (below-lowest-paid) stop, so only create
+-- the row when price is under it (was: inserted anyway, then index.js
+-- waited for price to fall -- the PNG/DOGE/VVV/GFI/QI rows). Not held = no
+-- limit here (the refresh UPDATE keeps those triggers above market).
+-- 2026-10-07: compares to fin.stop_price (was addcap.cap_stop).
+AND stock.price::numeric < CASE WHEN paid.min_paid IS NOT NULL THEN fin.stop_price
+                                ELSE 'Infinity'::numeric END  -- stock.price: s is vw_signal here
 -- 2026-10-05 (#11) Coinbase minimum order size: base size >= base_min_size
 -- (stock.min_shares) and quote size (shares x effective limit) >=
 -- quote_min_size (stock.min_price). NULL minimum = no limit.
@@ -1053,9 +1044,10 @@ INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_cr
 SELECT
     s.stock_id,
     s.name,
-    -- 2026-10-05: from the "plan" lateral below (formulas unchanged).
-    plan.buy_price,
-    plan.buy_stop_price,
+    -- 2026-10-05: from the "plan" lateral below.
+    -- 2026-10-07: FINAL stop/limit after the below-lowest-paid rule.
+    fin.limit_price AS buy_price,
+    fin.stop_price  AS buy_stop_price,
     plan.shares,
     NOW() AS date_created,
     gen_random_uuid(),
@@ -1087,40 +1079,35 @@ CROSS JOIN LATERAL (
         COALESCE((SELECT value::numeric FROM config WHERE key = 'book_min_ask_notional_mult'), 5)    AS min_ask_mult,
         EXISTS (SELECT 1 FROM bulk_best_bid_ask WHERE loaded_at > NOW() - INTERVAL '3 minutes')     AS bba_fresh
 ) bookcfg
--- 2026-10-05 the order this INSERT will create (formulas unchanged from the
--- old inline SELECT list): trigger 1% above current price, limit 1.1%
--- above, shares = clip dollars / price.
+-- 2026-10-07 cash-scaled gap from the ONE shared place (vw_buy_stop_gap).
+-- Theodore: cash scaling on EVERY buy, so the average-down add now uses it
+-- too (was a flat trigger 1% / limit 1.1% above price). The below-lowest-
+-- paid rule then normally pins it, since this coin is always held.
+CROSS JOIN vw_buy_stop_gap g
+-- The order this INSERT will create: trigger = price x (1 + gap), limit =
+-- trigger x 1.01, shares = clip dollars / price.
 CROSS JOIN LATERAL (
     SELECT
-        TRUNC(s.price::numeric * 1.011, s.price_rounding::integer)               AS buy_price,
-        TRUNC(s.price::numeric * 1.01,  s.price_rounding::integer)               AS buy_stop_price,
+        TRUNC(s.price::numeric * (1 + g.gap) * 1.01, s.price_rounding::integer)  AS buy_price,
+        TRUNC(s.price::numeric * (1 + g.gap),        s.price_rounding::integer)  AS buy_stop_price,
         TRUNC((sized.clip_usd / s.price::numeric), s.share_rounding::integer)    AS shares
 ) plan
--- 2026-10-05 add-on cap preview: the "add-on buy cap" UPDATE near the end
--- of this procedure pins an unsent buy on a coin already held to
--- add_buy_cap_ratio (default 0.99) x the cheapest open bag (limit 1% above).
--- Computed here so the gates judge the trigger/limit the row will really
--- have. NULLs when the coin has no open filled bag (no cap applies).
+-- 2026-10-07 below-lowest-paid rule (replaces the add_buy_cap_ratio 0.99
+-- cap preview): final stop/limit the row is written with.
 CROSS JOIN LATERAL (
-    SELECT
-        TRUNC(MIN(f.buy_filled_price)::numeric
-              * COALESCE((SELECT value::numeric FROM config WHERE key = 'add_buy_cap_ratio'), 0.99),
-              s.price_rounding::integer) AS cap_stop,
-        TRUNC(MIN(f.buy_filled_price)::numeric
-              * COALESCE((SELECT value::numeric FROM config WHERE key = 'add_buy_cap_ratio'), 0.99) * 1.01,
-              s.price_rounding::integer) AS cap_limit
+    SELECT MIN(f.buy_filled_price)::numeric AS min_paid
     FROM position f
     WHERE f.stock_id = s.stock_id
     AND f.buy_filled_price IS NOT NULL
     AND f.sell_filled_price IS NULL
-) addcap
--- Effective limit price after the cap (LEAST ignores the NULL cap) and the
--- dollar cost of the order, plain and with the ~1.2% taker-fee pad (1.012,
--- the same pad index.js used for its old per-row cash check).
+) paid
+CROSS JOIN LATERAL fn_buy_below_paid(plan.buy_stop_price, plan.buy_price, paid.min_paid, s.price_rounding::integer) fin
+-- Dollar cost of the REAL order: shares x the final limit, plain and with
+-- the ~1.2% taker-fee pad (1.012).
 CROSS JOIN LATERAL (
     SELECT
-        plan.shares * LEAST(plan.buy_price, addcap.cap_limit)         AS cost_usd,
-        plan.shares * LEAST(plan.buy_price, addcap.cap_limit) * 1.012 AS cost_with_fee
+        plan.shares * fin.limit_price         AS cost_usd,
+        plan.shares * fin.limit_price * 1.012 AS cost_with_fee
 ) eff
 -- 2026-10-07: crypto buys stay USD ONLY on purpose. USDC (vw_balance
 -- name = 'USDC') is never cash here: it is profit parked by the USDC sweep
@@ -1149,6 +1136,9 @@ AND b.available
 -- 2026-10-05 (#2): real cost of this order incl. fee pad (was clip dollars).
   >= eff.cost_with_fee
 AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
+-- Average-down TRIGGER (unchanged on purpose, 2026-10-07): price x 1.011
+-- below the most recent fill. This is the "has price dropped below my last
+-- buy" test, not the order price -- the order is priced by plan/fin above.
 AND TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) < sized.last_filled_price
 AND s.trading_disabled IS NOT TRUE
 -- 2026-10-07: never average down into a stablecoin (stock.is_stablecoin,
@@ -1172,12 +1162,11 @@ AND NOT EXISTS (
 AND (NOT bookcfg.bba_fresh OR bba.spread_pct <= bookcfg.max_spread_pct)
 AND (book.imbalance IS NULL OR book.imbalance >= bookcfg.skip_imbalance)
 AND (book.near_ask_usd IS NULL OR book.near_ask_usd >= eff.cost_usd * bookcfg.min_ask_mult)
--- 2026-10-05 (#3) trigger must already be above price: on a coin already
--- held the cap pins the trigger at addcap.cap_stop, so only create the row
--- when price is under it (was: inserted anyway, then index.js waited for
--- price to fall -- the PNG/DOGE/VVV/GFI/QI rows). No cap = no limit here
--- (the refresh UPDATE keeps uncapped triggers above market).
-AND s.price::numeric < COALESCE(addcap.cap_stop, 'Infinity'::numeric)
+-- 2026-10-05 (#3) trigger must already be above price: only create the
+-- row when price is under the final stop (2026-10-07: fin.stop_price after
+-- the below-lowest-paid rule; was addcap.cap_stop). Not held = no limit.
+AND s.price::numeric < CASE WHEN paid.min_paid IS NOT NULL THEN fin.stop_price
+                            ELSE 'Infinity'::numeric END
 -- 2026-10-05 (#11) Coinbase minimum order size: base size >= base_min_size
 -- (stock.min_shares) and quote size (shares x effective limit) >=
 -- quote_min_size (stock.min_price). NULL minimum = no limit.
@@ -1347,44 +1336,13 @@ AND (
 -- using the same cash-scaled stop gap a fresh pick uses, off current price
 -- instead of the stale signal-time price.
 UPDATE position
-SET buy_stop_price = TRUNC(stock.price::numeric * gap.stop_mult, stock.price_rounding::integer),
-    buy_price = TRUNC(stock.price::numeric * gap.stop_mult * 1.01, stock.price_rounding::integer)
+SET buy_stop_price = TRUNC(stock.price::numeric * (1 + g.gap), stock.price_rounding::integer),
+    buy_price = TRUNC(stock.price::numeric * (1 + g.gap) * 1.01, stock.price_rounding::integer)
 FROM stock
-CROSS JOIN LATERAL (
-    -- Cash-scaled new-buy stop gap: base 2%, stretched by total program
-    -- equity / available USD (same components as the equity calc: filled
-    -- bags at stock.price, USD available, USD hold in open buys, priced
-    -- untracked dust). stop_mult = 1 + 0.02 * (equity / available).
-    -- Falls back to 1.02 when available USD is 0/NULL.
-    SELECT COALESCE(
-        1 + 0.02 * (
-            (
-                COALESCE((
-                    SELECT SUM(p2.shares::numeric * s2.price::numeric)
-                    FROM position p2
-                    JOIN stock s2 ON s2.stock_id = p2.stock_id
-                    WHERE p2.buy_filled_price IS NOT NULL
-                    AND p2.sell_filled_price IS NULL
-                ), 0)
-                + COALESCE((SELECT available::numeric FROM vw_balance WHERE name = 'USD'), 0)
-                + COALESCE((SELECT hold::numeric FROM vw_balance WHERE name = 'USD'), 0)
-                + COALESCE((
-                    SELECT SUM(
-                        CASE
-                            WHEN a.currency IN ('USDS', 'USD1', 'PAX') THEN a.balance::numeric
-                            WHEN st.price IS NOT NULL THEN a.balance::numeric * st.price::numeric
-                            ELSE 0
-                        END
-                    )
-                    FROM vw_position_order_balance_audit a
-                    LEFT JOIN stock st ON st.name = a.name
-                    WHERE a.issue_type = 'untracked_holding'
-                ), 0)
-            ) / NULLIF((SELECT available::numeric FROM vw_balance WHERE name = 'USD'), 0)
-        ),
-        1.02
-    ) AS stop_mult
-) gap
+-- 2026-10-07: cash-scaled gap from the ONE shared place (vw_buy_stop_gap:
+-- buy_stop_base_pct/100 * sqrt(equity / free USD), USD only, no max).
+-- Replaces the inline 1 + 0.02 * (equity / free USD) of 2026-10-05.
+CROSS JOIN vw_buy_stop_gap g
 WHERE position.stock_id = stock.stock_id
 AND position.buy_coinbase_order_id IS NULL
 AND position.buy_filled_price IS NULL
@@ -1393,30 +1351,36 @@ AND position.period_type IS DISTINCT FROM 'listing'
 AND stock.price::numeric >= position.buy_stop_price::numeric;
 
 -- 2026-09-27 add-on buy cap: a buy on a coin you already hold must never be
--- priced above your cheapest open bag. Plans use a cash-scaled stop gap (base 2%) and the
--- reset step just above can raise them again, so OCEAN bag 939 filled at
--- 0.1718 even though bag 926 was bought at 0.1695. This caps the trigger at
--- config.add_buy_cap_ratio (default 0.99 = 1% below) times the cheapest open
--- bag, with the limit 1% above that trigger (0.99 * 1.01 = 0.9999, still
--- below the bag). Only buys not yet sent to Coinbase are touched; live orders
--- are only ever lowered by the remake step. processBuyOrders then waits to
--- place a capped buy until price is below its trigger.
+-- priced above your cheapest open bag (OCEAN bag 939 filled at 0.1718 even
+-- though bag 926 was bought at 0.1695).
+-- 2026-10-07 BELOW-LOWEST-PAID RULE (Theodore) replaces the old math
+-- (stop = config.add_buy_cap_ratio 0.99 x cheapest bag, limit 1% above;
+-- that config row is left in place but no longer read): an unsent buy whose
+-- LIMIT is at/above the lowest buy_filled_price of the coin's open bags gets
+-- limit = the largest tick strictly below that price and stop = limit / 1.01
+-- rounded down to the tick (fn_buy_below_paid, shared with the inserts and
+-- vw_edit_orders). Runs after the stale refresh above, which can raise a
+-- trigger again. Only buys not yet sent to Coinbase are touched; live
+-- orders follow the same rule on every remake (vw_edit_orders).
 UPDATE position p
-SET buy_stop_price = TRUNC(c.min_fill * cap.ratio,        s.price_rounding::integer),
-    buy_price      = TRUNC(c.min_fill * cap.ratio * 1.01, s.price_rounding::integer)
+SET (buy_stop_price, buy_price) = (
+        SELECT b.stop_price, b.limit_price
+        FROM fn_buy_below_paid(p.buy_stop_price::numeric, p.buy_price::numeric,
+                               c.min_fill, s.price_rounding::integer) b
+    )
 FROM stock s,
      (SELECT stock_id, MIN(buy_filled_price)::numeric AS min_fill
       FROM position
       WHERE buy_filled_price IS NOT NULL AND sell_filled_price IS NULL
-      GROUP BY stock_id) c,
-     (SELECT COALESCE((SELECT value::numeric FROM config WHERE key = 'add_buy_cap_ratio'), 0.99) AS ratio) cap
+      GROUP BY stock_id) c
 WHERE p.stock_id = s.stock_id
 AND c.stock_id = p.stock_id
 AND p.buy_coinbase_order_id IS NULL
 AND p.buy_filled_price IS NULL
 -- 2026-10-07: listing rows exempt (plain limit, and never on a held coin).
 AND p.period_type IS DISTINCT FROM 'listing'
-AND p.buy_stop_price::numeric > c.min_fill * cap.ratio;
+AND s.price_rounding IS NOT NULL
+AND p.buy_price::numeric >= c.min_fill;
 
 -- 2026-10-05 (#3) safety net: after the refresh and cap UPDATEs above, an
 -- unsent planned row whose trigger is still not above current price cannot
