@@ -12,10 +12,19 @@ CREATE TABLE IF NOT EXISTS public.profit_history (
     -- 2026-10-07 (migrations/2026-10-07_usdc_profit_sweep.sql):
     -- copied from position at close; swept to USDC by index.js.
     profit_converted_usdc  numeric,
-    -- usdc_convert row that swept it (NULL = not swept yet).
-    usdc_convert_id        integer REFERENCES public.usdc_convert (id)
+    -- USDC sweep state: NULL = not swept, 'pending' = in an in-flight
+    -- convert, 'completed', 'failed' (retried next minute).
+    usdc_convert_status    text
+                           CONSTRAINT profit_history_usdc_convert_status_check
+                           CHECK (usdc_convert_status IS NULL
+                                  OR usdc_convert_status IN ('pending', 'completed', 'failed')),
+    -- Coinbase convert trade id of the latest attempt (set just before commit).
+    usdc_convert_trade_id  text,
+    -- when Coinbase confirmed the convert.
+    usdc_converted_at      timestamptz
 );
 
-CREATE INDEX IF NOT EXISTS profit_history_unswept
+CREATE INDEX IF NOT EXISTS profit_history_usdc_unswept
     ON public.profit_history (profit_history_id)
-    WHERE usdc_convert_id IS NULL AND profit_converted_usdc > 0;
+    WHERE profit_converted_usdc > 0
+    AND usdc_convert_status IS DISTINCT FROM 'completed';

@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict K4GSMFzSwiWpwy4kmuxlezq3joT2QFr5A8B752feFkqt0QvhEoAAwQTAx8zn8c7
+\restrict HRelLC2K2SyCeAgn8Z6IwrLZs8sfQxkIPF1O1XCc5Dh5Ew0LqeHdWcza7T4E6Jc
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -2634,7 +2634,10 @@ CREATE TABLE public.profit_history (
     profit double precision,
     date_created timestamp without time zone DEFAULT now(),
     profit_converted_usdc numeric,
-    usdc_convert_id integer
+    usdc_convert_status text,
+    usdc_convert_trade_id text,
+    usdc_converted_at timestamp with time zone,
+    CONSTRAINT profit_history_usdc_convert_status_check CHECK (((usdc_convert_status IS NULL) OR (usdc_convert_status = ANY (ARRAY['pending'::text, 'completed'::text, 'failed'::text]))))
 );
 
 
@@ -2646,10 +2649,24 @@ COMMENT ON COLUMN public.profit_history.profit_converted_usdc IS 'Copied from po
 
 
 --
--- Name: COLUMN profit_history.usdc_convert_id; Type: COMMENT; Schema: public; Owner: -
+-- Name: COLUMN profit_history.usdc_convert_status; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.profit_history.usdc_convert_id IS 'usdc_convert row that swept this profit to USDC. NULL = still waiting (counted by vw_usdc_sweep_reserve).';
+COMMENT ON COLUMN public.profit_history.usdc_convert_status IS 'USDC sweep state: NULL = not swept yet, pending = in an in-flight convert, completed = converted, failed = retried next minute.';
+
+
+--
+-- Name: COLUMN profit_history.usdc_convert_trade_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.profit_history.usdc_convert_trade_id IS 'Coinbase convert trade id of the latest sweep attempt (set just before commit).';
+
+
+--
+-- Name: COLUMN profit_history.usdc_converted_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.profit_history.usdc_converted_at IS 'When Coinbase confirmed the USD -> USDC convert for this row.';
 
 
 --
@@ -2762,44 +2779,6 @@ ALTER TABLE public.usd_transfer ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY
     NO MAXVALUE
     CACHE 1
 );
-
-
---
--- Name: usdc_convert; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.usdc_convert (
-    id integer NOT NULL,
-    amount_usd numeric NOT NULL,
-    usdc_received numeric,
-    coinbase_trade_id text,
-    status text DEFAULT 'pending'::text NOT NULL,
-    error text,
-    profit_history_ids integer[] NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    completed_at timestamp with time zone,
-    CONSTRAINT usdc_convert_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'submitted'::text, 'success'::text, 'failed'::text])))
-);
-
-
---
--- Name: usdc_convert_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE public.usdc_convert_id_seq
-    AS integer
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: usdc_convert_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE public.usdc_convert_id_seq OWNED BY public.usdc_convert.id;
 
 
 --
@@ -3169,7 +3148,7 @@ CREATE VIEW public.vw_usdc_sweep_reserve AS
                FROM public.config
               WHERE (config.key = 'usdc_sweep_enabled'::text)), 'true'::text) = 'true'::text) THEN COALESCE(( SELECT sum(profit_history.profit_converted_usdc) AS sum
                FROM public.profit_history
-              WHERE ((profit_history.usdc_convert_id IS NULL) AND (profit_history.profit_converted_usdc > (0)::numeric))), (0)::numeric)
+              WHERE ((profit_history.profit_converted_usdc > (0)::numeric) AND (profit_history.usdc_convert_status IS DISTINCT FROM 'completed'::text))), (0)::numeric)
             ELSE (0)::numeric
         END AS reserve_usd;
 
@@ -3178,7 +3157,7 @@ CREATE VIEW public.vw_usdc_sweep_reserve AS
 -- Name: VIEW vw_usdc_sweep_reserve; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.vw_usdc_sweep_reserve IS 'Unswept realized profit (USD) queued for the USDC sweep. Subtracted from free USD by thee_procedure buy gates and the index.js ETF plan. 0 when config.usdc_sweep_enabled <> true.';
+COMMENT ON VIEW public.vw_usdc_sweep_reserve IS 'Unswept realized profit (USD) queued for the USDC sweep (usdc_convert_status not completed). Subtracted from free USD by thee_procedure buy gates and the index.js ETF plan. 0 when config.usdc_sweep_enabled <> true.';
 
 
 --
@@ -3249,13 +3228,6 @@ ALTER TABLE ONLY public.profit_history ALTER COLUMN profit_history_id SET DEFAUL
 --
 
 ALTER TABLE ONLY public.unmatched_fills ALTER COLUMN unmatched_fill_id SET DEFAULT nextval('public.unmatched_fills_unmatched_fill_id_seq'::regclass);
-
-
---
--- Name: usdc_convert id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.usdc_convert ALTER COLUMN id SET DEFAULT nextval('public.usdc_convert_id_seq'::regclass);
 
 
 --
@@ -3451,14 +3423,6 @@ ALTER TABLE ONLY public.usd_transfer
 
 
 --
--- Name: usdc_convert usdc_convert_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.usdc_convert
-    ADD CONSTRAINT usdc_convert_pkey PRIMARY KEY (id);
-
-
---
 -- Name: book_snapshot_name_created_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3529,17 +3493,10 @@ CREATE UNIQUE INDEX position_one_listing_per_stock ON public."position" USING bt
 
 
 --
--- Name: profit_history_unswept; Type: INDEX; Schema: public; Owner: -
+-- Name: profit_history_usdc_unswept; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX profit_history_unswept ON public.profit_history USING btree (profit_history_id) WHERE ((usdc_convert_id IS NULL) AND (profit_converted_usdc > (0)::numeric));
-
-
---
--- Name: usdc_convert_one_open; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX usdc_convert_one_open ON public.usdc_convert USING btree ((true)) WHERE (status = ANY (ARRAY['pending'::text, 'submitted'::text]));
+CREATE INDEX profit_history_usdc_unswept ON public.profit_history USING btree (profit_history_id) WHERE ((profit_converted_usdc > (0)::numeric) AND (usdc_convert_status IS DISTINCT FROM 'completed'::text));
 
 
 --
@@ -3558,16 +3515,8 @@ ALTER TABLE ONLY public.etf_buy
 
 
 --
--- Name: profit_history profit_history_usdc_convert_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.profit_history
-    ADD CONSTRAINT profit_history_usdc_convert_id_fkey FOREIGN KEY (usdc_convert_id) REFERENCES public.usdc_convert(id);
-
-
---
 -- PostgreSQL database dump complete
 --
 
-\unrestrict K4GSMFzSwiWpwy4kmuxlezq3joT2QFr5A8B752feFkqt0QvhEoAAwQTAx8zn8c7
+\unrestrict HRelLC2K2SyCeAgn8Z6IwrLZs8sfQxkIPF1O1XCc5Dh5Ew0LqeHdWcza7T4E6Jc
 

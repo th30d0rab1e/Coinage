@@ -104,7 +104,8 @@ async function main () {
         await checkUnmatchedFills();
         // 2026-10-07: move realized profit (profit_history.profit_converted_usdc,
         // filled in by thee_procedure at close) from USD to USDC once the
-        // unswept total reaches config.usdc_sweep_min_usd. Catches and logs its
+        // unswept total reaches config.usdc_sweep_min_usd (state is kept on
+        // profit_history.usdc_convert_status / _trade_id / usdc_converted_at). Catches and logs its
         // own errors and never throws, so a Coinbase hiccup here cannot break
         // the rest of this minute (buys, sells, remakes still run).
         await sweepProfitToUsdc();
@@ -1782,26 +1783,31 @@ async function processHistoricalPrices () {
 //
 // thee_procedure stores each close's net profit (after both fees, losses = 0)
 // in profit_history.profit_converted_usdc. This sweeps the unswept total from
-// USD into USDC so the bot (which only spends USD) cannot trade it away:
+// USD into USDC so the bot (which only spends USD) cannot trade it away. The
+// state lives on the profit_history rows themselves:
+//   usdc_convert_status   NULL -> 'pending' -> 'completed' | 'failed'
+//   usdc_convert_trade_id Coinbase convert trade id (written just BEFORE the
+//                         commit is sent, so pending + trade id = commit sent)
+//   usdc_converted_at     set when Coinbase confirms
 //
 //   1. config.usdc_sweep_enabled must be 'true' (kill switch).
-//   2. Only one sweep at a time: a Postgres advisory lock (an overlapping
-//      cron run just skips), plus a unique index allowing a single
-//      pending/submitted usdc_convert row.
-//   3. Finish any earlier unfinished attempt first (resolveOpenUsdcSweep).
-//   4. Sum profit_converted_usdc > 0 over rows with usdc_convert_id NULL.
+//   2. One sweep at a time: a Postgres advisory lock (an overlapping cron run
+//      just skips), and rows are claimed ('pending') in one transaction that
+//      refuses if any row is already pending.
+//   3. Settle leftovers first (resolveUsdcSweepRows): pending/failed rows that
+//      carry a trade id are re-checked with Coinbase before anything retries.
+//   4. Sum profit_converted_usdc > 0 over rows with status NULL or 'failed'.
 //      Do nothing below config.usdc_sweep_min_usd ($1.00; Coinbase's own
 //      convert minimum is lower, a $0.25 quote was accepted) or when live
 //      free USD does not cover it.
-//   5. Insert a 'pending' usdc_convert row listing the exact rows, quote
-//      that amount USD -> USDC, sanity check it (>= 99.5% back, no fee),
-//      mark 'submitted', commit, poll briefly.
-//   6. Coinbase says COMPLETED -> in ONE transaction mark the row 'success'
-//      with usdc_received and stamp those profit_history rows with its id.
-//      Refused / failed -> mark 'failed' with the error, stamp nothing, so
-//      the next minute retries. Unknown (commit sent, no answer yet) -> stay
-//      'submitted'; the next minute asks Coinbase again (never re-sends).
-// Until rows are stamped, vw_usdc_sweep_reserve keeps that profit out of
+//   5. Claim those rows as 'pending', quote that exact amount USD -> USDC,
+//      sanity check it (>= 99.5% back, no fee), save the trade id on the
+//      rows, commit, poll briefly.
+//   6. COMPLETED -> one transaction: status 'completed', usdc_converted_at.
+//      Refused / failed -> status 'failed' (next minute retries, after
+//      re-checking the trade). No answer yet -> stays 'pending' with its
+//      trade id; the next minute asks Coinbase again (never re-sends).
+// Until rows are completed, vw_usdc_sweep_reserve keeps that profit out of
 // the buy gates, so it is still in USD when the sweep runs.
 // ---------------------------------------------------------------------------
 const USDC_SWEEP_LOCK_KEY = 2026100701   // arbitrary, unique to this sweep
@@ -1822,68 +1828,66 @@ async function usdcSweepReserve() {
     }
 }
 
-// Success: mark the attempt done and stamp exactly its rows, atomically, so
-// rows are never marked swept without a recorded success (or vice versa).
-async function finishUsdcSweep(client, row, trade) {
-    await client.query('BEGIN')
-    try {
-        await client.query(
-            `UPDATE usdc_convert
-             SET status = 'success', usdc_received = $2, coinbase_trade_id = COALESCE(coinbase_trade_id, $3),
-                 error = NULL, completed_at = NOW()
-             WHERE id = $1`,
-            [row.id, trade.receivedValue, trade.tradeId || null]
-        )
-        const stamped = await client.query(
-            `UPDATE profit_history SET usdc_convert_id = $1
-             WHERE profit_history_id = ANY($2::int[]) AND usdc_convert_id IS NULL`,
-            [row.id, row.profit_history_ids]
-        )
-        await client.query('COMMIT')
-        console.log(`USDC sweep OK #${row.id}: $${Number(row.amount_usd).toFixed(2)} USD -> ${trade.received} (${stamped.rowCount} closes stamped, trade ${trade.tradeId})`)
-    } catch (error) {
-        await client.query('ROLLBACK')
-        throw error
-    }
+// Success: mark every row of this attempt completed in ONE statement (one
+// transaction), keyed by the trade id so only that attempt's rows change.
+async function completeUsdcSweep(client, tradeId, trade) {
+    const res = await client.query(
+        `UPDATE profit_history
+         SET usdc_convert_status = 'completed', usdc_converted_at = NOW()
+         WHERE usdc_convert_trade_id = $1 AND usdc_convert_status IN ('pending', 'failed')
+         RETURNING profit_converted_usdc`,
+        [tradeId]
+    )
+    const usd = res.rows.reduce((a, r) => a + Number(r.profit_converted_usdc), 0)
+    console.log(`USDC sweep OK: $${usd.toFixed(2)} USD -> ${trade?.received || '?'} (${res.rowCount} closes completed, trade ${tradeId})`)
 }
 
-async function failUsdcSweep(client, row, message) {
+// Failure: flag this attempt's rows 'failed' so the next minute retries them
+// (after re-checking the trade). ids = the claimed rows; the trade id is kept
+// for that re-check when we had one.
+async function failUsdcSweep(client, ids, reason) {
     await client.query(
-        `UPDATE usdc_convert SET status = 'failed', error = $2, completed_at = NOW() WHERE id = $1`,
-        [row.id, String(message).slice(0, 2000)]
+        `UPDATE profit_history SET usdc_convert_status = 'failed'
+         WHERE profit_history_id = ANY($1::int[]) AND usdc_convert_status = 'pending'`,
+        [ids]
     )
-    console.log(`USDC sweep FAILED #${row.id} ($${Number(row.amount_usd).toFixed(2)}): ${message} -- no closes stamped, will retry`)
+    console.log(`USDC sweep FAILED (${ids.length} closes): ${reason} -- will retry next minute`)
 }
 
-// Settle an attempt left open by an earlier run (crash, timeout, slow
-// Coinbase). Returns true if the way is clear for a new sweep.
-//   pending   = commit never sent -> safe to mark failed once 10 min old
-//   submitted = commit was sent   -> only Coinbase's answer settles it
-async function resolveOpenUsdcSweep(client) {
-    const open = await client.query(
-        `SELECT *, created_at < NOW() - INTERVAL '10 minutes' AS stale
-         FROM usdc_convert WHERE status IN ('pending', 'submitted') ORDER BY id`
+// Settle rows left by an earlier run. We hold the advisory lock, so no other
+// run is mid-sweep: any 'pending' row here belongs to a run that ended.
+//   pending, no trade id      -> commit never sent: back to NULL (retry)
+//   pending/failed + trade id -> ask Coinbase about that trade:
+//       COMPLETED -> completed;  CANCELED / never committed -> failed;
+//       STARTED (still running) -> wait, no new sweep this minute.
+// Returns true when it is safe to start a new sweep.
+async function resolveUsdcSweepRows(client) {
+    await client.query(
+        `UPDATE profit_history SET usdc_convert_status = NULL
+         WHERE usdc_convert_status = 'pending' AND usdc_convert_trade_id IS NULL`
     )
-    for (const row of open.rows) {
-        if (row.status === 'pending') {
-            if (!row.stale) return false   // a live run may still be working on it
-            await failUsdcSweep(client, row, 'abandoned before commit (no commit was sent)')
-            continue
-        }
-        // submitted: ask Coinbase what happened to the trade
-        if (!row.coinbase_trade_id) {
-            console.log(`USDC sweep ERROR #${row.id}: submitted without a trade id -- check Coinbase by hand, sweeps paused`)
-            return false
-        }
-        const t = await convertUsdc.getConvertTrade(row.coinbase_trade_id, 'USD', 'USDC')
+    const open = await client.query(
+        `SELECT usdc_convert_trade_id AS trade_id,
+                BOOL_OR(usdc_convert_status = 'pending') AS any_pending,
+                ARRAY_AGG(profit_history_id) AS ids
+         FROM profit_history
+         WHERE usdc_convert_status IN ('pending', 'failed')
+         AND usdc_convert_trade_id IS NOT NULL
+         GROUP BY usdc_convert_trade_id`
+    )
+    for (const g of open.rows) {
+        const t = await convertUsdc.getConvertTrade(g.trade_id, 'USD', 'USDC')
         if (t.status === 'TRADE_STATUS_COMPLETED') {
-            await finishUsdcSweep(client, row, t)
-        } else if (t.status === 'TRADE_STATUS_CANCELED') {
-            await failUsdcSweep(client, row, `Coinbase canceled the trade${t.cancellationReason ? `: ${t.cancellationReason}` : ''}`)
-        } else {
-            if (row.stale) console.log(`USDC sweep ERROR #${row.id}: still ${t.status} after 10+ min (trade ${row.coinbase_trade_id}) -- sweeps paused until it settles`)
+            await completeUsdcSweep(client, g.trade_id, t)
+        } else if (t.status === 'TRADE_STATUS_STARTED') {
+            console.log(`USDC sweep waiting: trade ${g.trade_id} still STARTED`)
             return false
+        } else if (g.any_pending) {
+            // CANCELED, or a quote that was never committed (UNSPECIFIED /
+            // CREATED): nothing moved, so these rows can be retried.
+            await failUsdcSweep(client, g.ids, `trade ${g.trade_id} ended ${t.status}${t.cancellationReason ? ` (${t.cancellationReason})` : ''}`)
         }
+        // already 'failed' and still not completed: leave as is, it is retried below
     }
     return true
 }
@@ -1899,6 +1903,17 @@ async function sweepProfitToUsdc() {
         if ((conf.usdc_sweep_enabled ?? 'true') !== 'true') return
         const minUsd = Math.max(Number(conf.usdc_sweep_min_usd) || 1.00, 0.01)
 
+        // Cheap early exit (no extra connection / API call) when nothing is due.
+        const quick = await db.query(
+            `SELECT COALESCE(SUM(profit_converted_usdc), 0) AS due,
+                    COUNT(*) FILTER (WHERE usdc_convert_status IS NOT NULL) AS open_rows
+             FROM profit_history
+             WHERE profit_converted_usdc > 0
+             AND usdc_convert_status IS DISTINCT FROM 'completed'`
+        )
+        const q = quick?.rows?.[0] || {}
+        if (Number(q.due) < minUsd && Number(q.open_rows) === 0) return
+
         // Dedicated connection: a session advisory lock has to be taken and
         // released on the same connection. A second overlapping run gets
         // false and simply skips this minute.
@@ -1910,19 +1925,17 @@ async function sweepProfitToUsdc() {
             return
         }
 
-        if (!(await resolveOpenUsdcSweep(client))) return
+        if (!(await resolveUsdcSweepRows(client))) return
 
         const due = await client.query(
-            `SELECT profit_history_id, profit_converted_usdc::numeric AS amt
+            `SELECT COALESCE(SUM(profit_converted_usdc), 0)::numeric AS amt
              FROM profit_history
-             WHERE usdc_convert_id IS NULL AND profit_converted_usdc > 0
-             ORDER BY profit_history_id`
+             WHERE profit_converted_usdc > 0
+             AND (usdc_convert_status IS NULL OR usdc_convert_status = 'failed')`
         )
-        if (due.rows.length === 0) return
-        // Values are already whole cents; sum in cents to avoid float drift.
-        const cents = due.rows.reduce((acc, r) => acc + Math.round(Number(r.amt) * 100), 0)
-        const amount = cents / 100
-        if (amount < minUsd) return
+        // Values are whole cents (TRUNC 2 in thee_procedure).
+        const amount = Math.round(Number(due.rows[0].amt) * 100) / 100
+        if (!(amount >= minUsd)) return
 
         const accounts = await ca.gatherBalance()
         const usd = accounts?.find(a => a.currency === 'USD')
@@ -1932,43 +1945,63 @@ async function sweepProfitToUsdc() {
             return
         }
 
-        const ids = due.rows.map(r => r.profit_history_id)
-        const ins = await client.query(
-            `INSERT INTO usdc_convert (amount_usd, profit_history_ids, status)
-             VALUES ($1, $2::int[], 'pending') RETURNING *`,
-            [amount.toFixed(2), ids]
-        )
-        const row = ins.rows[0]
-        console.log(`USDC sweep #${row.id}: converting $${amount.toFixed(2)} profit from ${ids.length} closes USD -> USDC`)
+        // Claim the rows in one transaction. The NOT EXISTS refuses the claim
+        // if any row is already pending (an in-flight sweep), so even without
+        // the advisory lock two runs could never sweep the same profit.
+        await client.query('BEGIN')
+        let claimed
+        try {
+            claimed = await client.query(
+                `UPDATE profit_history
+                 SET usdc_convert_status = 'pending', usdc_convert_trade_id = NULL
+                 WHERE profit_converted_usdc > 0
+                 AND (usdc_convert_status IS NULL OR usdc_convert_status = 'failed')
+                 AND NOT EXISTS (SELECT 1 FROM profit_history x WHERE x.usdc_convert_status = 'pending')
+                 RETURNING profit_history_id, profit_converted_usdc`
+            )
+            await client.query('COMMIT')
+        } catch (error) {
+            await client.query('ROLLBACK')
+            throw error
+        }
+        const ids = claimed.rows.map(r => r.profit_history_id)
+        if (ids.length === 0) return
+        // Convert exactly what was claimed (sum in cents, no float drift).
+        const claimedUsd = claimed.rows.reduce((a, r) => a + Math.round(Number(r.profit_converted_usdc) * 100), 0) / 100
+        console.log(`USDC sweep: converting $${claimedUsd.toFixed(2)} profit from ${ids.length} closes USD -> USDC`)
 
         // Quote (moves nothing) and sanity check.
         let quote
         try {
-            quote = await convertUsdc.createConvertQuote('USD', 'USDC', amount)
+            quote = await convertUsdc.createConvertQuote('USD', 'USDC', claimedUsd)
         } catch (error) {
-            await failUsdcSweep(client, row, `quote: ${error.message}`)
+            await failUsdcSweep(client, ids, `quote: ${error.message}`)
             return
         }
-        await client.query(`UPDATE usdc_convert SET coinbase_trade_id = $2 WHERE id = $1`, [row.id, quote.tradeId])
         const problems = convertUsdc.checkQuote(quote, 'USD', 'USDC')
         if (problems.length) {
-            await failUsdcSweep(client, row, `quote refused: ${problems.join('; ')}`)
+            await failUsdcSweep(client, ids, `quote refused: ${problems.join('; ')}`)
             return
         }
 
-        // Mark 'submitted' BEFORE sending the commit: if this process dies
-        // mid-call, the next run asks Coinbase instead of assuming failure.
-        await client.query(`UPDATE usdc_convert SET status = 'submitted' WHERE id = $1`, [row.id])
+        // Save the trade id on the rows BEFORE sending the commit: if this
+        // process dies mid-call, the next run re-checks this trade with
+        // Coinbase instead of guessing.
+        await client.query(
+            `UPDATE profit_history SET usdc_convert_trade_id = $2
+             WHERE profit_history_id = ANY($1::int[]) AND usdc_convert_status = 'pending'`,
+            [ids, quote.tradeId]
+        )
         let status
         try {
             status = await convertUsdc.commitConvertTrade(quote.tradeId, 'USD', 'USDC')
         } catch (error) {
             if (error.status && error.status >= 400 && error.status < 500) {
                 // Coinbase answered and rejected it: nothing moved.
-                await failUsdcSweep(client, row, `commit rejected: ${error.message}`)
+                await failUsdcSweep(client, ids, `commit rejected: ${error.message}`)
             } else {
-                // No / 5xx answer: outcome unknown, leave 'submitted' for next run.
-                console.log(`USDC sweep ERROR #${row.id}: commit outcome unknown (${error.message}) -- will check trade ${quote.tradeId} next run`)
+                // No / 5xx answer: outcome unknown, stays pending for next run.
+                console.log(`USDC sweep ERROR: commit outcome unknown (${error.message}) -- will re-check trade ${quote.tradeId} next run`)
             }
             return
         }
@@ -1978,11 +2011,11 @@ async function sweepProfitToUsdc() {
             status = await convertUsdc.getConvertTrade(quote.tradeId, 'USD', 'USDC')
         }
         if (status.status === 'TRADE_STATUS_COMPLETED') {
-            await finishUsdcSweep(client, row, { ...status, tradeId: quote.tradeId })
+            await completeUsdcSweep(client, quote.tradeId, status)
         } else if (status.status === 'TRADE_STATUS_CANCELED') {
-            await failUsdcSweep(client, row, `Coinbase canceled the trade${status.cancellationReason ? `: ${status.cancellationReason}` : ''}`)
+            await failUsdcSweep(client, ids, `Coinbase canceled the trade${status.cancellationReason ? `: ${status.cancellationReason}` : ''}`)
         } else {
-            console.log(`USDC sweep #${row.id}: trade ${quote.tradeId} still ${status.status}, will check again next run`)
+            console.log(`USDC sweep: trade ${quote.tradeId} still ${status.status}, will re-check next run`)
         }
     } catch (error) {
         console.log('sweepProfitToUsdc() ERROR', error?.message || error)
