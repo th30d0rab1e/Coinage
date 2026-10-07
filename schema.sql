@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict LX7Onmp1ubVXhhfr8Ds0TOL0mwaaad8PmshLD9mQEYjcVxxcsv7i8WVRh6Wll9U
+\restrict 95lJdo2rLdHqlkqNfUG3kJShIjA8EZiiqZIpnugeOITG9DRPhFmDzWRuTGPhzz2
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -557,7 +557,7 @@ AND p.buy_filled_price IS NULL
 AND p.sell_coinbase_order_id IS NULL
 -- 2026-10-07: listing rows are exempt from every generic pending-row rule;
 -- their unsent rows are handled by the listing block below (dropped and
--- re-planned each minute only while the snipe window is open).
+-- re-planned each minute only while the coin's 24h buy window is open).
 AND p.period_type IS DISTINCT FROM 'listing'
 AND GREATEST(p.date_created, p.last_remade_at, p.buy_placed_at, p.buy_released_at)
     < NOW() - make_interval(hours => COALESCE((SELECT value::int FROM config WHERE key = 'pending_buy_ttl_hours'), 24))
@@ -739,31 +739,41 @@ AND w.drop_row IS TRUE;
 
 -- ===========================================================================
 -- 2026-10-07 NEW-LISTING SNIPE (replaces the 2026-10-06 new_at version)
+-- 2026-10-07 (later): 24h WINDOW, migrations/2026-10-07_listing_24h_window.sql
 -- ===========================================================================
--- Theodore: the snipe window starts when trading ACTUALLY opens, not at
--- Coinbase products.new_at, and lasts config.listing_window_minutes
--- (default 5; "5 minutes, 15 at most" -- change that one config value).
--- Why: a 50-listing study showed trading typically opens ~18h after new_at
--- (only 2/50 traded within 60 min of it), every product carries a non-empty
--- new_at anyway, and the move is front-loaded (minute-1 buys hit +3% within
--- an hour 80% of the time vs 48% at minute 60). The old
--- "new_at within 60 minutes" gate is gone; new_at is now only a candidate
--- filter inside modules/listingWatch.js.
+-- Theodore: "if its new today it needs a buy order". A coin is snipeable for
+-- a ROLLING config.listing_buy_window_hours (default 24) after its trading
+-- ACTUALLY opens -- not at Coinbase products.new_at, and no longer only the
+-- first 5 minutes (PONS opened 12:20 PM CT on 2026-10-07 while free USD was
+-- short and was never bought).
+-- Why the open time and not new_at: a 50-listing study showed trading
+-- typically opens ~18h after new_at (only 2/50 traded within 60 min of it)
+-- and every product carries a non-empty new_at anyway; new_at is only a
+-- candidate filter inside modules/listingWatch.js.
 --
 -- Window start = listing_watch.trading_open_at, written by index.js
 -- (modules/listingWatch.js) BEFORE this procedure each minute: the EARLIER
--- of the pair's first completed trade (Exchange trade_id 1, or first 1-min
--- candle with volume) and the first time the bot saw the launch
--- restrictions cleared. A product first watched after it had already
--- traded gets its real (old) first-trade time, so stale listings never
--- qualify.
+-- of the pair's first completed trade (Exchange trade_id 1, or -- only for a
+-- launch the watcher actually observed -- the first 1-min candle with
+-- volume) and the first time the bot saw the launch restrictions cleared. A
+-- product first watched after it had already traded gets its real (old)
+-- first-trade time, so a listing older than the window never qualifies.
+--
+-- Two phases inside the window (config.listing_window_minutes, default 5,
+-- now ONLY marks the first phase):
+--   * first listing_window_minutes after open: limit = first trade price
+--     * (1 + listing_limit_cushion_pct / 100) (the move is front-loaded:
+--     minute-1 buys hit +3% within an hour 80% of the time).
+--   * after that, up to listing_buy_window_hours: limit = CURRENT best ask
+--     (bulk_best_bid_ask, loaded this run, < 3 minutes old, ask > 0)
+--     * (1 + cushion) -- hours later the first trade price can be far from
+--     market. Stale / missing ask -> no row this minute (re-tried next
+--     minute). No pump guard (Theodore).
+--   Either way rounded UP to the product's price increment (price_increment,
+--   falling back to quote_increment) so the cushion is never lost to rounding.
 --
 -- The buy (index.js processBuyOrders sends it as a PLAIN LIMIT, GTC, no
 -- stop, no expiry; it rests until it fills or Theodore cancels it):
---   * limit (buy_price) = first trade price * (1 + listing_limit_cushion_pct
---     / 100, default 0.5%), rounded UP to the product's price increment
---     (price_increment, falling back to quote_increment) so the cushion is
---     never lost to rounding.
 --   * shares = listing_buy_usd ($1) / limit, rounded UP to base_increment
 --     (and at least base_min_size) so the order is >= $1 and clears
 --     Coinbase's quote_min_size (usually $1) -- rounding down would land
@@ -773,12 +783,15 @@ AND w.drop_row IS TRUE;
 --     delete, vw_edit_orders remakes, far-buy cash release); each of those
 --     also exempts period_type 'listing' explicitly.
 --   * Selling: the normal sell code once it fills -- no custom take-profit.
+--   * At most config.listing_max_open_bags (default 3) listing rows open at
+--     once (resting buy or filled-unsold bag), one per coin EVER.
 
 -- Unsent listing row from a previous minute (Coinbase rejected it, e.g.
 -- still in auction / cancel-only, or cash was short): drop it so the INSERT
--- below re-plans it with fresh gates -- only while the window is still open.
--- After the window it is simply not re-planned, so nothing sits and blocks
--- the one-listing slot or the ETF gate. Never touches a placed order (same
+-- below re-plans it with fresh gates and a fresh price -- only while the
+-- coin's 24h window is still open. After the window it is simply not
+-- re-planned, so nothing sits and holds a listing_max_open_bags slot or the
+-- ETF gate. Never touches a placed order (same
 -- guards as the generic clean-up: no Coinbase order id, not filled, no sell,
 -- no live order under its client_order_id).
 DELETE FROM position p
@@ -813,14 +826,18 @@ FROM stock s
 JOIN bulk_stock bs     ON bs.id = s.name
 -- Only products the watcher has a real trading-open time for.
 JOIN listing_watch lw  ON lw.product_id = s.name
--- The three tunables (config keys; defaults if a key is missing):
---   listing_window_minutes    = 5    window length after trading_open_at
+-- The tunables (config keys; defaults if a key is missing):
+--   listing_buy_window_hours  = 24   rolling buy window after trading_open_at
+--   listing_window_minutes    = 5    first-trade PRICING phase only (then best ask)
 --   listing_buy_usd           = 1.00 dollars per snipe
---   listing_limit_cushion_pct = 0.5  limit = first trade price + 0.5%
+--   listing_limit_cushion_pct = 0.5  limit = reference price + 0.5%
+--   listing_max_open_bags     = 3    max listing rows open at once
 CROSS JOIN LATERAL (
-    SELECT COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_window_minutes'), 5)      AS window_minutes,
+    SELECT COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_buy_window_hours'), 24)   AS buy_window_hours,
+           COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_window_minutes'), 5)      AS window_minutes,
            COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_buy_usd'), 1.00)         AS buy_usd,
-           COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_limit_cushion_pct'), 0.5) AS cushion_pct
+           COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_limit_cushion_pct'), 0.5) AS cushion_pct,
+           COALESCE((SELECT value::int     FROM config WHERE key = 'listing_max_open_bags'), 3)      AS max_open_bags
 ) cfg
 -- Product increments straight from Coinbase's products payload.
 CROSS JOIN LATERAL (
@@ -829,9 +846,31 @@ CROSS JOIN LATERAL (
            COALESCE(NULLIF(bs.json->>'base_min_size', '')::numeric, 0)                                                     AS base_min,
            COALESCE(NULLIF(bs.json->>'quote_min_size', '')::numeric, 0)                                                    AS quote_min
 ) inc
--- Limit = first trade price + cushion, rounded UP to the price tick.
+-- Current best ask for the pair, only if this run's top-of-book load is
+-- fresh (< 3 minutes, same freshness rule as the spread gate) and the ask
+-- is real. LIMIT 1 so it can never multiply candidate rows.
+LEFT JOIN LATERAL (
+    SELECT bba.best_ask::numeric AS best_ask
+    FROM bulk_best_bid_ask bba
+    WHERE bba.product_id = s.name
+    AND bba.loaded_at > NOW() - INTERVAL '3 minutes'
+    AND bba.best_ask > 0
+    LIMIT 1
+) ask ON TRUE
+-- Reference price by phase: the first trade inside the first
+-- listing_window_minutes after open, the fresh best ask after that (NULL
+-- when the ask is stale/missing -> limit NULL -> "px.limit_price > 0"
+-- below drops the row this minute). Limit = reference + cushion, rounded
+-- UP to the price tick.
 CROSS JOIN LATERAL (
-    SELECT CEIL(lw.first_trade_price * (1 + cfg.cushion_pct / 100) / inc.tick) * inc.tick AS limit_price
+    SELECT CASE
+               WHEN NOW() - lw.trading_open_at <= cfg.window_minutes * INTERVAL '1 minute'
+               THEN lw.first_trade_price
+               ELSE ask.best_ask
+           END AS ref_price
+) ref
+CROSS JOIN LATERAL (
+    SELECT CEIL(ref.ref_price * (1 + cfg.cushion_pct / 100) / inc.tick) * inc.tick AS limit_price
 ) px
 -- Size = $buy_usd at the limit, rounded UP to the base increment, >= base_min_size.
 CROSS JOIN LATERAL (
@@ -873,7 +912,7 @@ LEFT JOIN LATERAL (
 -- an alias of this -USD pair (same order book, so the first-trade price,
 -- increments and launch flags checked above on the -USD row apply to it).
 -- NULL = cannot fund either way -> no snipe this minute (re-tried next
--- minute while the window is open, as before).
+-- minute while the 24h window is open).
 CROSS JOIN LATERAL (
     SELECT CASE
         WHEN cash.usd_free >= cash.cost THEN 'USD'
@@ -920,12 +959,19 @@ AND s.name LIKE '%-USD'
 -- aborts this procedure call for that minute instead of hiding the bug.
 AND p.position_id IS NULL
 AND ph.profit_history_id IS NULL
--- THE WINDOW: trading opened at most listing_window_minutes ago.
+-- THE WINDOW: trading opened at most listing_buy_window_hours (24) ago --
+-- rolling from the open, not a calendar day (Theodore).
 AND lw.trading_open_at IS NOT NULL
 AND lw.trading_open_at <= NOW()
-AND NOW() - lw.trading_open_at <= cfg.window_minutes * INTERVAL '1 minute'
--- The limit is priced off the first trade, so wait (inside the window)
--- until one exists if the window was opened by "restrictions cleared".
+AND NOW() - lw.trading_open_at <= cfg.buy_window_hours * INTERVAL '1 hour'
+-- A snipe that ended with NO fill (Theodore cancelled it, or Coinbase
+-- expired/failed it) means that coin is done: index.js
+-- reconcileListingBuys() deleted the row and stamped snipe_cancelled_at, so
+-- the 24h window must not re-snipe it.
+AND lw.snipe_cancelled_at IS NULL
+-- A real first trade must exist (the first phase is priced off it, and it
+-- proves the pair actually trades) even if the window was opened by
+-- "restrictions cleared".
 AND lw.first_trade_price > 0
 -- Tradable now. limit_only is ALLOWED on purpose: the first minutes after
 -- the first trade are normally Coinbase's launch limit-only phase, and a
@@ -942,13 +988,18 @@ AND COALESCE(bs.json->>'is_disabled', 'false') NOT IN ('true', 't', '1')
 AND COALESCE(bs.auction_mode, bs.json->>'auction_mode', 'false') NOT IN ('true', 't', '1')
 AND COALESCE(bs.cancel_only, bs.json->>'cancel_only', 'false') NOT IN ('true', 't', '1')
 AND COALESCE(bs.post_only, bs.json->>'post_only', 'false') NOT IN ('true', 't', '1')
--- One-coin mutex (unchanged): no other listing bag open -- a resting
--- unfilled listing order or a filled-unsold listing bag both count.
-AND NOT EXISTS (
-    SELECT 1 FROM position lp
+-- Open-bag cap (2026-10-07, replaces the one-listing-at-a-time mutex so a
+-- second coin opening the same day is not blocked by the first one's bag):
+-- fewer than listing_max_open_bags (3) listing rows open -- a resting
+-- unfilled listing order or a filled-unsold listing bag both count (unsent
+-- rows were dropped just above). Duplicates per coin are still impossible:
+-- the per-coin-ever LEFT JOIN guards above + position_one_listing_per_stock.
+-- With LIMIT 1 below at most one new listing row is added per minute.
+AND (
+    SELECT count(*) FROM position lp
     WHERE lp.period_type = 'listing'
     AND lp.sell_filled_price IS NULL
-)
+) < cfg.max_open_bags
 -- Order sanity / Coinbase minimums.
 AND inc.tick IS NOT NULL
 AND inc.lot IS NOT NULL
@@ -1554,8 +1605,8 @@ AND p.sell_coinbase_order_id IS NULL
 AND NOT EXISTS (
     SELECT 1 FROM bulk_open_orders o WHERE o.client_order_id = p.buy_order_id
 )
--- 2026-10-07: listing rows exempt (no stop; a first-trade-priced limit may
--- legitimately sit below the current price).
+-- 2026-10-07: listing rows exempt (no stop; a listing limit -- first trade
+-- or best ask + cushion -- may legitimately sit below the current price).
 AND p.period_type IS DISTINCT FROM 'listing'
 AND s.price::numeric >= p.buy_stop_price::numeric;
 
@@ -3642,5 +3693,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict LX7Onmp1ubVXhhfr8Ds0TOL0mwaaad8PmshLD9mQEYjcVxxcsv7i8WVRh6Wll9U
+\unrestrict 95lJdo2rLdHqlkqNfUG3kJShIjA8EZiiqZIpnugeOITG9DRPhFmDzWRuTGPhzz2
 
