@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict lmulK5pI9mxet53CND2FrItJCiLrcqXCZvDPcK2fn0q5oaNzSctrsK602aTsYn4
+\restrict OcaFBmXh7rdhMsitRWR2XfS2xzH01e9UFMdjf6b33tHPFpQH2KISJ2zpuEFVIdC
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -790,7 +790,14 @@ AND NOT EXISTS (
     SELECT 1 FROM bulk_open_orders o WHERE o.client_order_id = p.buy_order_id
 );
 
-INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
+-- 2026-10-07 USDC FALLBACK (Theodore; db/migrations/2026-10-07_listing_usdc_fallback.sql):
+-- pay with USD when free USD covers the snipe (unchanged rule), else with
+-- USDC on the coin's -USDC twin (same order book; alias = the -USD pair)
+-- when config.listing_usdc_fallback = 'true'. buy_quote_currency records
+-- the choice (NULL = USD, 'USDC'); index.js listingBuyProductId() sends the
+-- order to <COIN>-USDC for 'USDC'. name stays <COIN>-USD and the sell goes
+-- on -USD as for every other bag. See the "fund" laterals below.
+INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type, buy_quote_currency)
 SELECT
     s.stock_id,
     s.name,
@@ -799,12 +806,13 @@ SELECT
     sz.shares               AS shares,          -- ~$1 at the limit price
     NOW()                   AS date_created,
     gen_random_uuid(),
-    'listing'
+    'listing',
+    -- NULL = USD (the -USD pair, as before); 'USDC' = buy on <COIN>-USDC.
+    CASE WHEN fund.funding = 'USDC' THEN 'USDC' END AS buy_quote_currency
 FROM stock s
 JOIN bulk_stock bs     ON bs.id = s.name
 -- Only products the watcher has a real trading-open time for.
 JOIN listing_watch lw  ON lw.product_id = s.name
-CROSS JOIN vw_balance b
 -- The three tunables (config keys; defaults if a key is missing):
 --   listing_window_minutes    = 5    window length after trading_open_at
 --   listing_buy_usd           = 1.00 dollars per snipe
@@ -829,6 +837,59 @@ CROSS JOIN LATERAL (
 CROSS JOIN LATERAL (
     SELECT GREATEST(CEIL(cfg.buy_usd / px.limit_price / inc.lot) * inc.lot, inc.base_min) AS shares
 ) sz
+-- 2026-10-07: cash for the snipe, both currencies. (Replaces the old
+-- CROSS JOIN vw_balance b / WHERE b.name = 'USD' gate.)
+--   usd_free  = free USD (vw_balance.available, i.e. after holds of live
+--               orders) minus realized profit queued for the USDC sweep
+--               (vw_usdc_sweep_reserve) -- same as the old gate. The ETF
+--               reserve is still not subtracted: listing is priority one and
+--               index.js skips ETF orders while a listing bag is open.
+--   usdc_free = free USDC (vw_balance name = 'USDC', available = after
+--               holds, so resting USDC ETF limits are already excluded).
+--               Nothing else needs USDC this minute: processEquityEtfBuys()
+--               runs after this procedure and skips every ETF order while a
+--               listing row exists, and the profit sweep only ADDS USDC.
+--   cost      = order incl. the ~1.2% taker-fee pad (same pad as before).
+-- A missing USD/USDC row (balance fetch failed) gives NULL, so that
+-- currency simply cannot fund the snipe (fail-closed, as before).
+CROSS JOIN LATERAL (
+    SELECT (SELECT available::numeric FROM vw_balance WHERE name = 'USD')
+             - COALESCE((SELECT reserve_usd FROM vw_usdc_sweep_reserve), 0)  AS usd_free,
+           (SELECT available::numeric FROM vw_balance WHERE name = 'USDC')   AS usdc_free,
+           sz.shares * px.limit_price * 1.012                                AS cost,
+           -- Kill switch; a missing row means OFF.
+           COALESCE((SELECT value FROM config WHERE key = 'listing_usdc_fallback'), 'false') = 'true' AS usdc_on
+) cash
+-- The coin's -USDC twin from this minute's products payload (bulk_stock
+-- holds every product, -USDC pairs included). LIMIT 1 so it can never
+-- multiply candidate rows.
+LEFT JOIN LATERAL (
+    SELECT x.* FROM bulk_stock x
+    WHERE x.id = regexp_replace(s.name, '-USD$', '-USDC')
+    LIMIT 1
+) bsc ON TRUE
+-- Funding decision: USD first (unchanged behaviour), then USDC only if the
+-- fallback is on, USDC covers it, and the twin is tradable right now AND is
+-- an alias of this -USD pair (same order book, so the first-trade price,
+-- increments and launch flags checked above on the -USD row apply to it).
+-- NULL = cannot fund either way -> no snipe this minute (re-tried next
+-- minute while the window is open, as before).
+CROSS JOIN LATERAL (
+    SELECT CASE
+        WHEN cash.usd_free >= cash.cost THEN 'USD'
+        WHEN cash.usdc_on
+         AND cash.usdc_free >= cash.cost
+         AND bsc.id IS NOT NULL
+         AND bsc.json->>'alias' = s.name
+         AND COALESCE(bsc.status, bsc.json->>'status', '') = 'online'
+         AND COALESCE(bsc.trading_disabled, bsc.json->>'trading_disabled', 'false') NOT IN ('true', 't', '1')
+         AND COALESCE(bsc.json->>'is_disabled', 'false') NOT IN ('true', 't', '1')
+         AND COALESCE(bsc.auction_mode, bsc.json->>'auction_mode', 'false') NOT IN ('true', 't', '1')
+         AND COALESCE(bsc.cancel_only, bsc.json->>'cancel_only', 'false') NOT IN ('true', 't', '1')
+         AND COALESCE(bsc.post_only, bsc.json->>'post_only', 'false') NOT IN ('true', 't', '1')
+        THEN 'USDC'
+    END AS funding
+) fund
 -- PRIMARY duplicate guard (Theodore): a coin that already has ANY position
 -- row (any period_type, pending or filled) never gets a listing row -- so
 -- the snipe can never create a second row for a new coin. LEFT JOIN ... IS
@@ -848,12 +909,9 @@ LEFT JOIN (
     WHERE period_type = 'listing'
     GROUP BY stock_id
 ) ph ON ph.stock_id = s.stock_id
--- 2026-10-07: crypto buys stay USD ONLY on purpose. USDC (vw_balance
--- name = 'USDC') is never cash here: it is profit parked by the USDC sweep
--- and the pot USDC-capable ETFs buy with (index.js fundAttemptsByCurrency).
--- vw_etf_cash_reserve holds only USD-funded ETF attempts.
-WHERE b.name = 'USD'
-AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
+-- 2026-10-07: the LISTING SNIPE is the one buy that may use USDC (fallback
+-- above, only when USD is short). Every other crypto buy below stays USD only.
+WHERE (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
 AND s.name LIKE '%-USD'
 -- Duplicate guards (see the two LEFT JOINs above) -- the PRIMARY guard.
 -- DB backstop: partial unique index position_one_listing_per_stock
@@ -900,14 +958,9 @@ AND sz.shares * px.limit_price >= inc.quote_min
 -- Keep it ~$buy_usd: skip a coin whose base increment / minimum would force
 -- a much bigger order (> 1.25x listing_buy_usd).
 AND sz.shares * px.limit_price <= cfg.buy_usd * 1.25
--- Cash: free USD must cover the order incl. the ~1.2% taker-fee pad (same
--- pad the other buy gates use). Listing is priority one, so the ETF reserve
--- is not subtracted (index.js skips ETF orders while a listing bag is open).
--- 2026-10-07: minus realized profit queued for the USDC sweep
--- (vw_usdc_sweep_reserve), so the snipe cannot spend it either.
-AND b.available::numeric
-    - COALESCE((SELECT reserve_usd FROM vw_usdc_sweep_reserve), 0)
-    >= sz.shares * px.limit_price * 1.012
+-- Cash: USD (minus the sweep reserve) or, as the fallback, USDC must cover
+-- the order incl. the ~1.2% fee pad -- decided in the "fund" lateral above.
+AND fund.funding IS NOT NULL
 ORDER BY lw.trading_open_at DESC
 LIMIT 1;
 
@@ -1623,14 +1676,17 @@ AND p.sell_fee IS NOT NULL;
 -- together.
 -- 2026-10-07: also carries profit_converted_usdc over (Step 1b) and only
 -- records rows where it is filled in.
-INSERT INTO profit_history (stock_id, name, period_type, buy_coinbase_order_id, sell_fills_id, buy_fee, sell_fee, profit, profit_converted_usdc)
+-- 2026-10-07: also carries buy_quote_currency (NULL = USD, 'USDC' = listing
+-- snipe bought on <COIN>-USDC); profit math is unchanged (USDC = USD 1:1).
+INSERT INTO profit_history (stock_id, name, period_type, buy_coinbase_order_id, sell_fills_id, buy_fee, sell_fee, profit, profit_converted_usdc, buy_quote_currency)
 SELECT
     p.stock_id, p.name, p.period_type, p.buy_coinbase_order_id, p.sell_coinbase_order_id AS sell_fills_id,
     TRUNC(p.buy_fee::numeric, 2) AS buy_fee,
     TRUNC(p.sell_fee::numeric, 2) AS sell_fee,
     TRUNC(((p.sell_filled_price::numeric * p.shares::numeric - p.sell_fee::numeric)
          - (p.buy_filled_price::numeric * p.shares::numeric + p.buy_fee::numeric))::numeric, 2) AS profit,
-    p.profit_converted_usdc
+    p.profit_converted_usdc,
+    p.buy_quote_currency
 FROM position p
 WHERE p.buy_coinbase_order_id IS NOT NULL
 AND p.sell_coinbase_order_id IS NOT NULL
@@ -3578,5 +3634,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict lmulK5pI9mxet53CND2FrItJCiLrcqXCZvDPcK2fn0q5oaNzSctrsK602aTsYn4
+\unrestrict OcaFBmXh7rdhMsitRWR2XfS2xzH01e9UFMdjf6b33tHPFpQH2KISJ2zpuEFVIdC
 
