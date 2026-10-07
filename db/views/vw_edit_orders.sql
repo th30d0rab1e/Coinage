@@ -169,7 +169,10 @@ CROSS JOIN LATERAL (
 ) pr
 WHERE p.sell_coinbase_order_id IS NOT NULL
 AND p.sell_filled_price IS NULL
-AND p.daily_sell = true
+-- 2026-10-07: listing snipe bags trail here too (fixed 0.99 base ratio):
+-- branch 2 needs a price_aggregate_total row for the bag's period_type,
+-- which never exists for 'listing' (and a new coin has no history).
+AND (p.daily_sell = true OR p.period_type = 'listing')
 -- Ratchet: only ever move the stop UP (now against the capped value).
 AND p.sell_stop_price < ns.new_stop::double precision
 -- FIX 2 guard: never place a stop below its own frozen limit.
@@ -183,6 +186,9 @@ AND p.creation_hierarchy = 1
 UNION ALL
 
 -- SELL branch 2 of 2: daily_sell = false, volatility-based base ratio.
+-- 2026-10-07: never serves period_type 'listing' bags -- the
+-- price_aggregate_total join below has no 'listing' rows; listing bags
+-- trail in branch 1 instead. The explicit filter just makes that visible.
 SELECT p.name,
     p.period_type,
     -- Limit stays frozen (see header). Only the stop moves.
@@ -232,6 +238,7 @@ CROSS JOIN LATERAL (
 WHERE p.sell_coinbase_order_id IS NOT NULL
 AND p.sell_filled_price IS NULL
 AND p.daily_sell = false
+AND p.period_type IS DISTINCT FROM 'listing'
 -- Ratchet: only ever move the stop UP (now against the capped value).
 AND p.sell_stop_price < ns.new_stop::double precision
 -- FIX 2 guard: never place a stop below its own frozen limit.
