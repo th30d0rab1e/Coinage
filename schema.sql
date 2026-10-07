@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 9RIop4rEaZJ7nZaHYFQMnXvHFgRA2NULmm9FB7VxxKNE9OEqTMgZgieAH3DLdFp
+\restrict OQrhh7NMMRiNGr2niBVfwbVhopzpsX1mU36ntESoremgiiqrp5qWE4HdswBDyRJ
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -2553,7 +2553,7 @@ CREATE VIEW public.vw_etf_cash_reserve AS
 -- Name: VIEW vw_etf_cash_reserve; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.vw_etf_cash_reserve IS 'Default USD index.js reserved for this run''s ETF attempts. thee_procedure subtracts it from crypto buy plans. 0 when the equity session is closed or nothing qualifies.';
+COMMENT ON VIEW public.vw_etf_cash_reserve IS 'Default USD index.js reserved for this run''s ETF attempts. thee_procedure subtracts it from crypto buy plans. 0 when the equity session is closed, a listing bag is open (listing is priority one), or nothing qualifies.';
 
 
 --
@@ -3120,5 +3120,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 9RIop4rEaZJ7nZaHYFQMnXvHFgRA2NULmm9FB7VxxKNE9OEqTMgZgieAH3DLdFp
+\unrestrict OQrhh7NMMRiNGr2niBVfwbVhopzpsX1mU36ntESoremgiiqrp5qWE4HdswBDyRJ
 
