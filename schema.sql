@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict rIxXH64IU70jCXOdmSD6s4jzIdtuImB3POStvEi85eeUt4DhDNnkg8UJneomw8Q
+\restrict Y6naDvzKNavPssniKgaqOqTvePAcqEuP9co0ldxLbCOqJRfVUu82MJrxwoXytI1
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -219,6 +219,35 @@ WHERE pat.stock_id = x.stock_id
 AND pat.period_type = x.period_type;
 
 $$;
+
+
+--
+-- Name: fn_buy_below_paid(numeric, numeric, numeric, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_buy_below_paid(p_stop numeric, p_limit numeric, p_min_paid numeric, p_rounding integer) RETURNS TABLE(stop_price numeric, limit_price numeric)
+    LANGUAGE sql IMMUTABLE
+    AS $$
+    SELECT CASE WHEN p_min_paid IS NULL OR p_limit < p_min_paid THEN p_stop
+                -- ROUND(.., p_rounding) only sets the scale (the value is
+                -- already on the tick) so the price prints as e.g. 0.00985,
+                -- exactly like TRUNC(.., price_rounding) elsewhere.
+                ELSE ROUND(FLOOR(cap.lim / 1.01 / cap.tick) * cap.tick, p_rounding) END,
+           CASE WHEN p_min_paid IS NULL OR p_limit < p_min_paid THEN p_limit
+                ELSE ROUND(cap.lim, p_rounding) END
+    FROM (
+        SELECT power(10::numeric, -p_rounding) AS tick,
+               -- largest k * tick strictly below p_min_paid
+               (CEIL(p_min_paid / power(10::numeric, -p_rounding)) - 1) * power(10::numeric, -p_rounding) AS lim
+    ) cap
+$$;
+
+
+--
+-- Name: FUNCTION fn_buy_below_paid(p_stop numeric, p_limit numeric, p_min_paid numeric, p_rounding integer); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.fn_buy_below_paid(p_stop numeric, p_limit numeric, p_min_paid numeric, p_rounding integer) IS 'Below-lowest-paid rule for crypto buys: if limit >= lowest open-bag buy_filled_price, limit = largest tick below it and stop = limit/1.01 rounded down; else unchanged. Used by thee_procedure and vw_edit_orders.';
 
 
 --
@@ -3157,6 +3186,110 @@ UNION
 
 
 --
+-- Name: vw_position_order_balance_audit; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.vw_position_order_balance_audit AS
+ SELECT 'ghost_buy_order'::text AS issue_type,
+    p.name,
+    p.buy_coinbase_order_id AS order_id,
+    NULL::text AS currency,
+    NULL::double precision AS balance,
+    (((('position '::text || p.position_id) || ' references buy order '::text) || p.buy_coinbase_order_id) || ' which is not in bulk_open_orders'::text) AS detail
+   FROM public."position" p
+  WHERE ((p.buy_coinbase_order_id IS NOT NULL) AND (p.buy_filled_price IS NULL) AND (NOT (EXISTS ( SELECT 1
+           FROM public.bulk_open_orders o
+          WHERE (o.order_id = p.buy_coinbase_order_id)))))
+UNION ALL
+ SELECT 'ghost_sell_order'::text AS issue_type,
+    p.name,
+    p.sell_coinbase_order_id AS order_id,
+    NULL::text AS currency,
+    NULL::double precision AS balance,
+    (((('position '::text || p.position_id) || ' references sell order '::text) || p.sell_coinbase_order_id) || ' which is not in bulk_open_orders'::text) AS detail
+   FROM public."position" p
+  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (NOT (EXISTS ( SELECT 1
+           FROM public.bulk_open_orders o
+          WHERE (o.order_id = p.sell_coinbase_order_id)))))
+UNION ALL
+ SELECT 'untracked_holding'::text AS issue_type,
+    (bc.currency || '-USD'::text) AS name,
+    NULL::text AS order_id,
+    bc.currency,
+    bc.balance,
+    (((('bulk_currency shows '::text || bc.balance) || ' '::text) || bc.currency) || ' held with no matching open position'::text) AS detail
+   FROM public.bulk_currency bc
+  WHERE ((bc.currency <> ALL (ARRAY['USD'::text, 'USDC'::text])) AND (bc.balance > (0)::double precision) AND (NOT (EXISTS ( SELECT 1
+           FROM public."position" p
+          WHERE ((p.name = (bc.currency || '-USD'::text)) AND (p.buy_filled_price IS NOT NULL) AND (p.sell_filled_price IS NULL))))))
+UNION ALL
+ SELECT 'orphaned_coinbase_order'::text AS issue_type,
+    o.product_id AS name,
+    o.order_id,
+    NULL::text AS currency,
+    NULL::double precision AS balance,
+    (((((('bulk_open_orders has '::text || o.side) || ' order '::text) || o.order_id) || ' for '::text) || o.product_id) || ' not referenced by any position or unfilled etf_buy'::text) AS detail
+   FROM public.bulk_open_orders o
+  WHERE ((NOT (EXISTS ( SELECT 1
+           FROM public."position" p
+          WHERE ((p.buy_coinbase_order_id = o.order_id) OR (p.sell_coinbase_order_id = o.order_id))))) AND (NOT (EXISTS ( SELECT 1
+           FROM public.etf_buy e
+          WHERE ((e.coinbase_order_id = o.order_id) AND (e.filled = false))))));
+
+
+--
+-- Name: vw_buy_stop_gap; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.vw_buy_stop_gap AS
+ WITH cfg AS (
+         SELECT COALESCE(( SELECT (config.value)::numeric AS value
+                   FROM public.config
+                  WHERE (config.key = 'buy_stop_base_pct'::text)), (2)::numeric) AS base_pct
+        ), cash AS (
+         SELECT ( SELECT (vw_balance.available)::numeric AS available
+                   FROM public.vw_balance
+                  WHERE (vw_balance.name = 'USD'::text)) AS free_usd,
+            ( SELECT (vw_balance.hold)::numeric AS hold
+                   FROM public.vw_balance
+                  WHERE (vw_balance.name = 'USD'::text)) AS usd_hold
+        ), eq AS (
+         SELECT (((COALESCE(( SELECT sum(((p2.shares)::numeric * (s2.price)::numeric)) AS sum
+                   FROM (public."position" p2
+                     JOIN public.stock s2 ON ((s2.stock_id = p2.stock_id)))
+                  WHERE ((p2.buy_filled_price IS NOT NULL) AND (p2.sell_filled_price IS NULL))), (0)::numeric) + COALESCE(cash_1.free_usd, (0)::numeric)) + COALESCE(cash_1.usd_hold, (0)::numeric)) + COALESCE(( SELECT sum(
+                        CASE
+                            WHEN (a.currency = ANY (ARRAY['USDS'::text, 'USD1'::text, 'PAX'::text])) THEN (a.balance)::numeric
+                            WHEN (st.price IS NOT NULL) THEN ((a.balance)::numeric * (st.price)::numeric)
+                            ELSE (0)::numeric
+                        END) AS sum
+                   FROM (public.vw_position_order_balance_audit a
+                     LEFT JOIN public.stock st ON ((st.name = a.name)))
+                  WHERE ((a.issue_type = 'untracked_holding'::text) AND (a.currency <> 'USDC'::text))), (0)::numeric)) AS total_equity
+           FROM cash cash_1
+        )
+ SELECT eq.total_equity,
+    cash.free_usd,
+    cfg.base_pct,
+    (NOT COALESCE((cash.free_usd > (0)::numeric), false)) AS free_usd_fallback,
+    ((cfg.base_pct / (100)::numeric) * sqrt((GREATEST(eq.total_equity, (0)::numeric) /
+        CASE
+            WHEN (cash.free_usd > (0)::numeric) THEN cash.free_usd
+            ELSE 0.01
+        END))) AS gap
+   FROM cfg,
+    cash,
+    eq;
+
+
+--
+-- Name: VIEW vw_buy_stop_gap; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.vw_buy_stop_gap IS 'Cash-scaled buy-stop gap (one row): buy_stop_base_pct/100 * sqrt(total_equity / free USD); free USD 0/NULL -> $0.01. Read by thee_procedure (placement) and vw_edit_orders (buy remake).';
+
+
+--
 -- Name: vw_edit_orders; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -3322,58 +3455,6 @@ CREATE VIEW public.vw_position AS
     count(*) FILTER (WHERE (sell_filled_price IS NOT NULL)) AS sold_unclosed_cnt
    FROM public."position"
   GROUP BY stock_id, name, period_type;
-
-
---
--- Name: vw_position_order_balance_audit; Type: VIEW; Schema: public; Owner: -
---
-
-CREATE VIEW public.vw_position_order_balance_audit AS
- SELECT 'ghost_buy_order'::text AS issue_type,
-    p.name,
-    p.buy_coinbase_order_id AS order_id,
-    NULL::text AS currency,
-    NULL::double precision AS balance,
-    (((('position '::text || p.position_id) || ' references buy order '::text) || p.buy_coinbase_order_id) || ' which is not in bulk_open_orders'::text) AS detail
-   FROM public."position" p
-  WHERE ((p.buy_coinbase_order_id IS NOT NULL) AND (p.buy_filled_price IS NULL) AND (NOT (EXISTS ( SELECT 1
-           FROM public.bulk_open_orders o
-          WHERE (o.order_id = p.buy_coinbase_order_id)))))
-UNION ALL
- SELECT 'ghost_sell_order'::text AS issue_type,
-    p.name,
-    p.sell_coinbase_order_id AS order_id,
-    NULL::text AS currency,
-    NULL::double precision AS balance,
-    (((('position '::text || p.position_id) || ' references sell order '::text) || p.sell_coinbase_order_id) || ' which is not in bulk_open_orders'::text) AS detail
-   FROM public."position" p
-  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (NOT (EXISTS ( SELECT 1
-           FROM public.bulk_open_orders o
-          WHERE (o.order_id = p.sell_coinbase_order_id)))))
-UNION ALL
- SELECT 'untracked_holding'::text AS issue_type,
-    (bc.currency || '-USD'::text) AS name,
-    NULL::text AS order_id,
-    bc.currency,
-    bc.balance,
-    (((('bulk_currency shows '::text || bc.balance) || ' '::text) || bc.currency) || ' held with no matching open position'::text) AS detail
-   FROM public.bulk_currency bc
-  WHERE ((bc.currency <> ALL (ARRAY['USD'::text, 'USDC'::text])) AND (bc.balance > (0)::double precision) AND (NOT (EXISTS ( SELECT 1
-           FROM public."position" p
-          WHERE ((p.name = (bc.currency || '-USD'::text)) AND (p.buy_filled_price IS NOT NULL) AND (p.sell_filled_price IS NULL))))))
-UNION ALL
- SELECT 'orphaned_coinbase_order'::text AS issue_type,
-    o.product_id AS name,
-    o.order_id,
-    NULL::text AS currency,
-    NULL::double precision AS balance,
-    (((((('bulk_open_orders has '::text || o.side) || ' order '::text) || o.order_id) || ' for '::text) || o.product_id) || ' not referenced by any position or unfilled etf_buy'::text) AS detail
-   FROM public.bulk_open_orders o
-  WHERE ((NOT (EXISTS ( SELECT 1
-           FROM public."position" p
-          WHERE ((p.buy_coinbase_order_id = o.order_id) OR (p.sell_coinbase_order_id = o.order_id))))) AND (NOT (EXISTS ( SELECT 1
-           FROM public.etf_buy e
-          WHERE ((e.coinbase_order_id = o.order_id) AND (e.filled = false))))));
 
 
 --
@@ -3863,5 +3944,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict rIxXH64IU70jCXOdmSD6s4jzIdtuImB3POStvEi85eeUt4DhDNnkg8UJneomw8Q
+\unrestrict Y6naDvzKNavPssniKgaqOqTvePAcqEuP9co0ldxLbCOqJRfVUu82MJrxwoXytI1
 
