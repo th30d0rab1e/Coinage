@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict OQrhh7NMMRiNGr2niBVfwbVhopzpsX1mU36ntESoremgiiqrp5qWE4HdswBDyRJ
+\restrict JR61thqrescJUchbcUMohCnQoGTC56GfXOG9RSIdaoilBcbLTimPOUCfEXpJCHm
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -513,6 +513,10 @@ DELETE FROM position p
 WHERE p.buy_coinbase_order_id IS NULL
 AND p.buy_filled_price IS NULL
 AND p.sell_coinbase_order_id IS NULL
+-- 2026-10-07: listing rows are exempt from every generic pending-row rule;
+-- their unsent rows are handled by the listing block below (dropped and
+-- re-planned each minute only while the snipe window is open).
+AND p.period_type IS DISTINCT FROM 'listing'
 AND GREATEST(p.date_created, p.last_remade_at, p.buy_placed_at, p.buy_released_at)
     < NOW() - make_interval(hours => COALESCE((SELECT value::int FROM config WHERE key = 'pending_buy_ttl_hours'), 24))
 AND NOT EXISTS (
@@ -585,6 +589,9 @@ AND p.sell_coinbase_order_id IS NULL
 AND NOT EXISTS (
     SELECT 1 FROM bulk_open_orders o WHERE o.client_order_id = p.buy_order_id
 )
+-- 2026-10-07: listing rows exempt (own rules in the listing block below;
+-- a new pair's launch book is often wider than book_max_spread_pct).
+AND p.period_type IS DISTINCT FROM 'listing'
 AND (
     -- (a) buys paused
     (SELECT value FROM config WHERE key = 'pause_buys') IS DISTINCT FROM 'false'
@@ -657,6 +664,8 @@ WITH RECURSIVE cand AS (
     AND NOT EXISTS (
         SELECT 1 FROM bulk_open_orders o WHERE o.client_order_id = p.buy_order_id
     )
+    -- 2026-10-07: listing rows exempt (own cash gate in the listing INSERT).
+    AND p.period_type IS DISTINCT FROM 'listing'
 ),
 walk AS (
     SELECT 0::bigint AS rn,
@@ -677,48 +686,167 @@ USING walk w
 WHERE p.position_id = w.position_id
 AND w.drop_row IS TRUE;
 
--- 2026-10-06: New-listing snipe ($1). Priority one over ETF-hours and normal
--- crypto buys. Only when Coinbase shows the product tradable (online, not
--- trading_disabled, SPOT USD) AND no other listing bag is still open
--- (pending buy or filled-unsold). Skip if either gate fails. Selling uses
--- the normal sell code -- no custom listing take-profit.
+-- ===========================================================================
+-- 2026-10-07 NEW-LISTING SNIPE (replaces the 2026-10-06 new_at version)
+-- ===========================================================================
+-- Theodore: the snipe window starts when trading ACTUALLY opens, not at
+-- Coinbase products.new_at, and lasts config.listing_window_minutes
+-- (default 5; "5 minutes, 15 at most" -- change that one config value).
+-- Why: a 50-listing study showed trading typically opens ~18h after new_at
+-- (only 2/50 traded within 60 min of it), every product carries a non-empty
+-- new_at anyway, and the move is front-loaded (minute-1 buys hit +3% within
+-- an hour 80% of the time vs 48% at minute 60). The old
+-- "new_at within 60 minutes" gate is gone; new_at is now only a candidate
+-- filter inside modules/listingWatch.js.
+--
+-- Window start = listing_watch.trading_open_at, written by index.js
+-- (modules/listingWatch.js) BEFORE this procedure each minute: the EARLIER
+-- of the pair's first completed trade (Exchange trade_id 1, or first 1-min
+-- candle with volume) and the first time the bot saw the launch
+-- restrictions cleared. A product first watched after it had already
+-- traded gets its real (old) first-trade time, so stale listings never
+-- qualify.
+--
+-- The buy (index.js processBuyOrders sends it as a PLAIN LIMIT, GTC, no
+-- stop, no expiry; it rests until it fills or Theodore cancels it):
+--   * limit (buy_price) = first trade price * (1 + listing_limit_cushion_pct
+--     / 100, default 0.5%), rounded UP to the product's price increment
+--     (price_increment, falling back to quote_increment) so the cushion is
+--     never lost to rounding.
+--   * shares = listing_buy_usd ($1) / limit, rounded UP to base_increment
+--     (and at least base_min_size) so the order is >= $1 and clears
+--     Coinbase's quote_min_size (usually $1) -- rounding down would land
+--     just under $1 and be rejected.
+--   * buy_stop_price = NULL: no stop trigger. NULL also keeps the row out of
+--     every stop-based path (stale-candidate refresh, add-on cap, safety-net
+--     delete, vw_edit_orders remakes, far-buy cash release); each of those
+--     also exempts period_type 'listing' explicitly.
+--   * Selling: the normal sell code once it fills -- no custom take-profit.
+
+-- Unsent listing row from a previous minute (Coinbase rejected it, e.g.
+-- still in auction / cancel-only, or cash was short): drop it so the INSERT
+-- below re-plans it with fresh gates -- only while the window is still open.
+-- After the window it is simply not re-planned, so nothing sits and blocks
+-- the one-listing slot or the ETF gate. Never touches a placed order (same
+-- guards as the generic clean-up: no Coinbase order id, not filled, no sell,
+-- no live order under its client_order_id).
+DELETE FROM position p
+WHERE p.period_type = 'listing'
+AND p.buy_coinbase_order_id IS NULL
+AND p.buy_filled_price IS NULL
+AND p.sell_coinbase_order_id IS NULL
+AND NOT EXISTS (
+    SELECT 1 FROM bulk_open_orders o WHERE o.client_order_id = p.buy_order_id
+);
+
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
 SELECT
     s.stock_id,
     s.name,
-    TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) AS buy_price,
-    TRUNC(s.price::numeric * 1.01,  s.price_rounding::integer) AS buy_stop_price,
-    TRUNC((1.00 / NULLIF(s.price::numeric, 0)), s.share_rounding::integer) AS shares,
-    NOW() AS date_created,
+    px.limit_price          AS buy_price,       -- plain limit price (no stop)
+    NULL                    AS buy_stop_price,  -- no stop trigger at all
+    sz.shares               AS shares,          -- ~$1 at the limit price
+    NOW()                   AS date_created,
     gen_random_uuid(),
     'listing'
 FROM stock s
-JOIN bulk_stock bs ON bs.id = s.name
+JOIN bulk_stock bs     ON bs.id = s.name
+-- Only products the watcher has a real trading-open time for.
+JOIN listing_watch lw  ON lw.product_id = s.name
 CROSS JOIN vw_balance b
+-- The three tunables (config keys; defaults if a key is missing):
+--   listing_window_minutes    = 5    window length after trading_open_at
+--   listing_buy_usd           = 1.00 dollars per snipe
+--   listing_limit_cushion_pct = 0.5  limit = first trade price + 0.5%
+CROSS JOIN LATERAL (
+    SELECT COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_window_minutes'), 5)      AS window_minutes,
+           COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_buy_usd'), 1.00)         AS buy_usd,
+           COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_limit_cushion_pct'), 0.5) AS cushion_pct
+) cfg
+-- Product increments straight from Coinbase's products payload.
+CROSS JOIN LATERAL (
+    SELECT NULLIF(COALESCE(NULLIF(bs.json->>'price_increment', ''), NULLIF(bs.json->>'quote_increment', ''))::numeric, 0) AS tick,
+           NULLIF(NULLIF(bs.json->>'base_increment', '')::numeric, 0)                                                      AS lot,
+           COALESCE(NULLIF(bs.json->>'base_min_size', '')::numeric, 0)                                                     AS base_min,
+           COALESCE(NULLIF(bs.json->>'quote_min_size', '')::numeric, 0)                                                    AS quote_min
+) inc
+-- Limit = first trade price + cushion, rounded UP to the price tick.
+CROSS JOIN LATERAL (
+    SELECT CEIL(lw.first_trade_price * (1 + cfg.cushion_pct / 100) / inc.tick) * inc.tick AS limit_price
+) px
+-- Size = $buy_usd at the limit, rounded UP to the base increment, >= base_min_size.
+CROSS JOIN LATERAL (
+    SELECT GREATEST(CEIL(cfg.buy_usd / px.limit_price / inc.lot) * inc.lot, inc.base_min) AS shares
+) sz
+-- PRIMARY duplicate guard (Theodore): a coin that already has ANY position
+-- row (any period_type, pending or filled) never gets a listing row -- so
+-- the snipe can never create a second row for a new coin. LEFT JOIN ... IS
+-- NULL against ONE row per coin (pre-aggregated by stock_id), so the join
+-- can never multiply candidate rows.
+LEFT JOIN (
+    SELECT stock_id, MIN(position_id) AS position_id
+    FROM position
+    GROUP BY stock_id
+) p ON p.stock_id = s.stock_id
+-- One snipe per coin EVER: a coin whose listing snipe already closed (row
+-- moved to profit_history and deleted from position) is skipped too. Same
+-- LEFT JOIN ... IS NULL shape, also one row per coin.
+LEFT JOIN (
+    SELECT stock_id, MIN(profit_history_id) AS profit_history_id
+    FROM profit_history
+    WHERE period_type = 'listing'
+    GROUP BY stock_id
+) ph ON ph.stock_id = s.stock_id
 WHERE b.name = 'USD'
 AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
-AND b.available > 1.00
 AND s.name LIKE '%-USD'
-AND s.price IS NOT NULL
-AND s.price::numeric > 0
--- Tradable gate: skip if not actually tradeable
+-- Duplicate guards (see the two LEFT JOINs above) -- the PRIMARY guard.
+-- DB backstop: partial unique index position_one_listing_per_stock
+-- (position(stock_id) WHERE period_type = 'listing'). No ON CONFLICT here on
+-- purpose (Theodore): if the backstop ever trips, the unique violation
+-- aborts this procedure call for that minute instead of hiding the bug.
+AND p.position_id IS NULL
+AND ph.profit_history_id IS NULL
+-- THE WINDOW: trading opened at most listing_window_minutes ago.
+AND lw.trading_open_at IS NOT NULL
+AND lw.trading_open_at <= NOW()
+AND NOW() - lw.trading_open_at <= cfg.window_minutes * INTERVAL '1 minute'
+-- The limit is priced off the first trade, so wait (inside the window)
+-- until one exists if the window was opened by "restrictions cleared".
+AND lw.first_trade_price > 0
+-- Tradable now. limit_only is ALLOWED on purpose: the first minutes after
+-- the first trade are normally Coinbase's launch limit-only phase, and a
+-- plain limit order is accepted there. Not during the auction, cancel-only
+-- or post-only (a taker limit would be rejected).
 AND s.trading_disabled IS NOT TRUE
-AND COALESCE(bs.trading_disabled, 'false') NOT IN ('true', 't', '1')
-AND COALESCE(bs.json->>'trading_disabled', 'false') NOT IN ('true', 't', '1')
-AND COALESCE(bs.json->>'status', '') = 'online'
+AND COALESCE(bs.trading_disabled, bs.json->>'trading_disabled', 'false') NOT IN ('true', 't', '1')
+AND COALESCE(bs.status, bs.json->>'status', '') = 'online'
 AND COALESCE(bs.json->>'product_type', 'SPOT') = 'SPOT'
 AND COALESCE(bs.json->>'is_disabled', 'false') NOT IN ('true', 't', '1')
--- Fresh listing window (Coinbase new_at), not merely stock.date_created
-AND (bs.json->>'new_at')::timestamptz > NOW() - INTERVAL '60 minutes'
--- One-coin gate: no other listing bag open
+AND COALESCE(bs.auction_mode, bs.json->>'auction_mode', 'false') NOT IN ('true', 't', '1')
+AND COALESCE(bs.cancel_only, bs.json->>'cancel_only', 'false') NOT IN ('true', 't', '1')
+AND COALESCE(bs.post_only, bs.json->>'post_only', 'false') NOT IN ('true', 't', '1')
+-- One-coin mutex (unchanged): no other listing bag open -- a resting
+-- unfilled listing order or a filled-unsold listing bag both count.
 AND NOT EXISTS (
-    SELECT 1 FROM position p
-    WHERE p.period_type = 'listing'
-    AND p.sell_filled_price IS NULL
+    SELECT 1 FROM position lp
+    WHERE lp.period_type = 'listing'
+    AND lp.sell_filled_price IS NULL
 )
-AND TRUNC((1.00 / NULLIF(s.price::numeric, 0)), s.share_rounding::integer) > 0
-AND TRUNC((1.00 / NULLIF(s.price::numeric, 0)), s.share_rounding::integer) >= COALESCE(s.min_shares, 0)
-ORDER BY (bs.json->>'new_at')::timestamptz DESC
+-- Order sanity / Coinbase minimums.
+AND inc.tick IS NOT NULL
+AND inc.lot IS NOT NULL
+AND px.limit_price > 0
+AND sz.shares > 0
+AND sz.shares * px.limit_price >= inc.quote_min
+-- Keep it ~$buy_usd: skip a coin whose base increment / minimum would force
+-- a much bigger order (> 1.25x listing_buy_usd).
+AND sz.shares * px.limit_price <= cfg.buy_usd * 1.25
+-- Cash: free USD must cover the order incl. the ~1.2% taker-fee pad (same
+-- pad the other buy gates use). Listing is priority one, so the ETF reserve
+-- is not subtracted (index.js skips ETF orders while a listing bag is open).
+AND b.available::numeric >= sz.shares * px.limit_price * 1.012
+ORDER BY lw.trading_open_at DESC
 LIMIT 1;
 
 -- New position: $1 into the highest year-basis-priority coin not already
@@ -1247,6 +1375,8 @@ CROSS JOIN LATERAL (
 WHERE position.stock_id = stock.stock_id
 AND position.buy_coinbase_order_id IS NULL
 AND position.buy_filled_price IS NULL
+-- 2026-10-07: listing rows are plain limits (no stop) -- never re-priced here.
+AND position.period_type IS DISTINCT FROM 'listing'
 AND stock.price::numeric >= position.buy_stop_price::numeric;
 
 -- 2026-09-27 add-on buy cap: a buy on a coin you already hold must never be
@@ -1271,6 +1401,8 @@ WHERE p.stock_id = s.stock_id
 AND c.stock_id = p.stock_id
 AND p.buy_coinbase_order_id IS NULL
 AND p.buy_filled_price IS NULL
+-- 2026-10-07: listing rows exempt (plain limit, and never on a held coin).
+AND p.period_type IS DISTINCT FROM 'listing'
 AND p.buy_stop_price::numeric > c.min_fill * cap.ratio;
 
 -- 2026-10-05 (#3) safety net: after the refresh and cap UPDATEs above, an
@@ -1288,6 +1420,9 @@ AND p.sell_coinbase_order_id IS NULL
 AND NOT EXISTS (
     SELECT 1 FROM bulk_open_orders o WHERE o.client_order_id = p.buy_order_id
 )
+-- 2026-10-07: listing rows exempt (no stop; a first-trade-priced limit may
+-- legitimately sit below the current price).
+AND p.period_type IS DISTINCT FROM 'listing'
 AND s.price::numeric >= p.buy_stop_price::numeric;
 
 -- Clear error_message on unfilled buy positions instead of deleting them.
@@ -1820,7 +1955,12 @@ CREATE TABLE public.bulk_stock (
     cancel_only text,
     system text,
     price text,
-    "json" json
+    "json" json,
+    status text,
+    limit_only text,
+    auction_mode text,
+    is_new text,
+    new_at text
 );
 
 
@@ -2056,6 +2196,72 @@ CREATE SEQUENCE public.fills_fill_id_seq
 --
 
 ALTER SEQUENCE public.fills_fill_id_seq OWNED BY public.fills.fill_id;
+
+
+--
+-- Name: listing_watch; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.listing_watch (
+    product_id text NOT NULL,
+    stock_id integer,
+    is_new boolean,
+    new_at timestamp with time zone,
+    first_watched_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_checked_at timestamp with time zone,
+    check_count integer DEFAULT 0 NOT NULL,
+    last_flags jsonb,
+    restricted_seen_at timestamp with time zone,
+    restrictions_cleared_at timestamp with time zone,
+    first_trade_at timestamp with time zone,
+    first_trade_price numeric,
+    first_trade_source text,
+    trading_open_at timestamp with time zone,
+    trading_open_source text,
+    last_error text
+);
+
+
+--
+-- Name: TABLE listing_watch; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.listing_watch IS 'Candidate new -USD listings (new = true or new_at within 7 days) watched each minute by modules/listingWatch.js until their real trading open time is known. thee_procedure''s listing snipe fires only within config.listing_window_minutes of trading_open_at.';
+
+
+--
+-- Name: COLUMN listing_watch.restricted_seen_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.listing_watch.restricted_seen_at IS 'First time the bot saw the product still launch-restricted (not online, trading_disabled, auction_mode, limit_only or cancel_only).';
+
+
+--
+-- Name: COLUMN listing_watch.restrictions_cleared_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.listing_watch.restrictions_cleared_at IS 'First time the bot observed status online AND NOT trading_disabled/auction_mode/limit_only/cancel_only.';
+
+
+--
+-- Name: COLUMN listing_watch.first_trade_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.listing_watch.first_trade_at IS 'Time of the pair''s first completed trade: Exchange API trade_id 1 (exact), or fallback the first ONE_MINUTE candle with volume > 0 (minute start).';
+
+
+--
+-- Name: COLUMN listing_watch.first_trade_price; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.listing_watch.first_trade_price IS 'Price of that first trade (candle open in the fallback). The listing limit buy is priced off this.';
+
+
+--
+-- Name: COLUMN listing_watch.trading_open_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.listing_watch.trading_open_at IS 'Window start = LEAST(first_trade_at, restrictions_cleared_at). Set once and never moved.';
 
 
 --
@@ -2481,7 +2687,7 @@ CREATE VIEW public.vw_edit_orders AS
    FROM ((public."position" p
      JOIN public.stock s ON ((p.stock_id = s.stock_id)))
      CROSS JOIN LATERAL ( SELECT GREATEST(1.001, (1.05 - ((p.buy_counter)::numeric * 0.005))) AS stop_mult) bal)
-  WHERE ((p.buy_coinbase_order_id IS NOT NULL) AND (p.buy_filled_price IS NULL) AND (p.buy_stop_price > (trunc(((s.price)::numeric * bal.stop_mult), s.price_rounding))::double precision) AND (p.buy_price > (trunc((((s.price)::numeric * bal.stop_mult) * 1.01), s.price_rounding))::double precision))
+  WHERE ((p.buy_coinbase_order_id IS NOT NULL) AND (p.buy_filled_price IS NULL) AND (p.period_type IS DISTINCT FROM 'listing'::text) AND (p.buy_stop_price > (trunc(((s.price)::numeric * bal.stop_mult), s.price_rounding))::double precision) AND (p.buy_price > (trunc((((s.price)::numeric * bal.stop_mult) * 1.01), s.price_rounding))::double precision))
 UNION ALL
  SELECT p.name,
     p.period_type,
@@ -2951,6 +3157,14 @@ ALTER TABLE ONLY public.fills
 
 
 --
+-- Name: listing_watch listing_watch_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.listing_watch
+    ADD CONSTRAINT listing_watch_pkey PRIMARY KEY (product_id);
+
+
+--
 -- Name: portfolio portfolio_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3102,6 +3316,13 @@ CREATE INDEX idx_unmatched_fills_order_id ON public.unmatched_fills USING btree 
 
 
 --
+-- Name: position_one_listing_per_stock; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX position_one_listing_per_stock ON public."position" USING btree (stock_id) WHERE (period_type = 'listing'::text);
+
+
+--
 -- Name: position position_audit_trg; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -3120,5 +3341,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict OQrhh7NMMRiNGr2niBVfwbVhopzpsX1mU36ntESoremgiiqrp5qWE4HdswBDyRJ
+\unrestrict JR61thqrescJUchbcUMohCnQoGTC56GfXOG9RSIdaoilBcbLTimPOUCfEXpJCHm
 

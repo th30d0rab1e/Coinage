@@ -53,16 +53,30 @@ con.downloadStocks = async function (data) {
         const system = data.map(obj => obj.system)
         const price = data.map(obj => obj.price);
         const json = data.map(obj => JSON.stringify(obj))
+        // 2026-10-07: launch-restriction / new-listing fields as real columns
+        // (they were only inside json). modules/listingWatch.js and the
+        // listing snipe in thee_procedure read them. String() keeps the
+        // existing text-column convention ('true' / 'false'); a field the
+        // payload omits is stored as NULL, not the string 'undefined'.
+        const asText = v => (v === undefined || v === null) ? null : String(v)
+        const status = data.map(obj => asText(obj.status))
+        const limit_only = data.map(obj => asText(obj.limit_only))
+        const auction_mode = data.map(obj => asText(obj.auction_mode))
+        const is_new = data.map(obj => asText(obj.new))
+        const new_at = data.map(obj => asText(obj.new_at))
         
         const query = `INSERT INTO bulk_stock 
         (id, quote_increment, base_increment, min_market_funds,
-        trading_disabled, post_only, cancel_only, System, price, json)
+        trading_disabled, post_only, cancel_only, System, price, json,
+        status, limit_only, auction_mode, is_new, new_at)
         SELECT * FROM UNNEST ($1::TEXT[], $2::TEXT[],
         $3::TEXT[], $4::TEXT[], $5::TEXT[], $6::TEXT[]
-        , $7::TEXT[], $8::TEXT[], $9::TEXT[], $10::json[])`;
+        , $7::TEXT[], $8::TEXT[], $9::TEXT[], $10::json[]
+        , $11::TEXT[], $12::TEXT[], $13::TEXT[], $14::TEXT[], $15::TEXT[])`;
 
         const values = [id, quote_increment, base_increment, min_market_funds, trading_disabled, 
-        post_only, cancel_only, system, price, json]
+        post_only, cancel_only, system, price, json,
+        status, limit_only, auction_mode, is_new, new_at]
 
         await con.query(query, values);
   

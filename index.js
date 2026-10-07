@@ -9,6 +9,10 @@ var alpacaMd = require('./modules/alpacaMarketData.js')
 // Completed USD deposits/withdrawals -> usd_transfer (GET-only against
 // Coinbase; writes only that table). See modules/usdTransferSync.js.
 var usdTransferSync = require('./modules/usdTransferSync.js')
+// 2026-10-07: new-listing watcher -> listing_watch.trading_open_at (when a
+// new -USD pair's trading ACTUALLY opens). Public endpoints only; writes
+// only listing_watch. See modules/listingWatch.js.
+var listingWatch = require('./modules/listingWatch.js')
 // Set each run before thee_procedure. False means the equity NORMAL session
 // is closed: place no new ETF order and reserve no USD (resting limits are
 // still synced / expired every run). When it is true, etfAttemptsThisRun is
@@ -35,7 +39,23 @@ async function main () {
         // spread (book gates moved from processBuyOrders into the procedure).
         const pba = processBestBidAsk();
 
-        await Promise.all([pnc, pnb, pnf, poo, ppd, pba]);
+        const [productsPayload] = await Promise.all([pnc, pnb, pnf, poo, ppd, pba]);
+
+        // 2026-10-07: listing snipe window now starts when trading ACTUALLY
+        // opens (first trade / restrictions cleared), not Coinbase new_at.
+        // Must run BEFORE thee_procedure so the listing INSERT sees this
+        // minute's listing_watch.trading_open_at. Reuses this minute's
+        // products payload; only candidate new listings cost an API call
+        // (public, capped). Never throws.
+        await listingWatch.run(db, productsPayload);
+
+        // 2026-10-07: a resting listing limit buy is never auto-cancelled,
+        // but if it was cancelled outside the bot (Theodore cancels it by
+        // hand) or partially filled then cancelled, fix the position row so
+        // the one-listing slot / ETF gate free up (no fill) or the bag
+        // matches what was actually bought (partial). Reacts to Coinbase's
+        // own order status only; places and cancels nothing.
+        await reconcileListingBuys();
 
         // Equity session before the buy pass. A closed session (weekend full
         // close, holiday, or a failed check) leaves the flag false: no ETF
@@ -125,6 +145,51 @@ async function main () {
         //await db.end();
         console.log(`End Program ${new Date().toLocaleString()}`)
         console.log('<-------------------------------------------------------------->');
+    }
+}
+
+// 2026-10-07: keep a listing position row honest when its resting GTC limit
+// buy ends WITHOUT a full fill outside the bot (Theodore cancels it by hand;
+// the bot itself never cancels it). Candidates: listing rows whose buy order
+// is no longer in this minute's open-orders snapshot, placed > 3 minutes ago
+// (fills of an order that just closed are archived by then), and whose fills
+// do not already cover the planned shares. For each, ask Coinbase for the
+// order's real status (one GET; normally 0-1 rows thanks to the one-listing
+// mutex):
+//   * CANCELLED / EXPIRED / FAILED with 0 filled -> delete the row (guarded:
+//     never filled, no sell order). Frees the one-listing slot and the ETF
+//     skip gate; the coin can never be re-sniped because its window is over.
+//   * CANCELLED / EXPIRED with a partial fill -> shares = filled size, so the
+//     filled part is kept as the position and the normal sell logic sells
+//     what was actually bought.
+//   * OPEN / FILLED / unknown -> nothing (fill matching runs in thee_procedure).
+async function reconcileListingBuys() {
+    try {
+        const rows = await db.executeQuery(`
+            SELECT p.buy_order_id, p.name, p.buy_coinbase_order_id, p.shares
+            FROM position p
+            WHERE p.period_type = 'listing'
+            AND p.buy_coinbase_order_id IS NOT NULL
+            AND p.sell_coinbase_order_id IS NULL
+            AND p.buy_placed_at < NOW() - INTERVAL '3 minutes'
+            AND NOT EXISTS (SELECT 1 FROM bulk_open_orders o WHERE o.order_id = p.buy_coinbase_order_id)
+            AND COALESCE((SELECT SUM(f.size) FROM fills f WHERE f.order_id = p.buy_coinbase_order_id), 0) < p.shares * 0.999
+        `)
+        for (const r of rows || []) {
+            const order = await ca.getOrderById(r.buy_coinbase_order_id)
+            const status = order?.status
+            const filled = parseFloat(order?.filled_size || 0)
+            if (!['CANCELLED', 'EXPIRED', 'FAILED'].includes(status)) continue
+            if (filled > 0) {
+                await db.query(`UPDATE position SET shares = $1 WHERE buy_order_id = $2 AND period_type = 'listing'`, [filled, r.buy_order_id])
+                console.log(`Listing buy ${status} after partial fill: ${r.name} | kept ${filled} of ${r.shares} shares as the position`)
+            } else {
+                await db.query(`DELETE FROM position WHERE buy_order_id = $1 AND period_type = 'listing' AND buy_filled_price IS NULL AND sell_coinbase_order_id IS NULL`, [r.buy_order_id])
+                console.log(`Listing buy ${status} with no fill: ${r.name} | row removed (listing slot / ETF gate freed)`)
+            }
+        }
+    } catch (error) {
+        console.log('reconcileListingBuys() ERROR', error?.message || error)
     }
 }
 
@@ -979,7 +1044,11 @@ async function processBuyOrders () {
             -- it just freed; thee_procedure deletes it at the start of the next
             -- run, so it never sits.
             AND p.buy_released_at IS NULL
-            ORDER BY s.priority DESC NULLS LAST
+            -- 2026-10-07: a listing snipe row (at most one, inserted by
+            -- thee_procedure only inside the first listing_window_minutes
+            -- after trading opened) goes FIRST so normal rows cannot spend
+            -- the cash it was gated on.
+            ORDER BY (p.period_type = 'listing') DESC, s.priority DESC NULLS LAST
         `)
         console.log(`Buy Orders to Process: ${orders.length}`);
 
@@ -1004,15 +1073,37 @@ async function processBuyOrders () {
             // the exact same dead order every time. processSellOrders() already
             // generates a fresh id per attempt; this didn't.
             const newOrderId = crypto.randomUUID()
-            let response = await ca.createStopLimitOrder('buy', element.buy_price, element.shares, element.name, element.buy_stop_price, newOrderId);
+            // 2026-10-07: listing snipe = PLAIN LIMIT buy (limit_limit_gtc),
+            // no stop trigger and no expiry. Why: the snipe window opens at
+            // the pair's first trade, which is normally still inside
+            // Coinbase's launch LIMIT-ONLY phase (CT-USD: first match 10:16
+            // UTC, market orders only from ~15:15 UTC), where only limit
+            // orders are accepted. thee_procedure already set buy_price =
+            // first trade price + listing_limit_cushion_pct (rounded to the
+            // price increment) and shares = ~$listing_buy_usd at that limit.
+            // GTC per Theodore: it rests until it fills or he cancels it --
+            // the bot never auto-cancels it (see the listing exemptions in
+            // processFarBuyCashRelease / processObseleteBuyOrders /
+            // vw_edit_orders / thee_procedure). Every other row keeps the
+            // normal stop-limit buy.
+            const isListing = element.period_type === 'listing'
+            let response = isListing
+                ? await ca.createLimitOrder('buy', element.buy_price, element.shares, element.name, newOrderId)
+                : await ca.createStopLimitOrder('buy', element.buy_price, element.shares, element.name, element.buy_stop_price, newOrderId);
             if(response?.success == true) {
                 // buy_placed_at (2026-09-25): order age, so far-release won't cancel a fresh order
                 await db.executeQuery(`UPDATE position SET buy_order_id = '${newOrderId}', buy_coinbase_order_id = '${response.success_response.order_id}', buy_placed_at = NOW() WHERE buy_order_id = '${element.buy_order_id}'`)
-                console.log(`Buy Order Created: ${element.name} | shares: ${element.shares} | price: ${element.buy_price}`)
+                console.log(`${isListing ? 'Listing LIMIT Buy Created (GTC, no expiry)' : 'Buy Order Created'}: ${element.name} | shares: ${element.shares} | price: ${element.buy_price}`)
             } else {
                 const errMsg = (response?.error_response?.message || 'unknown').replace(/'/g, "''")
                 await db.executeQuery(`UPDATE position SET error_message = '${errMsg}' WHERE buy_order_id = '${element.buy_order_id}'`)
-                console.log(`Buy Order FAILED: ${element.name}`, response)
+                // 2026-10-07: a listing rejection (e.g. still auction / cancel-
+                // only, post-only, or a size/price rule) needs no special path:
+                // thee_procedure drops the unsent listing row next minute and
+                // re-inserts it with fresh gates only while the window is
+                // still open, so it is retried each minute inside the window
+                // and simply stops after.
+                console.log(isListing ? `Listing Buy FAILED (retried next minute only while the window is open): ${element.name}` : `Buy Order FAILED: ${element.name}`, response)
                 // 2026-09-25: 'Invalid product_id' means the product no longer exists
                 // on Coinbase (delisted, e.g. LRC-USD) -- retrying can never succeed.
                 // Flag the coin so nothing picks it again, and drop this planned row.
@@ -1094,6 +1185,9 @@ async function processObseleteBuyOrders () {
             AND p.buy_filled_price IS NULL
             AND p.date_created < NOW() - INTERVAL '1 hour'
             AND o.trigger_status = 'STOP_TRIGGERED'
+            -- 2026-10-07: listing limit buys are never auto-cancelled (no stop,
+            -- so never STOP_TRIGGERED anyway; explicit for safety).
+            AND p.period_type IS DISTINCT FROM 'listing'
             AND s.price > p.buy_price;
         `)
         for (let i = 0; i < orders.length; i++) {
@@ -1178,6 +1272,10 @@ async function processFarBuyCashRelease () {
             JOIN stock s ON s.stock_id = p.stock_id
             WHERE p.buy_coinbase_order_id IS NOT NULL
             AND p.buy_filled_price IS NULL
+            -- 2026-10-07: never cancel a resting listing limit buy (Theodore:
+            -- it rests GTC until it fills or he cancels it). Its NULL
+            -- buy_stop_price already fails the next line; explicit for safety.
+            AND p.period_type IS DISTINCT FROM 'listing'
             AND p.buy_stop_price > s.price
             -- only swap for something better than the order being cancelled
             AND COALESCE(s.priority, 0)::numeric < ${Number(best.priority)}

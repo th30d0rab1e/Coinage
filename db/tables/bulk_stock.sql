@@ -9,5 +9,13 @@ CREATE TABLE IF NOT EXISTS public.bulk_stock (
     cancel_only       text,
     system            text,
     price             text,
-    json              json
+    json              json,
+    -- 2026-10-07: launch-restriction / new-listing fields from the same
+    -- products payload, as columns (they were only inside json). Used by
+    -- modules/listingWatch.js and the listing snipe in thee_procedure.
+    status            text,
+    limit_only        text,
+    auction_mode      text,
+    is_new            text,
+    new_at            text
 );

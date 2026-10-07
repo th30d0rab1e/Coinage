@@ -118,6 +118,11 @@ CROSS JOIN LATERAL (
 ) bal
 WHERE p.buy_coinbase_order_id IS NOT NULL
 AND p.buy_filled_price IS NULL
+-- 2026-10-07: never remake (cancel + re-create as a stop-limit) a listing
+-- buy. It is a plain GTC limit that rests until it fills or Theodore
+-- cancels it by hand. Its NULL buy_stop_price already fails the next line;
+-- this makes the exemption explicit.
+AND p.period_type IS DISTINCT FROM 'listing'
 AND p.buy_stop_price > trunc(s.price::numeric * bal.stop_mult, s.price_rounding)::double precision
 AND p.buy_price > trunc(s.price::numeric * bal.stop_mult * 1.01, s.price_rounding)::double precision
 
