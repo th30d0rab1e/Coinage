@@ -1,6 +1,8 @@
 // 2026-10-07: new-listing watcher -- finds when a new -USD pair's trading
 // ACTUALLY opens, so thee_procedure's listing snipe can fire inside the
-// first config.listing_window_minutes (default 5) after that moment.
+// rolling config.listing_buy_window_hours (default 24) after that moment
+// (first config.listing_window_minutes priced off the first trade, then off
+// the current best ask).
 //
 // Why not Coinbase products.new_at: a 50-listing study showed trading
 // typically opens ~18h after new_at (only 2/50 traded within 60 min of it),
@@ -16,7 +18,10 @@
 //                     / NotFound when nothing has traded yet;
 //         fallback -> public ONE_MINUTE candles (last 300 min), first
 //                     candle with volume > 0 (minute start, candle open
-//                     price). Used only when the Exchange call fails.
+//                     price). Used only when the Exchange call fails, and
+//                     trusted only for a launch this watcher observed (it
+//                     saw the product still restricted on an earlier
+//                     minute) -- see the 24h-window note in run().
 //   (b) the first time this bot OBSERVES the launch restrictions cleared:
 //         status online AND NOT trading_disabled AND NOT auction_mode AND
 //         NOT limit_only AND NOT cancel_only (all from the products payload
@@ -94,8 +99,9 @@ async function firstTradeFromExchange(productId) {
 
 // (a) fallback: first public ONE_MINUTE candle with volume > 0 in the last
 // 300 minutes. If even the oldest candle in that range already has volume,
-// the true first trade is at or before it -- still >= 5h ago, so the
-// product can never qualify for the 5-15 min window either way.
+// the true first trade is at or before it, i.e. possibly days ago -- with
+// the 24h window that would wrongly look like "opened ~5h ago", so run()
+// trusts this result only for a launch the watcher observed.
 async function firstTradeFromCandles(productId) {
     try {
         const end = Math.floor(Date.now() / 1000)
@@ -151,19 +157,21 @@ async function run(db, products) {
             if (!ft.ok) {
                 const c = await firstTradeFromCandles(p.product_id)
                 if (c.ok) ft = c; else err = `${err}; ${c.error}`
-                // Candles only cover the last 300 minutes, so for a thinly
-                // traded OLD pair the "first" candle with volume may just be
-                // its latest trade. Trust a recent (< 60 min) candle as the
-                // first trade only if this bot actually watched the product
-                // while it was still restricted (i.e. saw it launch);
-                // otherwise treat the minute as inconclusive (no
-                // trading_open_at) and retry the exact Exchange call next
-                // minute. Prevents sniping a stale listing during an
-                // Exchange API outage.
-                const recent = ft.ok && ft.trade && (Date.now() - Date.parse(ft.trade.time) < 60 * 60 * 1000)
-                if (recent && cleared && !known.get(p.product_id)?.restricted_seen_at) {
+                // Candles only cover the last 300 minutes, so for an OLD pair
+                // the "first" candle with volume may just be the oldest one
+                // in range (or its latest trade). 2026-10-07 (24h window):
+                // trust a candle-based first trade ONLY if this watcher saw
+                // the product still restricted on an EARLIER minute
+                // (listing_watch.restricted_seen_at already set), i.e. it
+                // watched the launch. Otherwise the minute is inconclusive:
+                // no first trade / trading_open_at is written and the exact
+                // Exchange call is retried next minute. (Before, only a
+                // candle < 60 min old was distrusted, which was enough for a
+                // 5-15 min window but not for 24h.) Prevents sniping a stale
+                // listing during an Exchange API outage.
+                if (ft.ok && ft.trade && !known.get(p.product_id)?.restricted_seen_at) {
                     ft = { ok: false }
-                    err = `${err}; candles inconclusive (recent first candle, launch not observed)`
+                    err = `${err}; candles inconclusive (launch not observed while restricted)`
                 }
             }
             const trade = ft.ok ? ft.trade : null
