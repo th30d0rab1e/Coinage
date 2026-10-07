@@ -1,3 +1,10 @@
+-- 2026-10-07 (migrations/2026-10-07_buy_stop_cash_scaled.sql): BUY branch
+-- remake multiplier = GREATEST(1 + buy_remake_floor_pct/100, 1 + gap -
+-- buy_counter * buy_remake_step_pct/100) with gap from vw_buy_stop_gap, then
+-- the below-lowest-paid rule (fn_buy_below_paid). Sell branches unchanged.
+-- The note just below about the 0.005 step still holds for SELL remakes;
+-- for buys the step is now config buy_remake_step_pct (default 0.5 = 0.005).
+--
 -- Per-remake tightening step is 0.005 (0.5 percentage point of price per
 -- remake, on both buy_counter and sell_counter) -- raised from 0.001 on
 -- 2026-09-15 per user request, to close the stop-to-price gap 5x faster
@@ -95,14 +102,31 @@
 -- in its place. processRemakeOrders() reads only this view, so these rules
 -- cover every remake path.
 CREATE OR REPLACE VIEW public.vw_edit_orders AS
+-- BUY branch. 2026-10-07 (migrations/2026-10-07_buy_stop_cash_scaled.sql,
+-- Theodore): the remake now starts from the same cash-scaled gap as first
+-- placement (vw_buy_stop_gap.gap, the ONE shared place) instead of a fixed
+-- 5%, and the step / floor come from config:
+--   stop_mult = GREATEST(1 + buy_remake_floor_pct/100,
+--                        1 + gap - buy_counter * buy_remake_step_pct/100)
+--   stop = trunc(price x stop_mult), limit = trunc(price x stop_mult x 1.01)
+-- (defaults 0.5 / 0.1 = the old hard-coded 0.005 step and 1.001 floor).
+-- Then the below-lowest-paid rule (fn_buy_below_paid, shared with
+-- thee_procedure): on a coin with open filled bags the limit must stay
+-- below the lowest buy_filled_price, else limit = largest tick below it and
+-- stop = limit / 1.01 rounded down. The final stop/limit (bp.*) are what
+-- is placed, compared in the ratchet and reported in price_diff.
+-- Ratchet unchanged: a remake only ever LOWERS both stop and limit.
+-- New guard: the final stop must be above the live price (a stop-buy at or
+-- under market is rejected by Coinbase's preview; the below-lowest-paid
+-- clamp can produce one when price sits just under the lowest paid).
 SELECT p.name,
     p.period_type,
-    trunc(s.price::numeric * bal.stop_mult * 1.01, s.price_rounding) AS order_price,
+    bp.limit_price AS order_price,
     s.price AS price_now,
     p.buy_order_id,
     p.buy_coinbase_order_id AS coinbase_order_id,
     p.shares,
-    trunc(s.price::numeric * bal.stop_mult, s.price_rounding) AS new_stop_price,
+    bp.stop_price AS new_stop_price,
     'buy'::text AS order_type,
     trunc(1.0 - s.price::numeric / NULLIF((
         SELECT min(pa.low)::numeric FROM price_aggregate pa
@@ -110,12 +134,31 @@ SELECT p.name,
     ), 0::numeric), 4) AS estimated_profit,
     p.last_remade_at,
     p.buy_counter AS counter,
-    ABS(trunc(s.price::numeric * bal.stop_mult, s.price_rounding) - p.buy_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
+    ABS(bp.stop_price - p.buy_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
 FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
+CROSS JOIN vw_buy_stop_gap g
 CROSS JOIN LATERAL (
-    SELECT GREATEST(1.001, 1.05 - p.buy_counter::numeric * 0.005) AS stop_mult
+    SELECT GREATEST(
+               1 + COALESCE((SELECT value::numeric FROM config WHERE key = 'buy_remake_floor_pct'), 0.1) / 100,
+               1 + g.gap - p.buy_counter::numeric
+                   * COALESCE((SELECT value::numeric FROM config WHERE key = 'buy_remake_step_pct'), 0.5) / 100
+           ) AS stop_mult
 ) bal
+-- Lowest price paid among this coin's open filled bags (NULL = not held).
+LEFT JOIN LATERAL (
+    SELECT MIN(f.buy_filled_price)::numeric AS min_paid
+    FROM position f
+    WHERE f.stock_id = p.stock_id
+    AND f.buy_filled_price IS NOT NULL
+    AND f.sell_filled_price IS NULL
+) paid ON TRUE
+CROSS JOIN LATERAL fn_buy_below_paid(
+    trunc(s.price::numeric * bal.stop_mult, s.price_rounding),
+    trunc(s.price::numeric * bal.stop_mult * 1.01, s.price_rounding),
+    paid.min_paid,
+    s.price_rounding
+) bp
 WHERE p.buy_coinbase_order_id IS NOT NULL
 AND p.buy_filled_price IS NULL
 -- 2026-10-07: never remake (cancel + re-create as a stop-limit) a listing
@@ -123,8 +166,11 @@ AND p.buy_filled_price IS NULL
 -- cancels it by hand. Its NULL buy_stop_price already fails the next line;
 -- this makes the exemption explicit.
 AND p.period_type IS DISTINCT FROM 'listing'
-AND p.buy_stop_price > trunc(s.price::numeric * bal.stop_mult, s.price_rounding)::double precision
-AND p.buy_price > trunc(s.price::numeric * bal.stop_mult * 1.01, s.price_rounding)::double precision
+-- only-lower ratchet (both stop and limit must drop)
+AND p.buy_stop_price > bp.stop_price::double precision
+AND p.buy_price > bp.limit_price::double precision
+-- the new stop must sit above the live price (see header)
+AND bp.stop_price > s.price::numeric
 
 UNION ALL
 
