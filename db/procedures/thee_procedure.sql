@@ -400,7 +400,9 @@ WITH RECURSIVE cand AS (
 walk AS (
     SELECT 0::bigint AS rn,
            (SELECT available::numeric FROM vw_balance WHERE name = 'USD')
-             - COALESCE((SELECT reserve_usd FROM vw_etf_cash_reserve), 0) AS cash_left,
+             - COALESCE((SELECT reserve_usd FROM vw_etf_cash_reserve), 0)
+             -- 2026-10-07: profit queued for the USDC sweep is not spendable.
+             - COALESCE((SELECT reserve_usd FROM vw_usdc_sweep_reserve), 0) AS cash_left,
            NULL::bigint AS position_id,
            FALSE AS drop_row
     UNION ALL
@@ -578,7 +580,11 @@ AND sz.shares * px.limit_price <= cfg.buy_usd * 1.25
 -- Cash: free USD must cover the order incl. the ~1.2% taker-fee pad (same
 -- pad the other buy gates use). Listing is priority one, so the ETF reserve
 -- is not subtracted (index.js skips ETF orders while a listing bag is open).
-AND b.available::numeric >= sz.shares * px.limit_price * 1.012
+-- 2026-10-07: minus realized profit queued for the USDC sweep
+-- (vw_usdc_sweep_reserve), so the snipe cannot spend it either.
+AND b.available::numeric
+    - COALESCE((SELECT reserve_usd FROM vw_usdc_sweep_reserve), 0)
+    >= sz.shares * px.limit_price * 1.012
 ORDER BY lw.trading_open_at DESC
 LIMIT 1;
 
@@ -741,6 +747,8 @@ AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
 -- pause_buys still gates only these crypto inserts, not the ETF buys.
 AND b.available
     - COALESCE((SELECT reserve_usd FROM vw_etf_cash_reserve), 0)
+    -- 2026-10-07: realized profit queued for the USDC sweep is reserved too.
+    - COALESCE((SELECT reserve_usd FROM vw_usdc_sweep_reserve), 0)
     - COALESCE((SELECT SUM(pb.shares * pb.buy_price * 1.012)::numeric  -- 2026-10-05: + fee pad
                 FROM position pb JOIN stock sb ON sb.stock_id = pb.stock_id
                 WHERE pb.buy_coinbase_order_id IS NULL
@@ -926,6 +934,8 @@ WHERE b.name = 'USD'
 -- pause_buys still gates only these crypto inserts, not the ETF buys.
 AND b.available
     - COALESCE((SELECT reserve_usd FROM vw_etf_cash_reserve), 0)
+    -- 2026-10-07: realized profit queued for the USDC sweep is reserved too.
+    - COALESCE((SELECT reserve_usd FROM vw_usdc_sweep_reserve), 0)
     - COALESCE((SELECT SUM(pb.shares * pb.buy_price * 1.012)::numeric  -- 2026-10-05: + fee pad
                 FROM position pb JOIN stock sb ON sb.stock_id = pb.stock_id
                 WHERE pb.buy_coinbase_order_id IS NULL
@@ -1248,6 +1258,29 @@ SET buy_filled_price  = CASE WHEN m.b_vwap IS NOT NULL AND position.buy_fee  IS 
 FROM m
 WHERE position.position_id = m.position_id;
 
+-- Step 1b (2026-10-07, USDC profit sweep): fill in profit_converted_usdc on
+-- every fully bought-and-sold position that has all six inputs, i.e. the
+-- exact same rows Step 2 is about to record. Same formula as Step 2's
+-- profit (which already nets out BOTH fees):
+--     (sell_filled_price * shares - sell_fee) - (buy_filled_price * shares + buy_fee)
+-- truncated to cents (so we never sweep more than was earned), and a loss
+-- is stored as 0 (never negative). Fees are the summed Coinbase commissions
+-- of every fill of the buy / sell order (Step 1 above, from the fills
+-- ledger). index.js sweepProfitToUsdc() later converts these dollars to
+-- USDC. Step 2 only records, and Step 3 only deletes, rows where this is
+-- NOT NULL, so a row can never disappear before its amount is filled in.
+UPDATE position p
+SET profit_converted_usdc = GREATEST(0::numeric, TRUNC((
+        (p.sell_filled_price::numeric * p.shares::numeric - p.sell_fee::numeric)
+      - (p.buy_filled_price::numeric  * p.shares::numeric + p.buy_fee::numeric))::numeric, 2))
+WHERE p.profit_converted_usdc IS NULL
+AND p.buy_coinbase_order_id IS NOT NULL
+AND p.sell_coinbase_order_id IS NOT NULL
+AND p.buy_filled_price IS NOT NULL
+AND p.sell_filled_price IS NOT NULL
+AND p.buy_fee IS NOT NULL
+AND p.sell_fee IS NOT NULL;
+
 -- Step 2: record any fully bought-and-sold position into profit_history,
 -- computing profit fresh from position's current buy/sell price and fee
 -- columns. Requires every one of buy/sell order_id, buy/sell filled price,
@@ -1257,13 +1290,16 @@ WHERE position.position_id = m.position_id;
 -- pick it up automatically once Step 1 finishes backfilling it. Skips
 -- anything already recorded, matched on both the buy and sell order_id
 -- together.
-INSERT INTO profit_history (stock_id, name, period_type, buy_coinbase_order_id, sell_fills_id, buy_fee, sell_fee, profit)
+-- 2026-10-07: also carries profit_converted_usdc over (Step 1b) and only
+-- records rows where it is filled in.
+INSERT INTO profit_history (stock_id, name, period_type, buy_coinbase_order_id, sell_fills_id, buy_fee, sell_fee, profit, profit_converted_usdc)
 SELECT
     p.stock_id, p.name, p.period_type, p.buy_coinbase_order_id, p.sell_coinbase_order_id AS sell_fills_id,
     TRUNC(p.buy_fee::numeric, 2) AS buy_fee,
     TRUNC(p.sell_fee::numeric, 2) AS sell_fee,
     TRUNC(((p.sell_filled_price::numeric * p.shares::numeric - p.sell_fee::numeric)
-         - (p.buy_filled_price::numeric * p.shares::numeric + p.buy_fee::numeric))::numeric, 2) AS profit
+         - (p.buy_filled_price::numeric * p.shares::numeric + p.buy_fee::numeric))::numeric, 2) AS profit,
+    p.profit_converted_usdc
 FROM position p
 WHERE p.buy_coinbase_order_id IS NOT NULL
 AND p.sell_coinbase_order_id IS NOT NULL
@@ -1271,6 +1307,7 @@ AND p.buy_filled_price IS NOT NULL
 AND p.sell_filled_price IS NOT NULL
 AND p.buy_fee IS NOT NULL
 AND p.sell_fee IS NOT NULL
+AND p.profit_converted_usdc IS NOT NULL
 AND NOT EXISTS (
     SELECT 1 FROM profit_history ph
     WHERE ph.buy_coinbase_order_id = p.buy_coinbase_order_id AND ph.sell_fills_id = p.sell_coinbase_order_id
@@ -1279,8 +1316,11 @@ AND NOT EXISTS (
 -- Step 3: delete the position row, but only once it's confirmed recorded in
 -- profit_history — never delete on the strength of this statement's own
 -- assumptions the way the old combined version did.
+-- 2026-10-07: and only once profit_converted_usdc is filled in (Step 1b),
+-- so the sweep amount is never lost with the row.
 DELETE FROM position p
 WHERE p.buy_filled_price IS NOT NULL AND p.sell_filled_price IS NOT NULL
+AND p.profit_converted_usdc IS NOT NULL
 AND EXISTS (
     SELECT 1 FROM profit_history ph
     WHERE ph.buy_coinbase_order_id = p.buy_coinbase_order_id AND ph.sell_fills_id = p.sell_coinbase_order_id

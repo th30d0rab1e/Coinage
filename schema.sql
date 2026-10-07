@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 0F9gceXPnW7sJP3ZsuHBVolW3aRBqP3JYYfYZP0FEYp8cwf74VSaIP8tOgIxGLr
+\restrict K4GSMFzSwiWpwy4kmuxlezq3joT2QFr5A8B752feFkqt0QvhEoAAwQTAx8zn8c7
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -718,7 +718,9 @@ WITH RECURSIVE cand AS (
 walk AS (
     SELECT 0::bigint AS rn,
            (SELECT available::numeric FROM vw_balance WHERE name = 'USD')
-             - COALESCE((SELECT reserve_usd FROM vw_etf_cash_reserve), 0) AS cash_left,
+             - COALESCE((SELECT reserve_usd FROM vw_etf_cash_reserve), 0)
+             -- 2026-10-07: profit queued for the USDC sweep is not spendable.
+             - COALESCE((SELECT reserve_usd FROM vw_usdc_sweep_reserve), 0) AS cash_left,
            NULL::bigint AS position_id,
            FALSE AS drop_row
     UNION ALL
@@ -896,7 +898,11 @@ AND sz.shares * px.limit_price <= cfg.buy_usd * 1.25
 -- Cash: free USD must cover the order incl. the ~1.2% taker-fee pad (same
 -- pad the other buy gates use). Listing is priority one, so the ETF reserve
 -- is not subtracted (index.js skips ETF orders while a listing bag is open).
-AND b.available::numeric >= sz.shares * px.limit_price * 1.012
+-- 2026-10-07: minus realized profit queued for the USDC sweep
+-- (vw_usdc_sweep_reserve), so the snipe cannot spend it either.
+AND b.available::numeric
+    - COALESCE((SELECT reserve_usd FROM vw_usdc_sweep_reserve), 0)
+    >= sz.shares * px.limit_price * 1.012
 ORDER BY lw.trading_open_at DESC
 LIMIT 1;
 
@@ -1059,6 +1065,8 @@ AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
 -- pause_buys still gates only these crypto inserts, not the ETF buys.
 AND b.available
     - COALESCE((SELECT reserve_usd FROM vw_etf_cash_reserve), 0)
+    -- 2026-10-07: realized profit queued for the USDC sweep is reserved too.
+    - COALESCE((SELECT reserve_usd FROM vw_usdc_sweep_reserve), 0)
     - COALESCE((SELECT SUM(pb.shares * pb.buy_price * 1.012)::numeric  -- 2026-10-05: + fee pad
                 FROM position pb JOIN stock sb ON sb.stock_id = pb.stock_id
                 WHERE pb.buy_coinbase_order_id IS NULL
@@ -1244,6 +1252,8 @@ WHERE b.name = 'USD'
 -- pause_buys still gates only these crypto inserts, not the ETF buys.
 AND b.available
     - COALESCE((SELECT reserve_usd FROM vw_etf_cash_reserve), 0)
+    -- 2026-10-07: realized profit queued for the USDC sweep is reserved too.
+    - COALESCE((SELECT reserve_usd FROM vw_usdc_sweep_reserve), 0)
     - COALESCE((SELECT SUM(pb.shares * pb.buy_price * 1.012)::numeric  -- 2026-10-05: + fee pad
                 FROM position pb JOIN stock sb ON sb.stock_id = pb.stock_id
                 WHERE pb.buy_coinbase_order_id IS NULL
@@ -1566,6 +1576,29 @@ SET buy_filled_price  = CASE WHEN m.b_vwap IS NOT NULL AND position.buy_fee  IS 
 FROM m
 WHERE position.position_id = m.position_id;
 
+-- Step 1b (2026-10-07, USDC profit sweep): fill in profit_converted_usdc on
+-- every fully bought-and-sold position that has all six inputs, i.e. the
+-- exact same rows Step 2 is about to record. Same formula as Step 2's
+-- profit (which already nets out BOTH fees):
+--     (sell_filled_price * shares - sell_fee) - (buy_filled_price * shares + buy_fee)
+-- truncated to cents (so we never sweep more than was earned), and a loss
+-- is stored as 0 (never negative). Fees are the summed Coinbase commissions
+-- of every fill of the buy / sell order (Step 1 above, from the fills
+-- ledger). index.js sweepProfitToUsdc() later converts these dollars to
+-- USDC. Step 2 only records, and Step 3 only deletes, rows where this is
+-- NOT NULL, so a row can never disappear before its amount is filled in.
+UPDATE position p
+SET profit_converted_usdc = GREATEST(0::numeric, TRUNC((
+        (p.sell_filled_price::numeric * p.shares::numeric - p.sell_fee::numeric)
+      - (p.buy_filled_price::numeric  * p.shares::numeric + p.buy_fee::numeric))::numeric, 2))
+WHERE p.profit_converted_usdc IS NULL
+AND p.buy_coinbase_order_id IS NOT NULL
+AND p.sell_coinbase_order_id IS NOT NULL
+AND p.buy_filled_price IS NOT NULL
+AND p.sell_filled_price IS NOT NULL
+AND p.buy_fee IS NOT NULL
+AND p.sell_fee IS NOT NULL;
+
 -- Step 2: record any fully bought-and-sold position into profit_history,
 -- computing profit fresh from position's current buy/sell price and fee
 -- columns. Requires every one of buy/sell order_id, buy/sell filled price,
@@ -1575,13 +1608,16 @@ WHERE position.position_id = m.position_id;
 -- pick it up automatically once Step 1 finishes backfilling it. Skips
 -- anything already recorded, matched on both the buy and sell order_id
 -- together.
-INSERT INTO profit_history (stock_id, name, period_type, buy_coinbase_order_id, sell_fills_id, buy_fee, sell_fee, profit)
+-- 2026-10-07: also carries profit_converted_usdc over (Step 1b) and only
+-- records rows where it is filled in.
+INSERT INTO profit_history (stock_id, name, period_type, buy_coinbase_order_id, sell_fills_id, buy_fee, sell_fee, profit, profit_converted_usdc)
 SELECT
     p.stock_id, p.name, p.period_type, p.buy_coinbase_order_id, p.sell_coinbase_order_id AS sell_fills_id,
     TRUNC(p.buy_fee::numeric, 2) AS buy_fee,
     TRUNC(p.sell_fee::numeric, 2) AS sell_fee,
     TRUNC(((p.sell_filled_price::numeric * p.shares::numeric - p.sell_fee::numeric)
-         - (p.buy_filled_price::numeric * p.shares::numeric + p.buy_fee::numeric))::numeric, 2) AS profit
+         - (p.buy_filled_price::numeric * p.shares::numeric + p.buy_fee::numeric))::numeric, 2) AS profit,
+    p.profit_converted_usdc
 FROM position p
 WHERE p.buy_coinbase_order_id IS NOT NULL
 AND p.sell_coinbase_order_id IS NOT NULL
@@ -1589,6 +1625,7 @@ AND p.buy_filled_price IS NOT NULL
 AND p.sell_filled_price IS NOT NULL
 AND p.buy_fee IS NOT NULL
 AND p.sell_fee IS NOT NULL
+AND p.profit_converted_usdc IS NOT NULL
 AND NOT EXISTS (
     SELECT 1 FROM profit_history ph
     WHERE ph.buy_coinbase_order_id = p.buy_coinbase_order_id AND ph.sell_fills_id = p.sell_coinbase_order_id
@@ -1597,8 +1634,11 @@ AND NOT EXISTS (
 -- Step 3: delete the position row, but only once it's confirmed recorded in
 -- profit_history — never delete on the strength of this statement's own
 -- assumptions the way the old combined version did.
+-- 2026-10-07: and only once profit_converted_usdc is filled in (Step 1b),
+-- so the sweep amount is never lost with the row.
 DELETE FROM position p
 WHERE p.buy_filled_price IS NOT NULL AND p.sell_filled_price IS NOT NULL
+AND p.profit_converted_usdc IS NOT NULL
 AND EXISTS (
     SELECT 1 FROM profit_history ph
     WHERE ph.buy_coinbase_order_id = p.buy_coinbase_order_id AND ph.sell_fills_id = p.sell_coinbase_order_id
@@ -2388,7 +2428,8 @@ CREATE TABLE public."position" (
     last_remade_at timestamp without time zone,
     buy_placed_at timestamp without time zone,
     buy_released_at timestamp without time zone,
-    creation_hierarchy integer
+    creation_hierarchy integer,
+    profit_converted_usdc numeric
 );
 
 
@@ -2397,6 +2438,13 @@ CREATE TABLE public."position" (
 --
 
 COMMENT ON COLUMN public."position".creation_hierarchy IS 'Per-coin sequence of open positions with sell_price set (1 = cheapest fill); NULL when sell_price IS NULL. Order: buy_filled_price ASC NULLS LAST, then buy_stop_price ASC NULLS LAST, then position_id. Recomputed every run by thee_procedure.';
+
+
+--
+-- Name: COLUMN "position".profit_converted_usdc; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public."position".profit_converted_usdc IS 'Net profit to sweep to USDC: GREATEST(0, TRUNC((sell_filled_price*shares - sell_fee) - (buy_filled_price*shares + buy_fee), 2)). Fees are the summed fill commissions. Losses = 0. Set by thee_procedure; the close-out waits for it.';
 
 
 --
@@ -2584,8 +2632,24 @@ CREATE TABLE public.profit_history (
     buy_fee double precision,
     sell_fee double precision,
     profit double precision,
-    date_created timestamp without time zone DEFAULT now()
+    date_created timestamp without time zone DEFAULT now(),
+    profit_converted_usdc numeric,
+    usdc_convert_id integer
 );
+
+
+--
+-- Name: COLUMN profit_history.profit_converted_usdc; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.profit_history.profit_converted_usdc IS 'Copied from position at close. Swept to USDC by index.js sweepProfitToUsdc().';
+
+
+--
+-- Name: COLUMN profit_history.usdc_convert_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.profit_history.usdc_convert_id IS 'usdc_convert row that swept this profit to USDC. NULL = still waiting (counted by vw_usdc_sweep_reserve).';
 
 
 --
@@ -2698,6 +2762,44 @@ ALTER TABLE public.usd_transfer ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY
     NO MAXVALUE
     CACHE 1
 );
+
+
+--
+-- Name: usdc_convert; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.usdc_convert (
+    id integer NOT NULL,
+    amount_usd numeric NOT NULL,
+    usdc_received numeric,
+    coinbase_trade_id text,
+    status text DEFAULT 'pending'::text NOT NULL,
+    error text,
+    profit_history_ids integer[] NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    completed_at timestamp with time zone,
+    CONSTRAINT usdc_convert_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'submitted'::text, 'success'::text, 'failed'::text])))
+);
+
+
+--
+-- Name: usdc_convert_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.usdc_convert_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: usdc_convert_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.usdc_convert_id_seq OWNED BY public.usdc_convert.id;
 
 
 --
@@ -3057,6 +3159,29 @@ CREATE VIEW public.vw_signal AS
 
 
 --
+-- Name: vw_usdc_sweep_reserve; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.vw_usdc_sweep_reserve AS
+ SELECT
+        CASE
+            WHEN (COALESCE(( SELECT config.value
+               FROM public.config
+              WHERE (config.key = 'usdc_sweep_enabled'::text)), 'true'::text) = 'true'::text) THEN COALESCE(( SELECT sum(profit_history.profit_converted_usdc) AS sum
+               FROM public.profit_history
+              WHERE ((profit_history.usdc_convert_id IS NULL) AND (profit_history.profit_converted_usdc > (0)::numeric))), (0)::numeric)
+            ELSE (0)::numeric
+        END AS reserve_usd;
+
+
+--
+-- Name: VIEW vw_usdc_sweep_reserve; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.vw_usdc_sweep_reserve IS 'Unswept realized profit (USD) queued for the USDC sweep. Subtracted from free USD by thee_procedure buy gates and the index.js ETF plan. 0 when config.usdc_sweep_enabled <> true.';
+
+
+--
 -- Name: bulk_currency bulk_currency_id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -3124,6 +3249,13 @@ ALTER TABLE ONLY public.profit_history ALTER COLUMN profit_history_id SET DEFAUL
 --
 
 ALTER TABLE ONLY public.unmatched_fills ALTER COLUMN unmatched_fill_id SET DEFAULT nextval('public.unmatched_fills_unmatched_fill_id_seq'::regclass);
+
+
+--
+-- Name: usdc_convert id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.usdc_convert ALTER COLUMN id SET DEFAULT nextval('public.usdc_convert_id_seq'::regclass);
 
 
 --
@@ -3319,6 +3451,14 @@ ALTER TABLE ONLY public.usd_transfer
 
 
 --
+-- Name: usdc_convert usdc_convert_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.usdc_convert
+    ADD CONSTRAINT usdc_convert_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: book_snapshot_name_created_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3389,6 +3529,20 @@ CREATE UNIQUE INDEX position_one_listing_per_stock ON public."position" USING bt
 
 
 --
+-- Name: profit_history_unswept; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX profit_history_unswept ON public.profit_history USING btree (profit_history_id) WHERE ((usdc_convert_id IS NULL) AND (profit_converted_usdc > (0)::numeric));
+
+
+--
+-- Name: usdc_convert_one_open; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX usdc_convert_one_open ON public.usdc_convert USING btree ((true)) WHERE (status = ANY (ARRAY['pending'::text, 'submitted'::text]));
+
+
+--
 -- Name: position position_audit_trg; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -3404,8 +3558,16 @@ ALTER TABLE ONLY public.etf_buy
 
 
 --
+-- Name: profit_history profit_history_usdc_convert_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.profit_history
+    ADD CONSTRAINT profit_history_usdc_convert_id_fkey FOREIGN KEY (usdc_convert_id) REFERENCES public.usdc_convert(id);
+
+
+--
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 0F9gceXPnW7sJP3ZsuHBVolW3aRBqP3JYYfYZP0FEYp8cwf74VSaIP8tOgIxGLr
+\unrestrict K4GSMFzSwiWpwy4kmuxlezq3joT2QFr5A8B752feFkqt0QvhEoAAwQTAx8zn8c7
 

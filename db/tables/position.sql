@@ -32,5 +32,10 @@ CREATE TABLE IF NOT EXISTS public.position (
     -- fill); NULL when sell_price IS NULL. Order: buy_filled_price ASC
     -- NULLS LAST, then buy_stop_price ASC NULLS LAST, then position_id.
     -- thee_procedure recomputes it every run.
-    creation_hierarchy       integer
+    creation_hierarchy       integer,
+    -- 2026-10-07 (migrations/2026-10-07_usdc_profit_sweep.sql): net profit
+    -- to sweep to USDC, GREATEST(0, TRUNC((sell*shares - sell_fee) -
+    -- (buy*shares + buy_fee), 2)). NULL until thee_procedure fills it in;
+    -- a closed row is not moved to profit_history / deleted before that.
+    profit_converted_usdc    numeric
 );

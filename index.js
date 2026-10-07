@@ -13,6 +13,9 @@ var usdTransferSync = require('./modules/usdTransferSync.js')
 // new -USD pair's trading ACTUALLY opens). Public endpoints only; writes
 // only listing_watch. See modules/listingWatch.js.
 var listingWatch = require('./modules/listingWatch.js')
+// 2026-10-07: USD -> USDC convert helper (quote / commit / status), used only
+// by sweepProfitToUsdc() below to move realized profit into USDC.
+var convertUsdc = require('./modules/convert.js')
 // Set each run before thee_procedure. False means the equity NORMAL session
 // is closed: place no new ETF order and reserve no USD (resting limits are
 // still synced / expired every run). When it is true, etfAttemptsThisRun is
@@ -99,6 +102,12 @@ async function main () {
         //surface anything thee_procedure just logged to unmatched_fills so the
         //30-min health check (greps outputLog.txt for ERROR/FAILED) catches it
         await checkUnmatchedFills();
+        // 2026-10-07: move realized profit (profit_history.profit_converted_usdc,
+        // filled in by thee_procedure at close) from USD to USDC once the
+        // unswept total reaches config.usdc_sweep_min_usd. Catches and logs its
+        // own errors and never throws, so a Coinbase hiccup here cannot break
+        // the rest of this minute (buys, sells, remakes still run).
+        await sweepProfitToUsdc();
         //call aggregation
         await db.executeQuery('CALL aggregate();')
 
@@ -836,7 +845,10 @@ async function buildEtfPlan() {
             reason: `limit ${stepPct}% under ${basis.source} ${Number(basis.price).toFixed(4)}`,
         })
     }
-    const funded = etfPlan.fundAttempts(chosen, book.available)
+    // 2026-10-07: profit queued for the USDC sweep is not spendable on ETFs.
+    const sweepReserve = await usdcSweepReserve()
+    if (sweepReserve > 0) notes.push(`ETF cash minus $${sweepReserve.toFixed(2)} profit queued for USDC`)
+    const funded = etfPlan.fundAttempts(chosen, Math.max(0, book.available - sweepReserve))
     for (const c of chosen) notes.push(`ETF plan ${c.ticker}: ${c.kind} — ${c.reason}${c.kind === 'limit' ? ` → ${c.baseSize} @ ${c.limitPrice}` : ''}`)
     notes.push(...funded.notes)
     return { attempts: funded.attempts, reserve: funded.reserve, notes }
@@ -974,8 +986,11 @@ async function processEquityEtfBuys() {
             console.log(`ETF orders skipped: Default USD unreadable (${bal.reason})`)
             return
         }
-        let cash = bal.available
-        console.log(`ETF Default USD available: $${cash.toFixed(2)}`)
+        // 2026-10-07: minus profit queued for the USDC sweep (same reserve
+        // the crypto buy gates in thee_procedure subtract).
+        const sweepReserve = await usdcSweepReserve()
+        let cash = Math.max(0, bal.available - sweepReserve)
+        console.log(`ETF Default USD available: $${cash.toFixed(2)}${sweepReserve > 0 ? ` (after $${sweepReserve.toFixed(2)} profit queued for USDC)` : ''}`)
         const today = chicagoToday()
         const ttlHours = await configNumber('etf_limit_ttl_hours', 12)
         for (const row of etfAttemptsThisRun) {
@@ -1759,6 +1774,225 @@ async function processHistoricalPrices () {
         await db.executeQuery('CALL insert_aggregate();')
        // await db.executeQuery(`UPDATE stock set historical_finished = 1 WHERE stock_id = ${stockID}`
         
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 2026-10-07: profit -> USDC sweep (Theodore).
+//
+// thee_procedure stores each close's net profit (after both fees, losses = 0)
+// in profit_history.profit_converted_usdc. This sweeps the unswept total from
+// USD into USDC so the bot (which only spends USD) cannot trade it away:
+//
+//   1. config.usdc_sweep_enabled must be 'true' (kill switch).
+//   2. Only one sweep at a time: a Postgres advisory lock (an overlapping
+//      cron run just skips), plus a unique index allowing a single
+//      pending/submitted usdc_convert row.
+//   3. Finish any earlier unfinished attempt first (resolveOpenUsdcSweep).
+//   4. Sum profit_converted_usdc > 0 over rows with usdc_convert_id NULL.
+//      Do nothing below config.usdc_sweep_min_usd ($1.00; Coinbase's own
+//      convert minimum is lower, a $0.25 quote was accepted) or when live
+//      free USD does not cover it.
+//   5. Insert a 'pending' usdc_convert row listing the exact rows, quote
+//      that amount USD -> USDC, sanity check it (>= 99.5% back, no fee),
+//      mark 'submitted', commit, poll briefly.
+//   6. Coinbase says COMPLETED -> in ONE transaction mark the row 'success'
+//      with usdc_received and stamp those profit_history rows with its id.
+//      Refused / failed -> mark 'failed' with the error, stamp nothing, so
+//      the next minute retries. Unknown (commit sent, no answer yet) -> stay
+//      'submitted'; the next minute asks Coinbase again (never re-sends).
+// Until rows are stamped, vw_usdc_sweep_reserve keeps that profit out of
+// the buy gates, so it is still in USD when the sweep runs.
+// ---------------------------------------------------------------------------
+const USDC_SWEEP_LOCK_KEY = 2026100701   // arbitrary, unique to this sweep
+const USDC_SWEEP_POLL_TRIES = 5           // x 2 s: keep the minute cycle short
+const USDC_SWEEP_POLL_MS = 2000
+
+// Dollars of profit queued for the sweep (0 if the view is missing or the
+// kill switch is off). Used to shrink ETF cash; thee_procedure reads the
+// same view directly.
+async function usdcSweepReserve() {
+    try {
+        const res = await db.query('SELECT reserve_usd FROM vw_usdc_sweep_reserve')
+        const n = Number(res?.rows?.[0]?.reserve_usd)
+        return Number.isFinite(n) && n > 0 ? n : 0
+    } catch (error) {
+        console.log('usdcSweepReserve() ERROR', error?.message || error)
+        return 0
+    }
+}
+
+// Success: mark the attempt done and stamp exactly its rows, atomically, so
+// rows are never marked swept without a recorded success (or vice versa).
+async function finishUsdcSweep(client, row, trade) {
+    await client.query('BEGIN')
+    try {
+        await client.query(
+            `UPDATE usdc_convert
+             SET status = 'success', usdc_received = $2, coinbase_trade_id = COALESCE(coinbase_trade_id, $3),
+                 error = NULL, completed_at = NOW()
+             WHERE id = $1`,
+            [row.id, trade.receivedValue, trade.tradeId || null]
+        )
+        const stamped = await client.query(
+            `UPDATE profit_history SET usdc_convert_id = $1
+             WHERE profit_history_id = ANY($2::int[]) AND usdc_convert_id IS NULL`,
+            [row.id, row.profit_history_ids]
+        )
+        await client.query('COMMIT')
+        console.log(`USDC sweep OK #${row.id}: $${Number(row.amount_usd).toFixed(2)} USD -> ${trade.received} (${stamped.rowCount} closes stamped, trade ${trade.tradeId})`)
+    } catch (error) {
+        await client.query('ROLLBACK')
+        throw error
+    }
+}
+
+async function failUsdcSweep(client, row, message) {
+    await client.query(
+        `UPDATE usdc_convert SET status = 'failed', error = $2, completed_at = NOW() WHERE id = $1`,
+        [row.id, String(message).slice(0, 2000)]
+    )
+    console.log(`USDC sweep FAILED #${row.id} ($${Number(row.amount_usd).toFixed(2)}): ${message} -- no closes stamped, will retry`)
+}
+
+// Settle an attempt left open by an earlier run (crash, timeout, slow
+// Coinbase). Returns true if the way is clear for a new sweep.
+//   pending   = commit never sent -> safe to mark failed once 10 min old
+//   submitted = commit was sent   -> only Coinbase's answer settles it
+async function resolveOpenUsdcSweep(client) {
+    const open = await client.query(
+        `SELECT *, created_at < NOW() - INTERVAL '10 minutes' AS stale
+         FROM usdc_convert WHERE status IN ('pending', 'submitted') ORDER BY id`
+    )
+    for (const row of open.rows) {
+        if (row.status === 'pending') {
+            if (!row.stale) return false   // a live run may still be working on it
+            await failUsdcSweep(client, row, 'abandoned before commit (no commit was sent)')
+            continue
+        }
+        // submitted: ask Coinbase what happened to the trade
+        if (!row.coinbase_trade_id) {
+            console.log(`USDC sweep ERROR #${row.id}: submitted without a trade id -- check Coinbase by hand, sweeps paused`)
+            return false
+        }
+        const t = await convertUsdc.getConvertTrade(row.coinbase_trade_id, 'USD', 'USDC')
+        if (t.status === 'TRADE_STATUS_COMPLETED') {
+            await finishUsdcSweep(client, row, t)
+        } else if (t.status === 'TRADE_STATUS_CANCELED') {
+            await failUsdcSweep(client, row, `Coinbase canceled the trade${t.cancellationReason ? `: ${t.cancellationReason}` : ''}`)
+        } else {
+            if (row.stale) console.log(`USDC sweep ERROR #${row.id}: still ${t.status} after 10+ min (trade ${row.coinbase_trade_id}) -- sweeps paused until it settles`)
+            return false
+        }
+    }
+    return true
+}
+
+async function sweepProfitToUsdc() {
+    let client
+    let locked = false
+    try {
+        const cfg = await db.query(
+            `SELECT key, value FROM config WHERE key IN ('usdc_sweep_enabled', 'usdc_sweep_min_usd')`
+        )
+        const conf = Object.fromEntries((cfg?.rows || []).map(r => [r.key, r.value]))
+        if ((conf.usdc_sweep_enabled ?? 'true') !== 'true') return
+        const minUsd = Math.max(Number(conf.usdc_sweep_min_usd) || 1.00, 0.01)
+
+        // Dedicated connection: a session advisory lock has to be taken and
+        // released on the same connection. A second overlapping run gets
+        // false and simply skips this minute.
+        client = await db.connect()
+        const lock = await client.query('SELECT pg_try_advisory_lock($1) AS ok', [USDC_SWEEP_LOCK_KEY])
+        locked = lock.rows[0].ok === true
+        if (!locked) {
+            console.log('USDC sweep skipped: another run holds the sweep lock')
+            return
+        }
+
+        if (!(await resolveOpenUsdcSweep(client))) return
+
+        const due = await client.query(
+            `SELECT profit_history_id, profit_converted_usdc::numeric AS amt
+             FROM profit_history
+             WHERE usdc_convert_id IS NULL AND profit_converted_usdc > 0
+             ORDER BY profit_history_id`
+        )
+        if (due.rows.length === 0) return
+        // Values are already whole cents; sum in cents to avoid float drift.
+        const cents = due.rows.reduce((acc, r) => acc + Math.round(Number(r.amt) * 100), 0)
+        const amount = cents / 100
+        if (amount < minUsd) return
+
+        const accounts = await ca.gatherBalance()
+        const usd = accounts?.find(a => a.currency === 'USD')
+        const freeUsd = usd ? parseFloat(usd.available_balance.value) : 0
+        if (!(freeUsd >= amount)) {
+            console.log(`USDC sweep waiting: $${amount.toFixed(2)} profit due, only $${freeUsd.toFixed(2)} USD free`)
+            return
+        }
+
+        const ids = due.rows.map(r => r.profit_history_id)
+        const ins = await client.query(
+            `INSERT INTO usdc_convert (amount_usd, profit_history_ids, status)
+             VALUES ($1, $2::int[], 'pending') RETURNING *`,
+            [amount.toFixed(2), ids]
+        )
+        const row = ins.rows[0]
+        console.log(`USDC sweep #${row.id}: converting $${amount.toFixed(2)} profit from ${ids.length} closes USD -> USDC`)
+
+        // Quote (moves nothing) and sanity check.
+        let quote
+        try {
+            quote = await convertUsdc.createConvertQuote('USD', 'USDC', amount)
+        } catch (error) {
+            await failUsdcSweep(client, row, `quote: ${error.message}`)
+            return
+        }
+        await client.query(`UPDATE usdc_convert SET coinbase_trade_id = $2 WHERE id = $1`, [row.id, quote.tradeId])
+        const problems = convertUsdc.checkQuote(quote, 'USD', 'USDC')
+        if (problems.length) {
+            await failUsdcSweep(client, row, `quote refused: ${problems.join('; ')}`)
+            return
+        }
+
+        // Mark 'submitted' BEFORE sending the commit: if this process dies
+        // mid-call, the next run asks Coinbase instead of assuming failure.
+        await client.query(`UPDATE usdc_convert SET status = 'submitted' WHERE id = $1`, [row.id])
+        let status
+        try {
+            status = await convertUsdc.commitConvertTrade(quote.tradeId, 'USD', 'USDC')
+        } catch (error) {
+            if (error.status && error.status >= 400 && error.status < 500) {
+                // Coinbase answered and rejected it: nothing moved.
+                await failUsdcSweep(client, row, `commit rejected: ${error.message}`)
+            } else {
+                // No / 5xx answer: outcome unknown, leave 'submitted' for next run.
+                console.log(`USDC sweep ERROR #${row.id}: commit outcome unknown (${error.message}) -- will check trade ${quote.tradeId} next run`)
+            }
+            return
+        }
+        for (let i = 0; i < USDC_SWEEP_POLL_TRIES; i++) {
+            if (status.status === 'TRADE_STATUS_COMPLETED' || status.status === 'TRADE_STATUS_CANCELED') break
+            await new Promise(r => setTimeout(r, USDC_SWEEP_POLL_MS))
+            status = await convertUsdc.getConvertTrade(quote.tradeId, 'USD', 'USDC')
+        }
+        if (status.status === 'TRADE_STATUS_COMPLETED') {
+            await finishUsdcSweep(client, row, { ...status, tradeId: quote.tradeId })
+        } else if (status.status === 'TRADE_STATUS_CANCELED') {
+            await failUsdcSweep(client, row, `Coinbase canceled the trade${status.cancellationReason ? `: ${status.cancellationReason}` : ''}`)
+        } else {
+            console.log(`USDC sweep #${row.id}: trade ${quote.tradeId} still ${status.status}, will check again next run`)
+        }
+    } catch (error) {
+        console.log('sweepProfitToUsdc() ERROR', error?.message || error)
+    } finally {
+        if (client) {
+            if (locked) {
+                try { await client.query('SELECT pg_advisory_unlock($1)', [USDC_SWEEP_LOCK_KEY]) } catch (e) { /* connection gone = lock gone */ }
+            }
+            client.release()
+        }
     }
 }
 
