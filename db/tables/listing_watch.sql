@@ -27,5 +27,10 @@ CREATE TABLE IF NOT EXISTS public.listing_watch (
     first_trade_source      text,                      -- 'exchange_trade_id_1' | 'candles_1m'
     trading_open_at         timestamptz,               -- LEAST(a, b); set once, never moved
     trading_open_source     text,                      -- 'first_trade' | 'restrictions_cleared'
-    last_error              text                       -- last API problem while checking (NULL when the last check was clean)
+    last_error              text,                      -- last API problem while checking (NULL when the last check was clean)
+    -- 2026-10-07 (migrations/2026-10-07_listing_24h_window.sql): set by
+    -- index.js reconcileListingBuys() when this coin's listing buy ended with
+    -- NO fill (cancelled / expired / failed) and its row was deleted;
+    -- thee_procedure never re-snipes a coin with this set (24h window).
+    snipe_cancelled_at      timestamptz
 );

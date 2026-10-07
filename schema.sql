@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict OcaFBmXh7rdhMsitRWR2XfS2xzH01e9UFMdjf6b33tHPFpQH2KISJ2zpuEFVIdC
+\restrict LX7Onmp1ubVXhhfr8Ds0TOL0mwaaad8PmshLD9mQEYjcVxxcsv7i8WVRh6Wll9U
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -2424,7 +2424,8 @@ CREATE TABLE public.listing_watch (
     first_trade_source text,
     trading_open_at timestamp with time zone,
     trading_open_source text,
-    last_error text
+    last_error text,
+    snipe_cancelled_at timestamp with time zone
 );
 
 
@@ -2468,6 +2469,13 @@ COMMENT ON COLUMN public.listing_watch.first_trade_price IS 'Price of that first
 --
 
 COMMENT ON COLUMN public.listing_watch.trading_open_at IS 'Window start = LEAST(first_trade_at, restrictions_cleared_at). Set once and never moved.';
+
+
+--
+-- Name: COLUMN listing_watch.snipe_cancelled_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.listing_watch.snipe_cancelled_at IS 'Set by index.js reconcileListingBuys() when this coin''s listing buy ended with no fill (cancelled / expired / failed) and its position row was deleted. thee_procedure never re-snipes a coin with this set (24h window).';
 
 
 --
@@ -3634,5 +3642,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict OcaFBmXh7rdhMsitRWR2XfS2xzH01e9UFMdjf6b33tHPFpQH2KISJ2zpuEFVIdC
+\unrestrict LX7Onmp1ubVXhhfr8Ds0TOL0mwaaad8PmshLD9mQEYjcVxxcsv7i8WVRh6Wll9U
 
