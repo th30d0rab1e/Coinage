@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict HRelLC2K2SyCeAgn8Z6IwrLZs8sfQxkIPF1O1XCc5Dh5Ew0LqeHdWcza7T4E6Jc
+\restrict hAU5O1dShPB1jN4XCk2b3Y8AaWKpQ6Z4A5EVPPCk1RDdXf2dbdtIig7z1pH8Jun
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -2109,7 +2109,8 @@ CREATE TABLE public.etf (
     product_id text NOT NULL,
     quote_usd numeric DEFAULT 1 NOT NULL,
     enabled boolean DEFAULT true NOT NULL,
-    is_special boolean DEFAULT false NOT NULL
+    is_special boolean DEFAULT false NOT NULL,
+    usdc_product_id text
 );
 
 
@@ -2142,6 +2143,13 @@ COMMENT ON COLUMN public.etf.is_special IS 'True for BLOX, CHPY, TOPW, TSLW, XDT
 
 
 --
+-- Name: COLUMN etf.usdc_product_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.etf.usdc_product_id IS 'USDC-quoted EQUITY product id for this ticker (its alias = product_id). When set, index.js buys on this id and pays with USDC (falls back to product_id / USD when USDC is short and config.etf_usdc_fallback_usd = true). NULL = Coinbase has no USDC version; buy with USD.';
+
+
+--
 -- Name: etf_buy; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -2165,7 +2173,9 @@ CREATE TABLE public.etf_buy (
     expires_at timestamp with time zone,
     basis_price numeric,
     price_basis text,
-    closed_at timestamp with time zone
+    closed_at timestamp with time zone,
+    quote_currency text,
+    product_id text
 );
 
 
@@ -2251,6 +2261,20 @@ COMMENT ON COLUMN public.etf_buy.price_basis IS 'Where basis_price came from: la
 --
 
 COMMENT ON COLUMN public.etf_buy.closed_at IS 'When the bot saw the limit reach a terminal status (FILLED / EXPIRED / CANCELLED / ABANDONED).';
+
+
+--
+-- Name: COLUMN etf_buy.quote_currency; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.etf_buy.quote_currency IS 'Currency that paid for this attempt: USD (etf.product_id) or USDC (etf.usdc_product_id). NULL on rows before 2026-10-07 (all USD).';
+
+
+--
+-- Name: COLUMN etf_buy.product_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.etf_buy.product_id IS 'Coinbase product id the order was sent to (the USD or the USDC product of the ticker). NULL on rows before 2026-10-07 (all etf.product_id).';
 
 
 --
@@ -3518,5 +3542,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict HRelLC2K2SyCeAgn8Z6IwrLZs8sfQxkIPF1O1XCc5Dh5Ew0LqeHdWcza7T4E6Jc
+\unrestrict hAU5O1dShPB1jN4XCk2b3Y8AaWKpQ6Z4A5EVPPCk1RDdXf2dbdtIig7z1pH8Jun
 

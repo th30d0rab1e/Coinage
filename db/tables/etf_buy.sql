@@ -34,7 +34,11 @@ CREATE TABLE IF NOT EXISTS public.etf_buy (
     expires_at        timestamptz,
     basis_price       numeric,
     price_basis       text,
-    closed_at         timestamptz
+    closed_at         timestamptz,
+    -- 2026-10-07: which currency paid (USD / USDC) and which product id the
+    -- order went to. See db/migrations/2026-10-07_etf_usdc_product.sql.
+    quote_currency    text,
+    product_id        text
 );
 
 -- At most one resting (PLACING/OPEN) limit per ticker, even if cron runs overlap.
@@ -70,3 +74,7 @@ COMMENT ON COLUMN public.etf_buy.price_basis IS
     'Where basis_price came from: last_fill, coinbase_bid, or iex_bid.';
 COMMENT ON COLUMN public.etf_buy.closed_at IS
     'When the bot saw the limit reach a terminal status (FILLED / EXPIRED / CANCELLED / ABANDONED).';
+COMMENT ON COLUMN public.etf_buy.quote_currency IS
+    'Currency that paid for this attempt: USD (etf.product_id) or USDC (etf.usdc_product_id). NULL on rows before 2026-10-07 (all USD).';
+COMMENT ON COLUMN public.etf_buy.product_id IS
+    'Coinbase product id the order was sent to (the USD or the USDC product of the ticker). NULL on rows before 2026-10-07 (all etf.product_id).';

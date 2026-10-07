@@ -19,7 +19,11 @@ CREATE TABLE IF NOT EXISTS public.etf (
     -- Regulars (default) need price < last fill * 0.99 and only one attempt
     -- per minute. The flag exists so a regular is not given the special
     -- repeat-buy or 2:45 PM Chicago catch-up.
-    is_special boolean NOT NULL DEFAULT false
+    is_special boolean NOT NULL DEFAULT false,
+    -- 2026-10-07: USDC-quoted product id of the same ticker (its alias is
+    -- product_id). Set = buy on it and pay with USDC; NULL = USD only
+    -- (TOPW). See db/migrations/2026-10-07_etf_usdc_product.sql.
+    usdc_product_id text
 );
 
 COMMENT ON TABLE public.etf IS
@@ -30,3 +34,5 @@ COMMENT ON COLUMN public.etf.quote_usd IS
     'Quote USD notional for one market buy. Default $1.';
 COMMENT ON COLUMN public.etf.is_special IS
     'True for BLOX, CHPY, TOPW, TSLW, XDTE, SPCX, and YBTC. XDTE was made a special on 2026-10-04 so it gets same-day dip rebuys and the 2:45 PM CT catch-up. SPCX (SpaceX common stock) added as a special on 2026-10-05. YBTC (Roundhill Bitcoin Covered Call ETF) added as a special on 2026-10-06; YETH skipped (Coinbase liquidate_only).';
+COMMENT ON COLUMN public.etf.usdc_product_id IS
+    'USDC-quoted EQUITY product id for this ticker (its alias = product_id). When set, index.js buys on this id and pays with USDC (falls back to product_id / USD when USDC is short and config.etf_usdc_fallback_usd = true). NULL = Coinbase has no USDC version; buy with USD.';
