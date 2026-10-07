@@ -269,15 +269,26 @@ async function processNewBalance () {
     try {
         let results = await ca.gatherBalance();
         await db.insertCurrency(results);
+        // 2026-10-07 (Theodore): also log USDC available + hold. USDC is
+        // already downloaded every minute (gatherBalance returns every
+        // account, insertCurrency stores it in bulk_currency, vw_balance
+        // exposes it as name = 'USDC'); this only prints it so the output
+        // log shows the USDC balance the profit sweep fills and USDC-funded
+        // ETF buys spend. No history table, by request. Crypto buy gates still
+        // read only name = 'USD'.
         const balResult = await db.executeQuery(`
             SELECT
                 MAX(CASE WHEN name = 'USD' THEN available ELSE 0 END) AS usd,
+                MAX(CASE WHEN name = 'USDC' THEN available ELSE 0 END) AS usdc,
+                MAX(CASE WHEN name = 'USDC' THEN hold ELSE 0 END) AS usdc_hold,
                 ROUND(SUM(CASE WHEN name NOT IN ('USD', 'USDC') THEN value ELSE 0 END)::numeric, 2) AS equity
             FROM vw_balance
         `)
         const usd = parseFloat(balResult[0]?.usd ?? 0).toFixed(2);
+        const usdc = parseFloat(balResult[0]?.usdc ?? 0).toFixed(2);
+        const usdcHold = parseFloat(balResult[0]?.usdc_hold ?? 0).toFixed(2);
         const equity = balResult[0]?.equity ?? 0;
-        console.log(`Balance: ${results.length} accounts | USD: $${usd} | Position Equity: $${equity}`)
+        console.log(`Balance: ${results.length} accounts | USD: $${usd} | USDC: $${usdc} (hold $${usdcHold}) | Position Equity: $${equity}`)
     } catch (error) {
         console.log("processNewBalance() ERROR", error);
     }
