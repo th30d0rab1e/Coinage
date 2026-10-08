@@ -1,3 +1,6 @@
+-- 2026-10-07: SELL branch 2 adds the "1% trail once above average profit"
+-- rule (config.avg_profit); see the comment at that branch. Branch 1 and
+-- the BUY branch are unchanged.
 -- 2026-10-07 (migrations/2026-10-07_buy_stop_cash_scaled.sql): BUY branch
 -- remake multiplier = GREATEST(1 + buy_remake_floor_pct/100, 1 + gap -
 -- buy_counter * buy_remake_step_pct/100) with gap from vw_buy_stop_gap, then
@@ -232,6 +235,20 @@ AND p.creation_hierarchy = 1
 UNION ALL
 
 -- SELL branch 2 of 2: daily_sell = false, volatility-based base ratio.
+-- 2026-10-07 "1% TRAIL ONCE ABOVE AVERAGE PROFIT" (Theodore): if selling
+-- at trunc(price * 0.99) would net more than config.avg_profit (all-time
+-- AVG(profit_history.profit), refreshed by thee_procedure each run), the new
+-- stop is trunc(price * 0.99) -- a tight 1% trail instead of the wider
+-- volatility ratio (0.90-0.99 for day bags). Net = proceeds at that stop
+-- after an estimated sell fee minus cost incl. the buy fee, with the SAME
+-- fee math as pr below. Otherwise the existing trailing math is unchanged.
+-- Never looser than the existing math (GREATEST), the frozen limit and every
+-- existing guard (ratchet up only, stop >= limit, <= price * 0.995, hierarchy
+-- 1) still apply; the period-average profit gate is waived only when the
+-- rule fires (it already requires net > config.avg_profit).
+-- Branch 1 (daily_sell / listing) does NOT get it: its stop is already
+-- >= trunc(price * 0.99) (0.99 base ratio + 0.005 per remake, capped at
+-- 0.995), so the rule could only match or loosen it there.
 -- 2026-10-07: never serves period_type 'listing' bags -- the
 -- price_aggregate_total join below has no 'listing' rows; listing bags
 -- trail in branch 1 instead. The explicit filter just makes that visible.
@@ -262,16 +279,42 @@ CROSS JOIN LATERAL (
         ELSE NULL::numeric
     END AS stop_ratio
 ) vol
+-- 2026-10-07 1% trail rule inputs: the candidate stop trunc(price * 0.99)
+-- (same price_rounding as every stop here), the net profit if the bag sold
+-- there (proceeds x (1 - fee rate) - (buy_filled_price x shares + buy_fee);
+-- fee rate = this bag's buy fee rate, else config.fee_percent / 100 -- the
+-- same estimate pr uses), and whether that beats config.avg_profit. A
+-- missing avg_profit row makes rule_on NULL -> existing math.
+CROSS JOIN LATERAL (
+    SELECT t.stop99,
+           t.stop99 * p.shares::numeric
+             * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
+             - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0)) AS net99,
+           (SELECT value::numeric FROM config WHERE key = 'avg_profit') AS avg_profit
+    FROM (SELECT trunc(s.price::numeric * 0.99, s.price_rounding) AS stop99) t
+) r99
+CROSS JOIN LATERAL (
+    SELECT r99.net99 > r99.avg_profit AS rule_on
+) rule
 -- FIX 2: the one place the new stop is calculated for this branch.
 -- Old: GREATEST(sell_price, trunc(price * (stop_ratio + counter*0.005)))
 -- New: same, but LEAST'd against trunc(price * 0.995) so the stop is
 --      always at least 0.5% under market (never at/above -> no Coinbase
 --      "Price protection point was breached" cancel, as on PAX-USD 566).
+-- 2026-10-07: when rule.rule_on, GREATEST(trunc(price * 0.99), that value)
+-- -- the 1% trail, or the existing value if remakes already pushed it
+-- higher. Both are <= trunc(price * 0.995), so the cap still holds.
 CROSS JOIN LATERAL (
-    SELECT LEAST(
-        GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.005), s.price_rounding)),
-        trunc(s.price::numeric * 0.995, s.price_rounding)
-    ) AS new_stop
+    SELECT CASE WHEN rule.rule_on
+                THEN GREATEST(r99.stop99, ex.existing_stop)
+                ELSE ex.existing_stop
+           END AS new_stop
+    FROM (
+        SELECT LEAST(
+            GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (vol.stop_ratio + p.sell_counter::numeric * 0.005), s.price_rounding)),
+            trunc(s.price::numeric * 0.995, s.price_rounding)
+        ) AS existing_stop
+    ) ex
 ) ns
 -- FIX 1: fee-adjusted net profit if the order sells at the NEW stop
 -- (previously computed at p.sell_price, the frozen old limit).
@@ -291,7 +334,10 @@ AND p.sell_stop_price < ns.new_stop::double precision
 AND ns.new_stop >= p.sell_price::numeric
 -- FIX 1: profit gate at the NEW stop, not the old limit.
 AND pr.net_at_new_stop > 0
-AND pr.net_at_new_stop > (SELECT COALESCE(AVG(profit), 0) FROM profit_history WHERE period_type = p.period_type)
+-- 2026-10-07: the period-average gate is skipped when the 1% trail rule
+-- fired (net at the new stop >= net99 > config.avg_profit already).
+AND (rule.rule_on IS TRUE
+     OR pr.net_at_new_stop > (SELECT COALESCE(AVG(profit), 0) FROM profit_history WHERE period_type = p.period_type))
 -- Only the cheapest open bag per coin (creation_hierarchy ranks by fill).
 AND p.creation_hierarchy = 1
 ORDER BY last_remade_at ASC NULLS FIRST, price_diff DESC;

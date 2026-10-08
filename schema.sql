@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict sIS7oD8tUA4UZW8zQFaT6C2vGIL8RawgWaggfwPRIc1bIc8ZHssSJgqz4jSYw2y
+\restrict bb3xidLq8BpcRHVBcSyTH2RmsTftJo8Fa7WzFEQHcsCRajTP03GQ82D5Ai0IrTG
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -3334,7 +3334,7 @@ UNION ALL
     p.last_remade_at,
     p.sell_counter AS counter,
     (abs((ns.new_stop - (p.sell_stop_price)::numeric)) / NULLIF((s.price)::numeric, (0)::numeric)) AS price_diff
-   FROM (((((public."position" p
+   FROM (((((((public."position" p
      JOIN public.stock s ON ((p.stock_id = s.stock_id)))
      JOIN public.price_aggregate_total pat ON (((p.stock_id = pat.stock_id) AND (p.period_type = pat.period_type))))
      CROSS JOIN LATERAL ( SELECT
@@ -3344,13 +3344,27 @@ UNION ALL
                     WHEN 'year'::text THEN LEAST(0.95, GREATEST(0.60, ((1)::numeric - ((pat.std_dev)::numeric / (200)::numeric))))
                     ELSE NULL::numeric
                 END AS stop_ratio) vol)
-     CROSS JOIN LATERAL ( SELECT LEAST(GREATEST((p.sell_price)::numeric, trunc(((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.005))), s.price_rounding)), trunc(((s.price)::numeric * 0.995), s.price_rounding)) AS new_stop) ns)
+     CROSS JOIN LATERAL ( SELECT t.stop99,
+            (((t.stop99 * (p.shares)::numeric) * ((1)::numeric - COALESCE((NULLIF((p.buy_fee)::numeric, (0)::numeric) / NULLIF(((p.buy_filled_price)::numeric * (p.shares)::numeric), (0)::numeric)), (COALESCE(( SELECT (config.value)::numeric AS value
+                   FROM public.config
+                  WHERE (config.key = 'fee_percent'::text)), 1.20) / (100)::numeric)))) - (((p.buy_filled_price)::numeric * (p.shares)::numeric) + COALESCE((p.buy_fee)::numeric, (0)::numeric))) AS net99,
+            ( SELECT (config.value)::numeric AS value
+                   FROM public.config
+                  WHERE (config.key = 'avg_profit'::text)) AS avg_profit
+           FROM ( SELECT trunc(((s.price)::numeric * 0.99), s.price_rounding) AS stop99) t) r99)
+     CROSS JOIN LATERAL ( SELECT (r99.net99 > r99.avg_profit) AS rule_on) rule)
+     CROSS JOIN LATERAL ( SELECT
+                CASE
+                    WHEN rule.rule_on THEN GREATEST(r99.stop99, ex.existing_stop)
+                    ELSE ex.existing_stop
+                END AS new_stop
+           FROM ( SELECT LEAST(GREATEST((p.sell_price)::numeric, trunc(((s.price)::numeric * (vol.stop_ratio + ((p.sell_counter)::numeric * 0.005))), s.price_rounding)), trunc(((s.price)::numeric * 0.995), s.price_rounding)) AS existing_stop) ex) ns)
      CROSS JOIN LATERAL ( SELECT (((ns.new_stop * (p.shares)::numeric) * ((1)::numeric - COALESCE((NULLIF((p.buy_fee)::numeric, (0)::numeric) / NULLIF(((p.buy_filled_price)::numeric * (p.shares)::numeric), (0)::numeric)), (COALESCE(( SELECT (config.value)::numeric AS value
                    FROM public.config
                   WHERE (config.key = 'fee_percent'::text)), 1.20) / (100)::numeric)))) - (((p.buy_filled_price)::numeric * (p.shares)::numeric) + COALESCE((p.buy_fee)::numeric, (0)::numeric))) AS net_at_new_stop) pr)
-  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.daily_sell = false) AND (p.period_type IS DISTINCT FROM 'listing'::text) AND (p.sell_stop_price < (ns.new_stop)::double precision) AND (ns.new_stop >= (p.sell_price)::numeric) AND (pr.net_at_new_stop > (0)::numeric) AND ((pr.net_at_new_stop)::double precision > ( SELECT COALESCE(avg(profit_history.profit), (0)::double precision) AS "coalesce"
+  WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.daily_sell = false) AND (p.period_type IS DISTINCT FROM 'listing'::text) AND (p.sell_stop_price < (ns.new_stop)::double precision) AND (ns.new_stop >= (p.sell_price)::numeric) AND (pr.net_at_new_stop > (0)::numeric) AND ((rule.rule_on IS TRUE) OR ((pr.net_at_new_stop)::double precision > ( SELECT COALESCE(avg(profit_history.profit), (0)::double precision) AS "coalesce"
            FROM public.profit_history
-          WHERE (profit_history.period_type = p.period_type))) AND (p.creation_hierarchy = 1))
+          WHERE (profit_history.period_type = p.period_type)))) AND (p.creation_hierarchy = 1))
   ORDER BY 11 NULLS FIRST, 13 DESC;
 
 
@@ -3928,5 +3942,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict sIS7oD8tUA4UZW8zQFaT6C2vGIL8RawgWaggfwPRIc1bIc8ZHssSJgqz4jSYw2y
+\unrestrict bb3xidLq8BpcRHVBcSyTH2RmsTftJo8Fa7WzFEQHcsCRajTP03GQ82D5Ai0IrTG
 
