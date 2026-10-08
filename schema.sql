@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict N6U18znpp3N3shpsvssAauWV1BTdg2OED6wNJMK3gPbwuPR52qLNoSwegQmxDsx
+\restrict ifrOd2s6gWyhPBcCi69k4dxXStlDVXl3Il05RzzVkZj0ggT8vFpfnOaoaVFTrgc
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -2494,7 +2494,7 @@ COMMENT ON COLUMN public.etf.enabled IS 'false = the bot neither buys this ticke
 -- Name: COLUMN etf.is_special; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.etf.is_special IS 'True for BLOX, CHPY, TOPW, TSLW, XDTE, SPCX, and YBTC. XDTE was made a special on 2026-10-04 so it gets same-day dip rebuys and the 2:45 PM CT catch-up. SPCX (SpaceX common stock) added as a special on 2026-10-05. YBTC (Roundhill Bitcoin Covered Call ETF) added as a special on 2026-10-06; YETH skipped (Coinbase liquidate_only).';
+COMMENT ON COLUMN public.etf.is_special IS 'True for every ETF row (BLOX, CHPY, TOPW, TSLW, XDTE, SPCX, YBTC, RDTE, QDTE). XDTE became a special 2026-10-04; SPCX added 2026-10-05 (disabled 2026-10-07); YBTC 2026-10-06 (YETH skipped: liquidate_only); RDTE and QDTE 2026-10-08 (AAPW skipped: liquidate_only; GLDW skipped: not fractionable).';
 
 
 --
@@ -4058,5 +4058,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict N6U18znpp3N3shpsvssAauWV1BTdg2OED6wNJMK3gPbwuPR52qLNoSwegQmxDsx
+\unrestrict ifrOd2s6gWyhPBcCi69k4dxXStlDVXl3Il05RzzVkZj0ggT8vFpfnOaoaVFTrgc
 
