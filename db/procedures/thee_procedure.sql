@@ -64,7 +64,19 @@ AS $$
 -- config.avg_profit is refreshed by the first statement but not read here
 -- (vw_edit_orders reads it), so it has no variable. The variables are
 -- assigned after that UPDATE anyway.
+-- 2026-10-08 DIP-BUY variables (db/migrations/2026-10-08_dip_buy.sql),
+-- assigned with the others at the top:
+--     v_dip_buy_enabled  config.dip_buy_enabled ('1'/'true' = on; missing = off)
+--     v_dip_buy_gap_pct  config.dip_buy_gap_pct  (default 2)
+--     v_dip_buy_usd      config.dip_buy_usd      (default 1)
+--     v_dip_buy_max_open config.dip_buy_max_open (default 5)
+--     (dip_buy_remake_pct / dip_buy_ttl_hours are read by vw_dip_buy_actions,
+--     which index.js uses; the procedure does not need them.)
 DECLARE
+    v_dip_buy_enabled            boolean;
+    v_dip_buy_gap_pct            numeric;
+    v_dip_buy_usd                numeric;
+    v_dip_buy_max_open           integer;
     v_stablecoin_price_band_pct  numeric;
     v_stablecoin_max_range_pct   numeric;
     v_pending_buy_ttl_hours      integer;
@@ -118,6 +130,11 @@ v_bba_fresh                  := EXISTS (SELECT 1 FROM bulk_best_bid_ask WHERE lo
 v_fee_percent                := COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20);
 -- Start-of-run cash-scaled buy-stop gap, shared by all three buy statements.
 v_gap                        := (SELECT gap FROM vw_buy_stop_gap);
+-- 2026-10-08 dip-buy (see the header). The switch: a missing row means OFF.
+v_dip_buy_enabled            := COALESCE((SELECT value FROM config WHERE key = 'dip_buy_enabled'), '0') IN ('1', 'true');
+v_dip_buy_gap_pct            := COALESCE((SELECT value::numeric FROM config WHERE key = 'dip_buy_gap_pct'), 2);
+v_dip_buy_usd                := COALESCE((SELECT value::numeric FROM config WHERE key = 'dip_buy_usd'), 1);
+v_dip_buy_max_open           := COALESCE((SELECT value::int     FROM config WHERE key = 'dip_buy_max_open'), 5);
 
 INSERT INTO stock (name, date_created)
 SELECT bs.id, NOW()
@@ -463,15 +480,20 @@ AND (
         ) m
     )
     -- (f) wide spread (only with fresh best-bid/ask data)
+    -- 2026-10-08: the book gates (f)/(g) do not apply to a DIP-BUY row. It
+    -- is a resting limit BELOW the market, not a stop that buys into the
+    -- ask, and the dip insert does not check the book, so dropping it here
+    -- would only make it be re-inserted every minute.
     OR (
-        v_bba_fresh
+        p.buy_source IS DISTINCT FROM 'dip_buy'
+        AND v_bba_fresh
         AND COALESCE(
                 (SELECT bba.spread_pct FROM bulk_best_bid_ask bba WHERE bba.product_id = s.name),
                 'Infinity'::double precision
             ) > v_book_max_spread_pct::double precision
     )
     -- (g) ask-heavy or thin book (fresh snapshot only)
-    OR EXISTS (
+    OR (p.buy_source IS DISTINCT FROM 'dip_buy' AND EXISTS (
         SELECT 1
         FROM (
             SELECT bs.imbalance, bs.near_ask_usd
@@ -484,7 +506,7 @@ AND (
         WHERE fresh_book.imbalance < v_book_skip_imbalance::double precision
         OR fresh_book.near_ask_usd < (p.shares * p.buy_price)
             * v_book_min_ask_notional_mult::double precision
-    )
+    ))
 );
 
 -- 2026-10-05 affordability clean-up (was the per-row cashLeft check in
@@ -503,7 +525,9 @@ AND (
 WITH RECURSIVE cand AS (
     SELECT p.position_id,
            (p.shares * p.buy_price)::numeric * 1.012 AS cost,
-           ROW_NUMBER() OVER (ORDER BY s.priority DESC NULLS LAST, p.position_id) AS rn
+           -- 2026-10-08: DIP-BUY rows are funded LAST (after every other
+           -- planned row), then by priority as before.
+           ROW_NUMBER() OVER (ORDER BY (p.buy_source = 'dip_buy') IS TRUE, s.priority DESC NULLS LAST, p.position_id) AS rn
     FROM position p
     JOIN stock s ON s.stock_id = p.stock_id
     WHERE p.buy_coinbase_order_id IS NULL
@@ -1267,6 +1291,131 @@ ORDER BY
     s.priority DESC NULLS LAST
 LIMIT 1;
 
+-- =====================================================================
+-- 2026-10-08 DIP-BUY (Theodore, approved on a voice call 2026-10-08;
+-- db/migrations/2026-10-08_dip_buy.sql). Does NOTHING unless
+-- config.dip_buy_enabled is '1'/'true' (v_dip_buy_enabled, read once at
+-- the top). Shipped OFF.
+--
+-- A dip buy is a plain LIMIT buy (no stop) resting BELOW the market, for a
+-- priority coin Theodore does not own yet: ~$dip_buy_usd at current price
+-- x (1 - dip_buy_gap_pct/100). Row shape: period_type 'day' (so a fill is
+-- an ordinary position and the normal sell pricing applies),
+-- buy_stop_price NULL, buy_price = the limit, buy_source = 'dip_buy'.
+-- index.js processBuyOrders() sends it with createLimitOrder (dip rows are
+-- sent last); index.js processDipBuys() cancels it for remake / TTL using
+-- vw_dip_buy_actions. The existing first-buy / average-down inserts above
+-- are unchanged and run first, so they get the cash first.
+-- =====================================================================
+
+-- D1. Switch OFF: drop PLANNED (unsent) dip rows. A dip order already
+-- resting on Coinbase is never touched here; processDipBuys() winds it
+-- down (TTL, or a remake whose re-priced row this then drops).
+DELETE FROM position p
+WHERE NOT v_dip_buy_enabled
+AND p.buy_source = 'dip_buy'
+AND p.buy_coinbase_order_id IS NULL
+AND p.buy_filled_price IS NULL
+AND p.sell_coinbase_order_id IS NULL
+AND NOT EXISTS (SELECT 1 FROM bulk_open_orders o WHERE o.client_order_id = p.buy_order_id);
+
+-- D2. Re-price planned dip rows to the CURRENT dip price. A planned dip row
+-- exists after processDipBuys() cancelled a resting one for a remake (the
+-- market rose more than dip_buy_remake_pct above its limit) or after a
+-- rejected placement. Same price / size math as D3.
+UPDATE position p
+SET buy_price = px.limit_price,
+    shares    = sz.shares
+FROM stock st
+-- limit = price x (1 - gap%), rounded DOWN to the price increment
+CROSS JOIN LATERAL (
+    SELECT TRUNC(st.price::numeric * (1 - v_dip_buy_gap_pct / 100), st.price_rounding::integer) AS limit_price
+) px
+-- size = dip_buy_usd / limit, rounded UP to the size increment (cost >= $1)
+CROSS JOIN LATERAL (
+    SELECT CEIL(v_dip_buy_usd / NULLIF(px.limit_price, 0) * power(10::numeric, st.share_rounding::integer))
+           / power(10::numeric, st.share_rounding::integer) AS shares
+) sz
+WHERE p.stock_id = st.stock_id
+AND v_dip_buy_enabled
+AND p.buy_source = 'dip_buy'
+AND p.buy_coinbase_order_id IS NULL
+AND p.buy_filled_price IS NULL
+AND p.sell_coinbase_order_id IS NULL
+AND st.price_rounding IS NOT NULL
+AND st.share_rounding IS NOT NULL
+AND px.limit_price > 0
+AND (p.buy_price IS DISTINCT FROM px.limit_price::double precision
+     OR p.shares IS DISTINCT FROM sz.shares::double precision);
+
+-- D3. New dip buys, highest stock.priority first, while (a) fewer than
+-- dip_buy_max_open dip orders are open/planned and (b) free USD covers the
+-- running total. Eligible coin:
+--   * stock.priority > 0, a -USD product listed on Coinbase this minute
+--     (bulk_stock, not cancel-only), not trading_disabled, not a stablecoin;
+--   * NOT held (no filled, unsold position) -- held coins keep the existing
+--     buys;
+--   * no other open or planned buy of ANY kind (first buy, average-down,
+--     listing, dip) -- so a coin never has a first buy and a dip buy at once;
+--   * size >= the coin's min size and cost >= its min notional.
+-- Cash gate = the one the inserts above use: free USD (vw_balance) minus the
+-- ETF reserve, the USDC-sweep reserve and every planned-but-unsent buy
+-- (incl. the rows just inserted above), against the running cost x 1.012.
+-- USD only, never USDC.
+INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type, buy_source)
+SELECT c.stock_id, c.name, c.limit_price, NULL, c.shares, NOW(), gen_random_uuid(), 'day', 'dip_buy'
+FROM (
+    SELECT st.stock_id, st.name, px.limit_price, sz.shares,
+           ROW_NUMBER() OVER w                          AS rn,
+           SUM(sz.shares * px.limit_price * 1.012) OVER w AS running_cost   -- incl. fee pad
+    FROM stock st
+    CROSS JOIN LATERAL (
+        SELECT TRUNC(st.price::numeric * (1 - v_dip_buy_gap_pct / 100), st.price_rounding::integer) AS limit_price
+    ) px
+    CROSS JOIN LATERAL (
+        SELECT CEIL(v_dip_buy_usd / NULLIF(px.limit_price, 0) * power(10::numeric, st.share_rounding::integer))
+               / power(10::numeric, st.share_rounding::integer) AS shares
+    ) sz
+    WHERE v_dip_buy_enabled
+    AND v_pause_buys = 'false'
+    AND st.name LIKE '%-USD'
+    AND st.priority > 0
+    AND st.trading_disabled IS NOT TRUE
+    AND st.is_stablecoin IS NOT TRUE
+    AND st.price > 0
+    AND st.price_rounding IS NOT NULL
+    AND st.share_rounding IS NOT NULL
+    AND EXISTS (SELECT 1 FROM bulk_stock bs
+                WHERE bs.id = st.name
+                AND bs.cancel_only IS DISTINCT FROM 'true')
+    AND px.limit_price > 0
+    AND sz.shares > 0
+    AND sz.shares >= COALESCE(st.min_shares, 0)
+    AND sz.shares * px.limit_price >= COALESCE(st.min_price, 0)
+    -- not held
+    AND NOT EXISTS (SELECT 1 FROM position h
+                    WHERE h.stock_id = st.stock_id
+                    AND h.buy_filled_price IS NOT NULL
+                    AND h.sell_filled_price IS NULL)
+    -- no other open / planned buy of any kind
+    AND NOT EXISTS (SELECT 1 FROM position o
+                    WHERE o.stock_id = st.stock_id
+                    AND o.buy_filled_price IS NULL)
+    WINDOW w AS (ORDER BY st.priority DESC, st.stock_id ROWS UNBOUNDED PRECEDING)
+) c
+WHERE c.rn <= v_dip_buy_max_open
+              - (SELECT COUNT(*) FROM position d
+                 WHERE d.buy_source = 'dip_buy' AND d.buy_filled_price IS NULL)
+AND c.running_cost <=
+      (SELECT available::numeric FROM vw_balance WHERE name = 'USD')
+    - COALESCE((SELECT reserve_usd FROM vw_etf_cash_reserve), 0)
+    - COALESCE((SELECT reserve_usd FROM vw_usdc_sweep_reserve), 0)
+    - COALESCE((SELECT SUM(pb.shares * pb.buy_price * 1.012)::numeric
+                FROM position pb JOIN stock sb ON sb.stock_id = pb.stock_id
+                WHERE pb.buy_coinbase_order_id IS NULL
+                AND pb.buy_filled_price IS NULL
+                AND sb.trading_disabled IS NOT TRUE), 0);
+
 -- Initial sell stop, floored at a breakeven price unconditionally — a
 -- position must never be sold at a net loss, underwater or not. The floor
 -- is NOT raw buy_filled_price: profit is (sell_price*shares - sell_fee) -
@@ -1467,6 +1616,9 @@ AND p.buy_coinbase_order_id IS NULL
 AND p.buy_filled_price IS NULL
 -- 2026-10-07: listing rows exempt (plain limit, and never on a held coin).
 AND p.period_type IS DISTINCT FROM 'listing'
+-- 2026-10-08: never on a DIP-BUY row (plain limit with no stop; it is only
+-- ever made for a coin that is not held).
+AND p.buy_source IS DISTINCT FROM 'dip_buy'
 AND s.price_rounding IS NOT NULL
 AND p.buy_price::numeric >= c.min_fill;
 
@@ -1609,7 +1761,9 @@ AND p.sell_fee IS NOT NULL;
 -- records rows where it is filled in.
 -- 2026-10-07: also carries buy_quote_currency (NULL = USD, 'USDC' = listing
 -- snipe bought on <COIN>-USDC); profit math is unchanged (USDC = USD 1:1).
-INSERT INTO profit_history (stock_id, name, period_type, buy_coinbase_order_id, sell_fills_id, buy_fee, sell_fee, profit, profit_converted_usdc, buy_quote_currency)
+-- 2026-10-08: also carries buy_source ('dip_buy' or NULL) so dip-buy
+-- results can be told apart after the position row is gone.
+INSERT INTO profit_history (stock_id, name, period_type, buy_coinbase_order_id, sell_fills_id, buy_fee, sell_fee, profit, profit_converted_usdc, buy_quote_currency, buy_source)
 SELECT
     p.stock_id, p.name, p.period_type, p.buy_coinbase_order_id, p.sell_coinbase_order_id AS sell_fills_id,
     TRUNC(p.buy_fee::numeric, 2) AS buy_fee,
@@ -1617,7 +1771,8 @@ SELECT
     TRUNC(((p.sell_filled_price::numeric * p.shares::numeric - p.sell_fee::numeric)
          - (p.buy_filled_price::numeric * p.shares::numeric + p.buy_fee::numeric))::numeric, 2) AS profit,
     p.profit_converted_usdc,
-    p.buy_quote_currency
+    p.buy_quote_currency,
+    p.buy_source
 FROM position p
 WHERE p.buy_coinbase_order_id IS NOT NULL
 AND p.sell_coinbase_order_id IS NOT NULL

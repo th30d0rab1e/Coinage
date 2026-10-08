@@ -148,6 +148,11 @@ async function main () {
         //Remake Orders
         await processRemakeOrders();
 
+        // 2026-10-08 DIP-BUY: cancel resting dip-buy limits that need a remake
+        // or hit their TTL, and clean up ones cancelled outside the bot.
+        // No dip rows (the switch has never been on) = no-op, no API calls.
+        await processDipBuys();
+
         // Re-take the open-orders copy AFTER all place/cancel/re-place calls,
         // so bulk_open_orders (and vw_position_order_balance_audit) matches what
         // position now points at between runs. Without this, every re-place shows
@@ -233,6 +238,64 @@ async function reconcileListingBuys() {
         }
     } catch (error) {
         console.log('reconcileListingBuys() ERROR', error?.message || error)
+    }
+}
+
+// 2026-10-08 DIP-BUY maintenance (Theodore, voice call 2026-10-08;
+// db/migrations/2026-10-08_dip_buy.sql). Acts only on LIVE dip-buy orders
+// with no fill, listed by db/views/vw_dip_buy_actions.sql:
+//   remake : limit is more than config.dip_buy_remake_pct below the market.
+//            Cancel; keep the row with buy_coinbase_order_id NULL so
+//            thee_procedure re-prices it to current x (1 - dip_buy_gap_pct
+//            /100) next run and processBuyOrders re-places it (when the
+//            switch is off the procedure drops it instead).
+//   ttl    : rested longer than config.dip_buy_ttl_hours. Cancel and delete
+//            the row; the coin may get a fresh dip buy next run.
+//   gone   : not open on Coinbase any more and no fill recorded (cancelled
+//            outside the bot). Confirm with Coinbase, then delete the row.
+// After any cancel the order is re-read: if anything filled in the
+// meantime, the row is kept with shares = the filled size so it becomes a
+// normal position (same as reconcileListingBuys). A failed cancel is only
+// logged; the next run tries again. No rows (switch never on) = nothing
+// happens: no API calls, no log lines.
+async function processDipBuys() {
+    try {
+        const rows = await db.executeQuery(`SELECT * FROM vw_dip_buy_actions ORDER BY position_id`)
+        for (const r of rows || []) {
+            if (r.action === 'gone') {
+                const order = await ca.getOrderById(r.buy_coinbase_order_id)
+                if (!['CANCELLED', 'EXPIRED', 'FAILED'].includes(order?.status)) continue
+                const filled = parseFloat(order?.filled_size || 0)
+                if (filled > 0) {
+                    await db.query(`UPDATE position SET shares = $1 WHERE buy_order_id = $2 AND buy_source = 'dip_buy'`, [filled, r.buy_order_id])
+                    console.log(`Dip buy ${order.status} after partial fill: ${r.name} | kept ${filled} of ${r.shares} as the position`)
+                } else {
+                    await db.query(`DELETE FROM position WHERE buy_order_id = $1 AND buy_source = 'dip_buy' AND buy_filled_price IS NULL AND sell_coinbase_order_id IS NULL`, [r.buy_order_id])
+                    console.log(`Dip buy ${order.status} outside the bot, no fill: ${r.name} | row removed`)
+                }
+                continue
+            }
+            const cancelled = await ca.cancelOrder(r.buy_coinbase_order_id)
+            if (!cancelled) {
+                console.log(`Dip buy ${r.action} cancel FAILED (retry next run): ${r.name} | ${r.buy_coinbase_order_id}`)
+                continue
+            }
+            // anything filled between the snapshot and the cancel? keep it.
+            const order = await ca.getOrderById(r.buy_coinbase_order_id)
+            const filled = parseFloat(order?.filled_size || 0)
+            if (filled > 0) {
+                await db.query(`UPDATE position SET shares = $1 WHERE buy_order_id = $2 AND buy_source = 'dip_buy'`, [filled, r.buy_order_id])
+                console.log(`Dip buy cancelled (${r.action}) after partial fill: ${r.name} | kept ${filled} of ${r.shares} as the position`)
+            } else if (r.action === 'ttl') {
+                await db.query(`DELETE FROM position WHERE buy_order_id = $1 AND buy_source = 'dip_buy' AND buy_filled_price IS NULL AND sell_coinbase_order_id IS NULL`, [r.buy_order_id])
+                console.log(`Dip buy TTL cancel: ${r.name} | limit ${r.buy_price} (market ${r.market}) | row removed, coin free for a new dip buy`)
+            } else {
+                await db.query(`UPDATE position SET buy_coinbase_order_id = NULL, error_message = NULL, buy_counter = COALESCE(buy_counter, 0) + 1, last_remade_at = NOW() WHERE buy_order_id = $1 AND buy_source = 'dip_buy' AND buy_filled_price IS NULL`, [r.buy_order_id])
+                console.log(`Dip buy remake cancel: ${r.name} | limit ${r.buy_price} was > remake % under market ${r.market} | re-priced and re-placed next run`)
+            }
+        }
+    } catch (error) {
+        console.log('processDipBuys() ERROR', error?.message || error)
     }
 }
 
@@ -1229,7 +1292,9 @@ async function processBuyOrders () {
             -- inserted by thee_procedure only inside the rolling
             -- listing_buy_window_hours (24h) after trading opened) go FIRST so
             -- normal rows cannot spend the cash they were gated on.
-            ORDER BY (p.period_type = 'listing') DESC, s.priority DESC NULLS LAST
+            -- 2026-10-08: DIP-BUY rows (buy_source = 'dip_buy') go LAST, after
+            -- every normal buy, so they only use cash nothing else wanted.
+            ORDER BY (p.period_type = 'listing') DESC, (p.buy_source = 'dip_buy') IS TRUE, s.priority DESC NULLS LAST
         `)
         // Low USD: keep ONLY the USDC-funded listing row (see usdLow above).
         if (usdLow) orders = (orders || []).filter(o => o.period_type === 'listing' && o.buy_quote_currency === 'USDC')
@@ -1276,13 +1341,21 @@ async function processBuyOrders () {
             // (listingBuyProductId); everything else uses position.name.
             const buyProductId = isListing ? listingBuyProductId(element) : element.name
             const buyCurrency = isListing && element.buy_quote_currency === 'USDC' ? 'USDC' : 'USD'
+            // 2026-10-08 DIP-BUY: also a PLAIN LIMIT buy (no stop), resting
+            // dip_buy_gap_pct below the market on the -USD product (USD only).
+            // thee_procedure set buy_price (rounded down to the price
+            // increment) and shares (~$dip_buy_usd, rounded up to the size
+            // increment). Remake / TTL: processDipBuys().
+            const isDip = element.buy_source === 'dip_buy'
             let response = isListing
                 ? await ca.createLimitOrder('buy', element.buy_price, element.shares, buyProductId, newOrderId)
+                : isDip
+                ? await ca.createLimitOrder('buy', element.buy_price, element.shares, element.name, newOrderId)
                 : await ca.createStopLimitOrder('buy', element.buy_price, element.shares, element.name, element.buy_stop_price, newOrderId);
             if(response?.success == true) {
                 // buy_placed_at (2026-09-25): order age, so far-release won't cancel a fresh order
                 await db.executeQuery(`UPDATE position SET buy_order_id = '${newOrderId}', buy_coinbase_order_id = '${response.success_response.order_id}', buy_placed_at = NOW() WHERE buy_order_id = '${element.buy_order_id}'`)
-                console.log(`${isListing ? `Listing LIMIT Buy Created (GTC, no expiry, paid in ${buyCurrency} on ${buyProductId})` : 'Buy Order Created'}: ${element.name} | shares: ${element.shares} | price: ${element.buy_price}`)
+                console.log(`${isListing ? `Listing LIMIT Buy Created (GTC, no expiry, paid in ${buyCurrency} on ${buyProductId})` : isDip ? 'Dip LIMIT Buy Created' : 'Buy Order Created'}: ${element.name} | shares: ${element.shares} | price: ${element.buy_price}`)
             } else {
                 const errMsg = (response?.error_response?.message || 'unknown').replace(/'/g, "''")
                 await db.executeQuery(`UPDATE position SET error_message = '${errMsg}' WHERE buy_order_id = '${element.buy_order_id}'`)
@@ -1292,7 +1365,7 @@ async function processBuyOrders () {
                 // re-inserts it with fresh gates (and a fresh price) only while
                 // the coin's 24h window is still open, so it is retried each
                 // minute inside the window and simply stops after.
-                console.log(isListing ? `Listing Buy FAILED (retried next minute while the 24h window is open): ${element.name} via ${buyProductId} (${buyCurrency})` : `Buy Order FAILED: ${element.name}`, response)
+                console.log(isListing ? `Listing Buy FAILED (retried next minute while the 24h window is open): ${element.name} via ${buyProductId} (${buyCurrency})` : isDip ? `Dip LIMIT Buy FAILED: ${element.name}` : `Buy Order FAILED: ${element.name}`, response)
                 // 2026-09-25: 'Invalid product_id' means the product no longer exists
                 // on Coinbase (delisted, e.g. LRC-USD) -- retrying can never succeed.
                 // Flag the coin so nothing picks it again, and drop this planned row.
@@ -1458,6 +1531,8 @@ async function processFarBuyCashRelease () {
             WHERE p.buy_coinbase_order_id IS NULL
             AND p.buy_filled_price IS NULL
             AND (p.error_message IS NULL OR p.error_message NOT IN ('Invalid product_id'))
+            -- 2026-10-08: never cancel a normal buy to fund a DIP-BUY row.
+            AND p.buy_source IS DISTINCT FROM 'dip_buy'
             ORDER BY s.priority DESC NULLS LAST
             LIMIT 1
         `)
@@ -2297,4 +2372,4 @@ async function transferProfit (accounts, fills) {
 
 // 2026-10-07: exported only for test harnesses (require does not run main,
 // see the require.main guard at the top). Not used by the live cron run.
-module.exports = { processBuyOrders, listingBuyProductId, reserveEtfCash, reconcileListingBuys, logListingSkips }
+module.exports = { processBuyOrders, listingBuyProductId, reserveEtfCash, reconcileListingBuys, logListingSkips, processDipBuys, processFarBuyCashRelease }

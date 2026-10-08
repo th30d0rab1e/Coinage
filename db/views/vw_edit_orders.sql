@@ -169,6 +169,11 @@ AND p.buy_filled_price IS NULL
 -- cancels it by hand. Its NULL buy_stop_price already fails the next line;
 -- this makes the exemption explicit.
 AND p.period_type IS DISTINCT FROM 'listing'
+-- 2026-10-08: never remake a DIP-BUY order here either (plain limit, NULL
+-- buy_stop_price, so the next line already fails; explicit for clarity).
+-- Dip orders have their own remake / TTL rules: vw_dip_buy_actions +
+-- index.js processDipBuys().
+AND p.buy_source IS DISTINCT FROM 'dip_buy'
 -- only-lower ratchet (both stop and limit must drop)
 AND p.buy_stop_price > bp.stop_price::double precision
 AND p.buy_price > bp.limit_price::double precision
