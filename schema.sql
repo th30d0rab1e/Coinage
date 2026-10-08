@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict DiCLIHVnK2thntEmHQlqKiobl0KNQD93hOWNBTDZXlL4nz2prMf5qHAUkhML775
+\restrict Tkyosalv4HBK7UMIKRlySf94PMNi0adRaapexGrt7j5LAHqY341swBasM992glW
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -373,7 +373,9 @@ CREATE PROCEDURE public.thee_procedure()
 -- This procedure was LANGUAGE sql with config read inline (scalar subqueries
 -- and CROSS JOIN LATERAL cfg / bookcfg blocks repeated per statement). It is
 -- now LANGUAGE plpgsql: each config value is read ONCE into a variable, with
--- the SAME cast and COALESCE default the inline lookup used. Per-coin laterals
+-- the SAME cast and COALESCE default the inline lookup used. ALL variables
+-- are assigned once, at the top (right after the avg_profit refresh); none
+-- is re-read mid-run (Theodore, 2026-10-07). Per-coin laterals
 -- (clip size, min paid, fn_buy_below_paid, book snapshot, plan / eff math)
 -- are unchanged.
 --
@@ -393,17 +395,18 @@ CREATE PROCEDURE public.thee_procedure()
 --   v_listing_usdc_fallback        listing_usdc_fallback = 'true' (missing = false)  top
 --   v_initial_buy_top_pct          initial_buy_top_pct (50), clamped 0..100          top
 --   v_sell_net_cushion             sell_net_cushion           (0.015)    top
---   v_fee_percent                  fee_percent                (1.20)     AFTER the
---                                  fee-learning INSERT/UPDATE below, which can change
---                                  config.fee_percent mid-run (same value the
---                                  later inline lookups saw).
+--   v_fee_percent                  fee_percent                (1.20)     top
+--     CONSEQUENCE: read BEFORE the fee-learning INSERT/UPDATE below, so a fee
+--     learned this run takes effect in next minute's run (the old inline
+--     lookups saw it in the same run).
 --   Not config, same "read once" treatment:
 --   v_bba_fresh   bulk_best_bid_ask loaded in the last 3 minutes (NOW() is fixed
 --                 for the whole run and this procedure never writes that table).
---   v_gap         vw_buy_stop_gap.gap. It depends on positions / balances, which
---                 this procedure changes, so it is re-read IMMEDIATELY BEFORE each
---                 of its three statements (signal insert, average-down insert,
---                 stale refresh) -- the same value the old CROSS JOIN saw.
+--   v_gap         vw_buy_stop_gap.gap, assigned once at the top.
+--     CONSEQUENCE: the signal insert, average-down insert and stale refresh all
+--     use the same start-of-run gap (the old CROSS JOINs re-read the view per
+--     statement, so position / balance changes earlier in the run could
+--     shift it slightly).
 -- config.avg_profit is refreshed by the first statement but not read here
 -- (vw_edit_orders reads it), so it has no variable. The variables are
 -- assigned after that UPDATE anyway.
@@ -459,6 +462,10 @@ v_initial_buy_top_pct        := LEAST(100, GREATEST(0, COALESCE((SELECT value::n
 v_sell_net_cushion           := COALESCE((SELECT value::numeric FROM config WHERE key = 'sell_net_cushion'), 0.015);
 -- Is this minute's best bid/ask data fresh enough to judge spread at all?
 v_bba_fresh                  := EXISTS (SELECT 1 FROM bulk_best_bid_ask WHERE loaded_at > NOW() - INTERVAL '3 minutes');
+-- Read before the fee-learning step below: a newly learned fee applies next run.
+v_fee_percent                := COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20);
+-- Start-of-run cash-scaled buy-stop gap, shared by all three buy statements.
+v_gap                        := (SELECT gap FROM vw_buy_stop_gap);
 
 INSERT INTO stock (name, date_created)
 SELECT bs.id, NOW()
@@ -606,11 +613,6 @@ FROM (
 WHERE config.key = 'fee_percent'
   AND learned.pct IS NOT NULL
   AND learned.pct::numeric <> 0;
-
--- 2026-10-07 config variable: fee_percent is read HERE, after the two
--- statements above may have changed it this run (as the inline lookups
--- further down used to see it).
-v_fee_percent := COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20);
 
 -- Recover orphaned buy orders: open on Coinbase but missing from position table.
 -- Skip if an unfilled buy position already exists for that coin + period_type.
@@ -1256,10 +1258,6 @@ AND sz.shares * px.limit_price > v_listing_max_buy_usd;
 -- lowest filled buy), use $N where N = open_count + 1 (2nd order $2, 3rd
 -- $3, ...). Open = any buy still live (sell not filled). available must
 -- cover that clip, not a hard-coded $1.
--- 2026-10-07: v_gap = vw_buy_stop_gap.gap, re-read right before this
--- statement (it moves with positions / balances during the run), replacing
--- the CROSS JOIN vw_buy_stop_gap g the statement used to carry.
-v_gap := (SELECT gap FROM vw_buy_stop_gap);
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
 SELECT s.stock_id, s.name,
     -- 2026-10-05: price / trigger / size now come from the "plan" lateral
@@ -1305,7 +1303,7 @@ CROSS JOIN vw_balance b
 -- 2026-10-07: cash-scaled gap from the ONE shared place (vw_buy_stop_gap:
 -- buy_stop_base_pct/100 * sqrt(equity / free USD), USD only, no max).
 -- Replaces the inline 1 + 0.02 * (equity / free USD) of 2026-10-05.
--- (gap: v_gap, set just before this statement)
+-- (gap: v_gap, assigned once at the top of the run)
 LEFT JOIN position p ON p.stock_id = s.stock_id
     AND p.period_type = 'day'
     AND p.buy_order_id IS NOT NULL
@@ -1484,10 +1482,6 @@ LIMIT 1;
 -- average-down clip first. One new position per cycle.
 -- 2026-10-07 (Theodore): sorted by priority DESC ONLY -- the order book no
 -- longer ranks candidates here (its gates below still filter).
--- 2026-10-07: v_gap = vw_buy_stop_gap.gap, re-read right before this
--- statement (it moves with positions / balances during the run), replacing
--- the CROSS JOIN vw_buy_stop_gap g the statement used to carry.
-v_gap := (SELECT gap FROM vw_buy_stop_gap);
 WITH held AS (
     SELECT DISTINCT ON (stock_id, period_type)
         stock_id, period_type, buy_filled_price AS last_filled_price
@@ -1545,7 +1539,7 @@ LEFT JOIN bulk_best_bid_ask bba ON bba.product_id = s.name
 -- Theodore: cash scaling on EVERY buy, so the average-down add now uses it
 -- too (was a flat trigger 1% / limit 1.1% above price). The below-lowest-
 -- paid rule then normally pins it, since this coin is always held.
--- (gap: v_gap, set just before this statement)
+-- (gap: v_gap, assigned once at the top of the run)
 -- The order this INSERT will create: trigger = price x (1 + gap), limit =
 -- trigger x 1.01, shares = clip dollars / price.
 CROSS JOIN LATERAL (
@@ -1798,10 +1792,6 @@ AND (
 -- forever (confirmed stuck this way on OCEAN-USD for 4 days). Recompute
 -- using the same cash-scaled stop gap a fresh pick uses, off current price
 -- instead of the stale signal-time price.
--- 2026-10-07: v_gap = vw_buy_stop_gap.gap, re-read right before this
--- statement (it moves with positions / balances during the run), replacing
--- the CROSS JOIN vw_buy_stop_gap g the statement used to carry.
-v_gap := (SELECT gap FROM vw_buy_stop_gap);
 UPDATE position
 SET buy_stop_price = TRUNC(stock.price::numeric * (1 + v_gap), stock.price_rounding::integer),
     buy_price = TRUNC(stock.price::numeric * (1 + v_gap) * 1.01, stock.price_rounding::integer)
@@ -1809,7 +1799,7 @@ FROM stock
 -- 2026-10-07: cash-scaled gap from the ONE shared place (vw_buy_stop_gap:
 -- buy_stop_base_pct/100 * sqrt(equity / free USD), USD only, no max).
 -- Replaces the inline 1 + 0.02 * (equity / free USD) of 2026-10-05.
--- (gap: v_gap, set just before this statement)
+-- (gap: v_gap, assigned once at the top of the run)
 WHERE position.stock_id = stock.stock_id
 AND position.buy_coinbase_order_id IS NULL
 AND position.buy_filled_price IS NULL
@@ -4052,5 +4042,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict DiCLIHVnK2thntEmHQlqKiobl0KNQD93hOWNBTDZXlL4nz2prMf5qHAUkhML775
+\unrestrict Tkyosalv4HBK7UMIKRlySf94PMNi0adRaapexGrt7j5LAHqY341swBasM992glW
 
