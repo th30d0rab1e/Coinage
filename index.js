@@ -802,7 +802,17 @@ async function buildEtfPlan() {
     const listed = await db.query(
         // usdc_product_id (2026-10-07): set = buy on the USDC product with
         // USDC; NULL (TOPW) = USD only.
-        `SELECT ticker, product_id, usdc_product_id, quote_usd FROM etf WHERE enabled ORDER BY ticker`
+        // 2026-10-08 catch-up sizing: quote_usd is now vw_etf_buy_usd.buy_usd
+        // -- config.etf_catchup_usd ($2) for an ETF whose filled dollars
+        // invested are below the enabled-ETF average, else etf.quote_usd ($1).
+        // Recomputed every run. Both the market buy and the limit size from
+        // it, so the USD reserve (plan.reserve -> etf_usd_reserve) matches.
+        `SELECT e.ticker, e.product_id, e.usdc_product_id,
+                COALESCE(v.buy_usd, e.quote_usd) AS quote_usd
+         FROM etf e
+         LEFT JOIN vw_etf_buy_usd v ON v.ticker = e.ticker
+         WHERE e.enabled
+         ORDER BY e.ticker`
     )
     const rows = listed?.rows || []
     const book = await equity.equitySnapshot()
@@ -869,7 +879,7 @@ async function buildEtfPlan() {
         }
         if (!marketDone.has(t)) {
             // The ladder waits for this fill; it steps from it next minute.
-            chosen.push({ kind: 'market', ticker: t, product_id: row.product_id, usdcProductId: row.usdc_product_id || null, notional: Number(row.quote_usd), reason: 'daily $1 market buy (first of the Chicago day)' })
+            chosen.push({ kind: 'market', ticker: t, product_id: row.product_id, usdcProductId: row.usdc_product_id || null, notional: Number(row.quote_usd), reason: `daily $${Number(row.quote_usd).toFixed(2)} market buy (first of the Chicago day)` })
             continue
         }
         if (limitOpen.has(t)) {
@@ -906,7 +916,8 @@ async function buildEtfPlan() {
             continue
         }
         const limitPrice = etfPlan.limitPriceFrom(basis.price, stepPct, product.priceIncrement)
-        // Notional: quote_usd ($1), raised to Coinbase's minimums if higher.
+        // Notional: quote_usd ($1, or $2 catch-up via vw_etf_buy_usd), raised
+        // to Coinbase's minimums if higher.
         const target = Math.max(Number(row.quote_usd) || 0, product.notionalMin || 0, product.quoteMinSize || 0)
         const baseSize = limitPrice ? etfPlan.baseSizeFor(target, limitPrice, product.baseIncrement) : null
         if (!limitPrice || !baseSize) {

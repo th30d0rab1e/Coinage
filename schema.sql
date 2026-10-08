@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict Tkyosalv4HBK7UMIKRlySf94PMNi0adRaapexGrt7j5LAHqY341swBasM992glW
+\restrict cOK8m1mEObUINQEhzaab00eKf0QG1nna9JuohPL7aHOAQMBK9Ttn8rWRJt35se1
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -3469,6 +3469,44 @@ UNION ALL
 
 
 --
+-- Name: vw_etf_buy_usd; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.vw_etf_buy_usd AS
+ WITH inv AS (
+         SELECT e.ticker,
+            e.quote_usd,
+            COALESCE(sum(b.quote_usd) FILTER (WHERE b.filled), (0)::numeric) AS invested
+           FROM (public.etf e
+             LEFT JOIN public.etf_buy b ON ((b.ticker = e.ticker)))
+          WHERE e.enabled
+          GROUP BY e.ticker, e.quote_usd
+        ), avg_inv AS (
+         SELECT avg(inv_1.invested) AS avg_invested
+           FROM inv inv_1
+        )
+ SELECT inv.ticker,
+    inv.invested,
+    avg_inv.avg_invested,
+    (inv.invested < avg_inv.avg_invested) AS catching_up,
+        CASE
+            WHEN (inv.invested < avg_inv.avg_invested) THEN COALESCE(( SELECT (config.value)::numeric AS value
+               FROM public.config
+              WHERE (config.key = 'etf_catchup_usd'::text)), (2)::numeric)
+            ELSE inv.quote_usd
+        END AS buy_usd
+   FROM (inv
+     CROSS JOIN avg_inv);
+
+
+--
+-- Name: VIEW vw_etf_buy_usd; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.vw_etf_buy_usd IS 'Per-buy dollars for each enabled ETF: config.etf_catchup_usd (default 2) when its filled total invested is below the average across enabled ETFs, else etf.quote_usd. Read by index.js buildEtfPlan (market + limit sizing, and so the ETF USD reserve).';
+
+
+--
 -- Name: vw_etf_cash_reserve; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -4042,5 +4080,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict Tkyosalv4HBK7UMIKRlySf94PMNi0adRaapexGrt7j5LAHqY341swBasM992glW
+\unrestrict cOK8m1mEObUINQEhzaab00eKf0QG1nna9JuohPL7aHOAQMBK9Ttn8rWRJt35se1
 
