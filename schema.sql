@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict W6O4odFp9Q1Xzb9Ua7W5SckJV9Bjl2RKJMNNWJR5o8SgTkDBjJAruHl2h0sfFkF
+\restrict fdfUjz5Cimbv3PTGK0AxZI9cESUJAMzFXRfsuJCXHsu5rdsXBcxa5Dk8YFEGaHP
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -1389,11 +1389,11 @@ AND stock.price::numeric < CASE WHEN paid.min_paid IS NOT NULL THEN fin.stop_pri
 AND plan.shares > 0
 AND plan.shares >= COALESCE(stock.min_shares, 0)
 AND eff.cost_usd >= COALESCE(stock.min_price, 0)
--- 2026-10-07: highest priority wins; stock_id makes ties deterministic.
--- (Was: bid-heavy book first, then imbalance DESC, then priority.)
+-- 2026-10-07 (Theodore: buys "should be sorted by priority desc only"):
+-- highest priority wins, nothing else in the sort. (Was: bid-heavy book
+-- first, then imbalance DESC, then priority; briefly + stock_id tiebreak.)
 ORDER BY
-    s.priority DESC NULLS LAST,
-    s.stock_id
+    s.priority DESC NULLS LAST
 LIMIT 1;
 
 -- Buy again if current price has dropped below the MOST RECENT
@@ -1411,6 +1411,8 @@ LIMIT 1;
 -- ranked by stock.priority descending (same year-basis priority marker the
 -- new-position buy uses) so the highest-priority coin gets the
 -- average-down clip first. One new position per cycle.
+-- 2026-10-07 (Theodore): sorted by priority DESC ONLY -- the order book no
+-- longer ranks candidates here (its gates below still filter).
 WITH held AS (
     SELECT DISTINCT ON (stock_id, period_type)
         stock_id, period_type, buy_filled_price AS last_filled_price
@@ -1549,7 +1551,8 @@ AND NOT EXISTS (
 --              and >= -0.4 in index.js -- now one rule). NULL = allow.
 --   thin ask:  near-ask notional >= order cost (eff.cost_usd, i.e. shares x
 --              limit, same notional index.js used) * multiple. NULL = allow.
--- Prefer bid-heavy (+0.2) via ORDER BY below is unchanged.
+-- 2026-10-07: these are filters only. The bid-heavy +0.2 preference and
+-- imbalance DESC were removed from the ORDER BY below (priority only).
 AND (NOT bookcfg.bba_fresh OR bba.spread_pct <= bookcfg.max_spread_pct)
 AND (book.imbalance IS NULL OR book.imbalance >= bookcfg.skip_imbalance)
 AND (book.near_ask_usd IS NULL OR book.near_ask_usd >= eff.cost_usd * bookcfg.min_ask_mult)
@@ -1564,9 +1567,9 @@ AND s.price::numeric < CASE WHEN paid.min_paid IS NOT NULL THEN fin.stop_price
 AND plan.shares > 0
 AND plan.shares >= COALESCE(s.min_shares, 0)
 AND eff.cost_usd >= COALESCE(s.min_price, 0)
+-- 2026-10-07: priority DESC only (s = stock here). Was: bid-heavy book
+-- first, then imbalance DESC, then priority.
 ORDER BY
-    CASE WHEN book.imbalance IS NOT NULL AND book.imbalance > 0.2 THEN 0 ELSE 1 END,
-    book.imbalance DESC NULLS LAST,
     s.priority DESC NULLS LAST
 LIMIT 1;
 
@@ -3975,5 +3978,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict W6O4odFp9Q1Xzb9Ua7W5SckJV9Bjl2RKJMNNWJR5o8SgTkDBjJAruHl2h0sfFkF
+\unrestrict fdfUjz5Cimbv3PTGK0AxZI9cESUJAMzFXRfsuJCXHsu5rdsXBcxa5Dk8YFEGaHP
 
