@@ -1,5 +1,5 @@
 CREATE OR REPLACE PROCEDURE public.thee_procedure()
-LANGUAGE sql
+LANGUAGE plpgsql
 AS $$
 -- ===========================================================================
 -- 2026-10-07 BUY STOPS (Theodore; migrations/2026-10-07_buy_stop_cash_scaled.sql)
@@ -20,6 +20,67 @@ AS $$
 -- on shares x that final limit; the add-on UPDATE re-applies the rule after
 -- the stale refresh; clean-up (e) uses the highest stop the rule allows.
 
+-- ===========================================================================
+-- 2026-10-07 CONFIG VARIABLES (refactor; zero behavior change)
+-- ===========================================================================
+-- This procedure was LANGUAGE sql with config read inline (scalar subqueries
+-- and CROSS JOIN LATERAL cfg / bookcfg blocks repeated per statement). It is
+-- now LANGUAGE plpgsql: each config value is read ONCE into a variable, with
+-- the SAME cast and COALESCE default the inline lookup used. Per-coin laterals
+-- (clip size, min paid, fn_buy_below_paid, book snapshot, plan / eff math)
+-- are unchanged.
+--
+--   variable                       config key (default)                 assigned
+--   v_stablecoin_price_band_pct    stablecoin_price_band_pct  (3)        top
+--   v_stablecoin_max_range_pct     stablecoin_max_range_pct   (2)        top
+--   v_pending_buy_ttl_hours        pending_buy_ttl_hours      (24, int)  top
+--   v_pause_buys                   pause_buys  (text; NULL if missing)    top
+--   v_book_max_spread_pct          book_max_spread_pct        (0.75)     top
+--   v_book_skip_imbalance          book_skip_imbalance        (-0.4)     top
+--   v_book_min_ask_notional_mult   book_min_ask_notional_mult (5)        top
+--   v_listing_buy_window_hours     listing_buy_window_hours   (24)       top
+--   v_listing_buy_usd              listing_buy_usd            (1.00)     top
+--   v_listing_max_buy_usd          listing_max_buy_usd        (5)        top
+--   v_listing_limit_cushion_pct    listing_limit_cushion_pct  (2)        top
+--   v_listing_max_open_bags        listing_max_open_bags      (3, int)   top
+--   v_listing_usdc_fallback        listing_usdc_fallback = 'true' (missing = false)  top
+--   v_initial_buy_top_pct          initial_buy_top_pct (50), clamped 0..100          top
+--   v_sell_net_cushion             sell_net_cushion           (0.015)    top
+--   v_fee_percent                  fee_percent                (1.20)     AFTER the
+--                                  fee-learning INSERT/UPDATE below, which can change
+--                                  config.fee_percent mid-run (same value the
+--                                  later inline lookups saw).
+--   Not config, same "read once" treatment:
+--   v_bba_fresh   bulk_best_bid_ask loaded in the last 3 minutes (NOW() is fixed
+--                 for the whole run and this procedure never writes that table).
+--   v_gap         vw_buy_stop_gap.gap. It depends on positions / balances, which
+--                 this procedure changes, so it is re-read IMMEDIATELY BEFORE each
+--                 of its three statements (signal insert, average-down insert,
+--                 stale refresh) -- the same value the old CROSS JOIN saw.
+-- config.avg_profit is refreshed by the first statement but not read here
+-- (vw_edit_orders reads it), so it has no variable. The variables are
+-- assigned after that UPDATE anyway.
+DECLARE
+    v_stablecoin_price_band_pct  numeric;
+    v_stablecoin_max_range_pct   numeric;
+    v_pending_buy_ttl_hours      integer;
+    v_pause_buys                 text;
+    v_book_max_spread_pct        numeric;
+    v_book_skip_imbalance        numeric;
+    v_book_min_ask_notional_mult numeric;
+    v_listing_buy_window_hours   numeric;
+    v_listing_buy_usd            numeric;
+    v_listing_max_buy_usd        numeric;
+    v_listing_limit_cushion_pct  numeric;
+    v_listing_max_open_bags      integer;
+    v_listing_usdc_fallback      boolean;
+    v_initial_buy_top_pct        numeric;
+    v_sell_net_cushion           numeric;
+    v_fee_percent                numeric;
+    v_bba_fresh                  boolean;
+    v_gap                        numeric;
+BEGIN
+
 -- 2026-10-07 (migrations/2026-10-07_avg_profit_config.sql): refresh
 -- config.avg_profit = all-time AVG(profit_history.profit), the average
 -- realized profit (USD) per closed position. Runs first, so it reflects
@@ -30,6 +91,27 @@ AS $$
 UPDATE config
 SET value = (SELECT ROUND(COALESCE(AVG(profit), 0)::numeric, 6)::text FROM profit_history)
 WHERE key = 'avg_profit';
+
+-- 2026-10-07 config variables (see the header): read once, after the
+-- avg_profit refresh above. Same casts / defaults as the old inline lookups.
+v_stablecoin_price_band_pct  := COALESCE((SELECT value::numeric FROM config WHERE key = 'stablecoin_price_band_pct'), 3);
+v_stablecoin_max_range_pct   := COALESCE((SELECT value::numeric FROM config WHERE key = 'stablecoin_max_range_pct'), 2);
+v_pending_buy_ttl_hours      := COALESCE((SELECT value::int     FROM config WHERE key = 'pending_buy_ttl_hours'), 24);
+v_pause_buys                 := (SELECT value FROM config WHERE key = 'pause_buys');
+v_book_max_spread_pct        := COALESCE((SELECT value::numeric FROM config WHERE key = 'book_max_spread_pct'), 0.75);
+v_book_skip_imbalance        := COALESCE((SELECT value::numeric FROM config WHERE key = 'book_skip_imbalance'), -0.4);
+v_book_min_ask_notional_mult := COALESCE((SELECT value::numeric FROM config WHERE key = 'book_min_ask_notional_mult'), 5);
+v_listing_buy_window_hours   := COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_buy_window_hours'), 24);
+v_listing_buy_usd            := COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_buy_usd'), 1.00);
+v_listing_max_buy_usd        := COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_max_buy_usd'), 5);
+v_listing_limit_cushion_pct  := COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_limit_cushion_pct'), 2);
+v_listing_max_open_bags      := COALESCE((SELECT value::int     FROM config WHERE key = 'listing_max_open_bags'), 3);
+-- Kill switch; a missing row means OFF.
+v_listing_usdc_fallback      := COALESCE((SELECT value FROM config WHERE key = 'listing_usdc_fallback'), 'false') = 'true';
+v_initial_buy_top_pct        := LEAST(100, GREATEST(0, COALESCE((SELECT value::numeric FROM config WHERE key = 'initial_buy_top_pct'), 50)));
+v_sell_net_cushion           := COALESCE((SELECT value::numeric FROM config WHERE key = 'sell_net_cushion'), 0.015);
+-- Is this minute's best bid/ask data fresh enough to judge spread at all?
+v_bba_fresh                  := EXISTS (SELECT 1 FROM bulk_best_bid_ask WHERE loaded_at > NOW() - INTERVAL '3 minutes');
 
 INSERT INTO stock (name, date_created)
 SELECT bs.id, NOW()
@@ -93,18 +175,15 @@ CROSS JOIN LATERAL (
            CASE WHEN bs.json->>'low_24h'     ~ '^[0-9]+(\.[0-9]+)?$' THEN (bs.json->>'low_24h')::numeric    END AS lo,
            CASE WHEN bs.json->>'volume_24h'  ~ '^[0-9]+(\.[0-9]+)?$' THEN (bs.json->>'volume_24h')::numeric END AS vol
 ) v
-CROSS JOIN LATERAL (
-    -- thresholds in percent, from config (defaults if a key is missing)
-    SELECT COALESCE((SELECT value::numeric FROM config WHERE key = 'stablecoin_price_band_pct'), 3) AS band_pct,
-           COALESCE((SELECT value::numeric FROM config WHERE key = 'stablecoin_max_range_pct'), 2)  AS range_pct
-) cfg
+-- thresholds in percent: v_stablecoin_price_band_pct / v_stablecoin_max_range_pct
+-- (config, defaults 3 / 2 -- see the header)
 WHERE stock.name = bs.id
 AND bs.id LIKE '%-USD'
 AND stock.is_stablecoin IS NOT TRUE          -- sticky: only FALSE -> TRUE, never back
 AND v.px > 0 AND v.hi > 0 AND v.lo > 0 AND v.hi >= v.lo
 AND v.vol > 0
-AND v.px BETWEEN 1 - cfg.band_pct / 100 AND 1 + cfg.band_pct / 100
-AND (v.hi - v.lo) / v.px < cfg.range_pct / 100;
+AND v.px BETWEEN 1 - v_stablecoin_price_band_pct / 100 AND 1 + v_stablecoin_price_band_pct / 100
+AND (v.hi - v.lo) / v.px < v_stablecoin_max_range_pct / 100;
 
 -- 2026-09-25: flag coins that have vanished from Coinbase's product catalog.
 -- The UPDATE above only touches stocks that still appear in bulk_stock, so a
@@ -180,6 +259,11 @@ FROM (
 WHERE config.key = 'fee_percent'
   AND learned.pct IS NOT NULL
   AND learned.pct::numeric <> 0;
+
+-- 2026-10-07 config variable: fee_percent is read HERE, after the two
+-- statements above may have changed it this run (as the inline lookups
+-- further down used to see it).
+v_fee_percent := COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20);
 
 -- Recover orphaned buy orders: open on Coinbase but missing from position table.
 -- Skip if an unfilled buy position already exists for that coin + period_type.
@@ -271,7 +355,7 @@ AND p.sell_coinbase_order_id IS NULL
 -- re-planned each minute only while the coin's 24h buy window is open).
 AND p.period_type IS DISTINCT FROM 'listing'
 AND GREATEST(p.date_created, p.last_remade_at, p.buy_placed_at, p.buy_released_at)
-    < NOW() - make_interval(hours => COALESCE((SELECT value::int FROM config WHERE key = 'pending_buy_ttl_hours'), 24))
+    < NOW() - make_interval(hours => v_pending_buy_ttl_hours)
 AND NOT EXISTS (
     SELECT 1 FROM bulk_open_orders o WHERE o.client_order_id = p.buy_order_id
 );
@@ -352,7 +436,7 @@ AND NOT EXISTS (
 AND p.period_type IS DISTINCT FROM 'listing'
 AND (
     -- (a) buys paused
-    (SELECT value FROM config WHERE key = 'pause_buys') IS DISTINCT FROM 'false'
+    v_pause_buys IS DISTINCT FROM 'false'
     -- (b) delisted / trading disabled
     OR s.trading_disabled IS TRUE
     -- (h) stablecoin (stock.is_stablecoin) -- never bought
@@ -379,11 +463,11 @@ AND (
     )
     -- (f) wide spread (only with fresh best-bid/ask data)
     OR (
-        EXISTS (SELECT 1 FROM bulk_best_bid_ask WHERE loaded_at > NOW() - INTERVAL '3 minutes')
+        v_bba_fresh
         AND COALESCE(
                 (SELECT bba.spread_pct FROM bulk_best_bid_ask bba WHERE bba.product_id = s.name),
                 'Infinity'::double precision
-            ) > COALESCE((SELECT value::double precision FROM config WHERE key = 'book_max_spread_pct'), 0.75)
+            ) > v_book_max_spread_pct::double precision
     )
     -- (g) ask-heavy or thin book (fresh snapshot only)
     OR EXISTS (
@@ -396,9 +480,9 @@ AND (
             ORDER BY bs.date_created DESC
             LIMIT 1
         ) fresh_book
-        WHERE fresh_book.imbalance < COALESCE((SELECT value::double precision FROM config WHERE key = 'book_skip_imbalance'), -0.4)
+        WHERE fresh_book.imbalance < v_book_skip_imbalance::double precision
         OR fresh_book.near_ask_usd < (p.shares * p.buy_price)
-            * COALESCE((SELECT value::double precision FROM config WHERE key = 'book_min_ask_notional_mult'), 5)
+            * v_book_min_ask_notional_mult::double precision
     )
 );
 
@@ -561,13 +645,7 @@ JOIN listing_watch lw  ON lw.product_id = s.name
 --   listing_limit_cushion_pct = 2    limit = reference price + 2%
 --   listing_max_open_bags     = 3    max listing rows open at once
 -- (listing_window_minutes is no longer read: no first-trade pricing phase.)
-CROSS JOIN LATERAL (
-    SELECT COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_buy_window_hours'), 24)   AS buy_window_hours,
-           COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_buy_usd'), 1.00)         AS buy_usd,
-           COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_max_buy_usd'), 5)        AS max_buy_usd,
-           COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_limit_cushion_pct'), 2)   AS cushion_pct,
-           COALESCE((SELECT value::int     FROM config WHERE key = 'listing_max_open_bags'), 3)      AS max_open_bags
-) cfg
+-- 2026-10-07: these now come from the v_listing_* variables (header).
 -- Product increments straight from Coinbase's products payload.
 CROSS JOIN LATERAL (
     SELECT NULLIF(COALESCE(NULLIF(bs.json->>'price_increment', ''), NULLIF(bs.json->>'quote_increment', ''))::numeric, 0) AS tick,
@@ -599,14 +677,14 @@ CROSS JOIN LATERAL (
            ) AS ref_price
 ) ref
 CROSS JOIN LATERAL (
-    SELECT CEIL(ref.ref_price * (1 + cfg.cushion_pct / 100) / inc.tick) * inc.tick AS limit_price
+    SELECT CEIL(ref.ref_price * (1 + v_listing_limit_cushion_pct / 100) / inc.tick) * inc.tick AS limit_price
 ) px
 -- Size = GREATEST($buy_usd, quote_min_size) at the limit, rounded UP to the
 -- base increment, >= base_min_size. For a high-priced coin this is simply
 -- its smallest valid lot (may cost more than $1; capped by
 -- listing_max_buy_usd below).
 CROSS JOIN LATERAL (
-    SELECT GREATEST(CEIL(GREATEST(cfg.buy_usd, inc.quote_min) / px.limit_price / inc.lot) * inc.lot, inc.base_min) AS shares
+    SELECT GREATEST(CEIL(GREATEST(v_listing_buy_usd, inc.quote_min) / px.limit_price / inc.lot) * inc.lot, inc.base_min) AS shares
 ) sz
 -- 2026-10-07: cash for the snipe, both currencies. (Replaces the old
 -- CROSS JOIN vw_balance b / WHERE b.name = 'USD' gate.)
@@ -628,8 +706,8 @@ CROSS JOIN LATERAL (
              - COALESCE((SELECT reserve_usd FROM vw_usdc_sweep_reserve), 0)  AS usd_free,
            (SELECT available::numeric FROM vw_balance WHERE name = 'USDC')   AS usdc_free,
            sz.shares * px.limit_price * 1.012                                AS cost,
-           -- Kill switch; a missing row means OFF.
-           COALESCE((SELECT value FROM config WHERE key = 'listing_usdc_fallback'), 'false') = 'true' AS usdc_on
+           -- Kill switch; a missing row means OFF (v_listing_usdc_fallback, header).
+           v_listing_usdc_fallback                                           AS usdc_on
 ) cash
 -- The coin's -USDC twin from this minute's products payload (bulk_stock
 -- holds every product, -USDC pairs included). LIMIT 1 so it can never
@@ -682,7 +760,7 @@ LEFT JOIN (
 ) ph ON ph.stock_id = s.stock_id
 -- 2026-10-07: the LISTING SNIPE is the one buy that may use USDC (fallback
 -- above, only when USD is short). Every other crypto buy below stays USD only.
-WHERE (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
+WHERE v_pause_buys = 'false'
 AND s.name LIKE '%-USD'
 -- Duplicate guards (see the two LEFT JOINs above) -- the PRIMARY guard.
 -- DB backstop: partial unique index position_one_listing_per_stock
@@ -695,7 +773,7 @@ AND ph.profit_history_id IS NULL
 -- rolling from the open, not a calendar day (Theodore).
 AND lw.trading_open_at IS NOT NULL
 AND lw.trading_open_at <= NOW()
-AND NOW() - lw.trading_open_at <= cfg.buy_window_hours * INTERVAL '1 hour'
+AND NOW() - lw.trading_open_at <= v_listing_buy_window_hours * INTERVAL '1 hour'
 -- A snipe that ended with NO fill (Theodore cancelled it, or Coinbase
 -- expired/failed it) means that coin is done: index.js
 -- reconcileListingBuys() deleted the row and stamped snipe_cancelled_at, so
@@ -737,7 +815,7 @@ AND (
     SELECT count(*) FROM position lp
     WHERE lp.period_type = 'listing'
     AND lp.sell_filled_price IS NULL
-) < cfg.max_open_bags
+) < v_listing_max_open_bags
 -- Order sanity / Coinbase minimums.
 AND inc.tick IS NOT NULL
 AND inc.lot IS NOT NULL
@@ -748,7 +826,7 @@ AND sz.shares * px.limit_price >= inc.quote_min
 -- replaces the old "<= 1.25 x listing_buy_usd" cap that skipped every
 -- high-priced coin. A coin over it is noted on listing_watch by the UPDATE
 -- right after this INSERT.
-AND sz.shares * px.limit_price <= cfg.max_buy_usd
+AND sz.shares * px.limit_price <= v_listing_max_buy_usd
 -- Cash: USD (minus the sweep reserve) or, as the fallback, USDC must cover
 -- the order incl. the ~1.2% fee pad -- decided in the "fund" lateral above.
 AND fund.funding IS NOT NULL
@@ -766,17 +844,12 @@ LIMIT 1;
 UPDATE listing_watch tgt
 SET snipe_skip_reason = 'smallest order $' || ROUND(sz.shares * px.limit_price, 2)
                         || ' (' || sz.shares || ' @ ' || px.limit_price
-                        || ') exceeds listing_max_buy_usd $' || cfg.max_buy_usd,
+                        || ') exceeds listing_max_buy_usd $' || v_listing_max_buy_usd,
     snipe_skipped_at  = COALESCE(tgt.snipe_skipped_at, NOW())
 FROM listing_watch lw
 JOIN stock s       ON s.name = lw.product_id
 JOIN bulk_stock bs ON bs.id = s.name
-CROSS JOIN LATERAL (
-    SELECT COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_buy_window_hours'), 24)   AS buy_window_hours,
-           COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_buy_usd'), 1.00)         AS buy_usd,
-           COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_max_buy_usd'), 5)        AS max_buy_usd,
-           COALESCE((SELECT value::numeric FROM config WHERE key = 'listing_limit_cushion_pct'), 2)   AS cushion_pct
-) cfg
+-- 2026-10-07: listing tunables from the v_listing_* variables (header).
 CROSS JOIN LATERAL (
     SELECT NULLIF(COALESCE(NULLIF(bs.json->>'price_increment', ''), NULLIF(bs.json->>'quote_increment', ''))::numeric, 0) AS tick,
            NULLIF(NULLIF(bs.json->>'base_increment', '')::numeric, 0)                                                      AS lot,
@@ -796,16 +869,16 @@ CROSS JOIN LATERAL (
                ask.best_ask,
                NULLIF(CASE WHEN bs.price ~ '^[0-9]+(\.[0-9]+)?$' THEN bs.price::numeric END, 0),
                NULLIF(lw.first_trade_price, 0)
-           ) * (1 + cfg.cushion_pct / 100) / inc.tick) * inc.tick AS limit_price
+           ) * (1 + v_listing_limit_cushion_pct / 100) / inc.tick) * inc.tick AS limit_price
 ) px
 CROSS JOIN LATERAL (
-    SELECT GREATEST(CEIL(GREATEST(cfg.buy_usd, inc.quote_min) / px.limit_price / inc.lot) * inc.lot, inc.base_min) AS shares
+    SELECT GREATEST(CEIL(GREATEST(v_listing_buy_usd, inc.quote_min) / px.limit_price / inc.lot) * inc.lot, inc.base_min) AS shares
 ) sz
 WHERE tgt.product_id = lw.product_id
 AND s.name LIKE '%-USD'
 AND lw.trading_open_at IS NOT NULL
 AND lw.trading_open_at <= NOW()
-AND NOW() - lw.trading_open_at <= cfg.buy_window_hours * INTERVAL '1 hour'
+AND NOW() - lw.trading_open_at <= v_listing_buy_window_hours * INTERVAL '1 hour'
 AND lw.snipe_cancelled_at IS NULL
 AND NOT EXISTS (SELECT 1 FROM position p WHERE p.stock_id = s.stock_id)
 AND NOT EXISTS (SELECT 1 FROM profit_history h WHERE h.stock_id = s.stock_id AND h.period_type = 'listing')
@@ -816,7 +889,7 @@ AND COALESCE(bs.auction_mode, bs.json->>'auction_mode', 'false') NOT IN ('true',
 AND inc.tick IS NOT NULL
 AND inc.lot IS NOT NULL
 AND px.limit_price > 0
-AND sz.shares * px.limit_price > cfg.max_buy_usd;
+AND sz.shares * px.limit_price > v_listing_max_buy_usd;
 
 -- New position: $1 into the highest year-basis-priority coin not already
 -- held, gated only on the coin's year-basis trend being positive -- no
@@ -836,6 +909,10 @@ AND sz.shares * px.limit_price > cfg.max_buy_usd;
 -- lowest filled buy), use $N where N = open_count + 1 (2nd order $2, 3rd
 -- $3, ...). Open = any buy still live (sell not filled). available must
 -- cover that clip, not a hard-coded $1.
+-- 2026-10-07: v_gap = vw_buy_stop_gap.gap, re-read right before this
+-- statement (it moves with positions / balances during the run), replacing
+-- the CROSS JOIN vw_buy_stop_gap g the statement used to carry.
+v_gap := (SELECT gap FROM vw_buy_stop_gap);
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
 SELECT s.stock_id, s.name,
     -- 2026-10-05: price / trigger / size now come from the "plan" lateral
@@ -874,14 +951,14 @@ JOIN (
         AND vs.is_stablecoin IS NOT TRUE
         AND vs.trading_disabled IS NOT TRUE
     ) r
-    WHERE r.rn <= CEIL(r.set_size * LEAST(100, GREATEST(0,
-              COALESCE((SELECT value::numeric FROM config WHERE key = 'initial_buy_top_pct'), 50))) / 100)
+    -- v_initial_buy_top_pct: config.initial_buy_top_pct (default 50), clamped 0..100
+    WHERE r.rn <= CEIL(r.set_size * v_initial_buy_top_pct / 100)
 ) topbuy ON topbuy.stock_id = s.stock_id
 CROSS JOIN vw_balance b
 -- 2026-10-07: cash-scaled gap from the ONE shared place (vw_buy_stop_gap:
 -- buy_stop_base_pct/100 * sqrt(equity / free USD), USD only, no max).
 -- Replaces the inline 1 + 0.02 * (equity / free USD) of 2026-10-05.
-CROSS JOIN vw_buy_stop_gap g
+-- (gap: v_gap, set just before this statement)
 LEFT JOIN position p ON p.stock_id = s.stock_id
     AND p.period_type = 'day'
     AND p.buy_order_id IS NOT NULL
@@ -902,14 +979,8 @@ LEFT JOIN LATERAL (
 -- This run's top-of-book for the coin (spread gate).
 LEFT JOIN bulk_best_bid_ask bba ON bba.product_id = s.name
 -- Thresholds from config (defaults = the old index.js constants) and
--- whether bulk_best_bid_ask is fresh enough to judge spread at all.
-CROSS JOIN LATERAL (
-    SELECT
-        COALESCE((SELECT value::numeric FROM config WHERE key = 'book_max_spread_pct'), 0.75)       AS max_spread_pct,
-        COALESCE((SELECT value::numeric FROM config WHERE key = 'book_skip_imbalance'), -0.4)        AS skip_imbalance,
-        COALESCE((SELECT value::numeric FROM config WHERE key = 'book_min_ask_notional_mult'), 5)    AS min_ask_mult,
-        EXISTS (SELECT 1 FROM bulk_best_bid_ask WHERE loaded_at > NOW() - INTERVAL '3 minutes')     AS bba_fresh
-) bookcfg
+-- whether bulk_best_bid_ask is fresh enough to judge spread at all:
+-- 2026-10-07 now v_book_* / v_bba_fresh (header), was the bookcfg lateral.
 -- Dollar size of this clip ($1 new, $N for the Nth open day row), the same
 -- count + 1 the shares / cash-backlog expressions use; the thin-ask gate
 -- compares near-ask notional to clip_usd * book_min_ask_notional_mult.
@@ -926,8 +997,8 @@ CROSS JOIN LATERAL (
 -- close. (2026-10-07: gap from vw_buy_stop_gap.)
 CROSS JOIN LATERAL (
     SELECT
-        TRUNC((s.close::numeric * (1 + g.gap) * 1.01), stock.price_rounding::integer) AS buy_price,
-        TRUNC((s.close::numeric * (1 + g.gap)),        stock.price_rounding::integer) AS buy_stop_price,
+        TRUNC((s.close::numeric * (1 + v_gap) * 1.01), stock.price_rounding::integer) AS buy_price,
+        TRUNC((s.close::numeric * (1 + v_gap)),        stock.price_rounding::integer) AS buy_stop_price,
         TRUNC(clip.clip_usd / s.close::numeric, stock.share_rounding::integer)        AS shares
 ) plan
 -- 2026-10-07 below-lowest-paid rule (replaces the add_buy_cap_ratio 0.99
@@ -964,7 +1035,7 @@ JOIN vw_signal d
 -- and the pot USDC-capable ETFs buy with (index.js fundAttemptsByCurrency).
 -- vw_etf_cash_reserve holds only USD-funded ETF attempts.
 WHERE b.name = 'USD'
-AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
+AND v_pause_buys = 'false'
 -- 2026-09-25 cash-backlog gate: free USD minus what is already promised to
 -- planned buys that have no live order yet. Previously only free USD was
 -- compared to the clip, so every brief cash bump (e.g. a far-buy release)
@@ -1025,9 +1096,9 @@ AND (
 -- 2026-10-07: these are filters only. The book no longer ranks candidates
 -- (the bid-heavy +0.2 preference / imbalance DESC were removed from the
 -- ORDER BY below; the pick is by priority).
-AND (NOT bookcfg.bba_fresh OR bba.spread_pct <= bookcfg.max_spread_pct)
-AND (book.imbalance IS NULL OR book.imbalance >= bookcfg.skip_imbalance)
-AND (book.near_ask_usd IS NULL OR book.near_ask_usd >= eff.cost_usd * bookcfg.min_ask_mult)
+AND (NOT v_bba_fresh OR bba.spread_pct <= v_book_max_spread_pct)
+AND (book.imbalance IS NULL OR book.imbalance >= v_book_skip_imbalance)
+AND (book.near_ask_usd IS NULL OR book.near_ask_usd >= eff.cost_usd * v_book_min_ask_notional_mult)
 -- 2026-10-05 (#3) trigger must already be above price: on a coin already
 -- held the trigger is the final (below-lowest-paid) stop, so only create
 -- the row when price is under it (was: inserted anyway, then index.js
@@ -1066,6 +1137,10 @@ LIMIT 1;
 -- average-down clip first. One new position per cycle.
 -- 2026-10-07 (Theodore): sorted by priority DESC ONLY -- the order book no
 -- longer ranks candidates here (its gates below still filter).
+-- 2026-10-07: v_gap = vw_buy_stop_gap.gap, re-read right before this
+-- statement (it moves with positions / balances during the run), replacing
+-- the CROSS JOIN vw_buy_stop_gap g the statement used to carry.
+v_gap := (SELECT gap FROM vw_buy_stop_gap);
 WITH held AS (
     SELECT DISTINCT ON (stock_id, period_type)
         stock_id, period_type, buy_filled_price AS last_filled_price
@@ -1117,25 +1192,19 @@ LEFT JOIN LATERAL (
 -- This run's top-of-book for the coin (spread gate).
 LEFT JOIN bulk_best_bid_ask bba ON bba.product_id = s.name
 -- Thresholds from config (defaults = the old index.js constants) and
--- whether bulk_best_bid_ask is fresh enough to judge spread at all.
-CROSS JOIN LATERAL (
-    SELECT
-        COALESCE((SELECT value::numeric FROM config WHERE key = 'book_max_spread_pct'), 0.75)       AS max_spread_pct,
-        COALESCE((SELECT value::numeric FROM config WHERE key = 'book_skip_imbalance'), -0.4)        AS skip_imbalance,
-        COALESCE((SELECT value::numeric FROM config WHERE key = 'book_min_ask_notional_mult'), 5)    AS min_ask_mult,
-        EXISTS (SELECT 1 FROM bulk_best_bid_ask WHERE loaded_at > NOW() - INTERVAL '3 minutes')     AS bba_fresh
-) bookcfg
+-- whether bulk_best_bid_ask is fresh enough to judge spread at all:
+-- 2026-10-07 now v_book_* / v_bba_fresh (header), was the bookcfg lateral.
 -- 2026-10-07 cash-scaled gap from the ONE shared place (vw_buy_stop_gap).
 -- Theodore: cash scaling on EVERY buy, so the average-down add now uses it
 -- too (was a flat trigger 1% / limit 1.1% above price). The below-lowest-
 -- paid rule then normally pins it, since this coin is always held.
-CROSS JOIN vw_buy_stop_gap g
+-- (gap: v_gap, set just before this statement)
 -- The order this INSERT will create: trigger = price x (1 + gap), limit =
 -- trigger x 1.01, shares = clip dollars / price.
 CROSS JOIN LATERAL (
     SELECT
-        TRUNC(s.price::numeric * (1 + g.gap) * 1.01, s.price_rounding::integer)  AS buy_price,
-        TRUNC(s.price::numeric * (1 + g.gap),        s.price_rounding::integer)  AS buy_stop_price,
+        TRUNC(s.price::numeric * (1 + v_gap) * 1.01, s.price_rounding::integer)  AS buy_price,
+        TRUNC(s.price::numeric * (1 + v_gap),        s.price_rounding::integer)  AS buy_stop_price,
         TRUNC((sized.clip_usd / s.price::numeric), s.share_rounding::integer)    AS shares
 ) plan
 -- 2026-10-07 below-lowest-paid rule (replaces the add_buy_cap_ratio 0.99
@@ -1181,7 +1250,7 @@ AND b.available
                 AND sb.trading_disabled IS NOT TRUE), 0)
 -- 2026-10-05 (#2): real cost of this order incl. fee pad (was clip dollars).
   >= eff.cost_with_fee
-AND (SELECT value FROM config WHERE key = 'pause_buys') = 'false'
+AND v_pause_buys = 'false'
 -- Average-down TRIGGER (unchanged on purpose, 2026-10-07): price x 1.011
 -- below the most recent fill. This is the "has price dropped below my last
 -- buy" test, not the order price -- the order is priced by plan/fin above.
@@ -1206,9 +1275,9 @@ AND NOT EXISTS (
 --              limit, same notional index.js used) * multiple. NULL = allow.
 -- 2026-10-07: these are filters only. The bid-heavy +0.2 preference and
 -- imbalance DESC were removed from the ORDER BY below (priority only).
-AND (NOT bookcfg.bba_fresh OR bba.spread_pct <= bookcfg.max_spread_pct)
-AND (book.imbalance IS NULL OR book.imbalance >= bookcfg.skip_imbalance)
-AND (book.near_ask_usd IS NULL OR book.near_ask_usd >= eff.cost_usd * bookcfg.min_ask_mult)
+AND (NOT v_bba_fresh OR bba.spread_pct <= v_book_max_spread_pct)
+AND (book.imbalance IS NULL OR book.imbalance >= v_book_skip_imbalance)
+AND (book.near_ask_usd IS NULL OR book.near_ask_usd >= eff.cost_usd * v_book_min_ask_notional_mult)
 -- 2026-10-05 (#3) trigger must already be above price: only create the
 -- row when price is under the final stop (2026-10-07: fin.stop_price after
 -- the below-lowest-paid rule; was addcap.cap_stop). Not held = no limit.
@@ -1256,9 +1325,9 @@ UPDATE position
 SET sell_stop_price = GREATEST(
         CEIL(
             (position.buy_filled_price::numeric
-                * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
-                / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100)))
-                * (1 + COALESCE((SELECT value::numeric FROM config WHERE key = 'sell_net_cushion'), 0.015))
+                * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), v_fee_percent / 100))
+                / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), v_fee_percent / 100)))
+                * (1 + v_sell_net_cushion)
                 * 1.01
             * POWER(10::numeric, stock.price_rounding::int)
         ) / POWER(10::numeric, stock.price_rounding::int),
@@ -1271,9 +1340,9 @@ SET sell_stop_price = GREATEST(
     sell_price = GREATEST(
         CEIL(
             (position.buy_filled_price::numeric
-                * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
-                / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100)))
-                * (1 + COALESCE((SELECT value::numeric FROM config WHERE key = 'sell_net_cushion'), 0.015))
+                * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), v_fee_percent / 100))
+                / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), v_fee_percent / 100)))
+                * (1 + v_sell_net_cushion)
             * POWER(10::numeric, stock.price_rounding::int)
         ) / POWER(10::numeric, stock.price_rounding::int),
         TRUNC(stock.price::numeric * (CASE position.period_type
@@ -1303,12 +1372,12 @@ AND d.current_change_percent > d.historical_avg_change_percent
 AND (
     (CEIL(
         (position.buy_filled_price::numeric
-            * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
-            / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100)))
+            * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), v_fee_percent / 100))
+            / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), v_fee_percent / 100)))
         * POWER(10::numeric, stock.price_rounding::int)
     ) / POWER(10::numeric, stock.price_rounding::int))
     * position.shares::numeric
-    * (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
+    * (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), v_fee_percent / 100))
     - (position.buy_filled_price::numeric * position.shares::numeric + COALESCE(position.buy_fee::numeric, 0))
 ) > 0;
 -- NOTE: the UPDATE above can never price a period_type 'listing' bag: it
@@ -1335,18 +1404,18 @@ UPDATE position
 SET sell_stop_price =
         CEIL(
             (position.buy_filled_price::numeric
-                * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
-                / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100)))
-                * (1 + COALESCE((SELECT value::numeric FROM config WHERE key = 'sell_net_cushion'), 0.015))
+                * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), v_fee_percent / 100))
+                / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), v_fee_percent / 100)))
+                * (1 + v_sell_net_cushion)
                 * 1.01
             * POWER(10::numeric, stock.price_rounding::int)
         ) / POWER(10::numeric, stock.price_rounding::int),
     sell_price =
         CEIL(
             (position.buy_filled_price::numeric
-                * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
-                / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100)))
-                * (1 + COALESCE((SELECT value::numeric FROM config WHERE key = 'sell_net_cushion'), 0.015))
+                * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), v_fee_percent / 100))
+                / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), v_fee_percent / 100)))
+                * (1 + v_sell_net_cushion)
             * POWER(10::numeric, stock.price_rounding::int)
         ) / POWER(10::numeric, stock.price_rounding::int)
 FROM stock
@@ -1361,12 +1430,12 @@ AND stock.price_rounding IS NOT NULL
 AND (
     (CEIL(
         (position.buy_filled_price::numeric
-            * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
-            / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100)))
+            * (1 + COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), v_fee_percent / 100))
+            / (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), v_fee_percent / 100)))
         * POWER(10::numeric, stock.price_rounding::int)
     ) / POWER(10::numeric, stock.price_rounding::int))
     * position.shares::numeric
-    * (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
+    * (1 - COALESCE(NULLIF(position.buy_fee::numeric, 0) / NULLIF(position.buy_filled_price::numeric * position.shares::numeric, 0), v_fee_percent / 100))
     - (position.buy_filled_price::numeric * position.shares::numeric + COALESCE(position.buy_fee::numeric, 0))
 ) > 0;
 
@@ -1382,14 +1451,18 @@ AND (
 -- forever (confirmed stuck this way on OCEAN-USD for 4 days). Recompute
 -- using the same cash-scaled stop gap a fresh pick uses, off current price
 -- instead of the stale signal-time price.
+-- 2026-10-07: v_gap = vw_buy_stop_gap.gap, re-read right before this
+-- statement (it moves with positions / balances during the run), replacing
+-- the CROSS JOIN vw_buy_stop_gap g the statement used to carry.
+v_gap := (SELECT gap FROM vw_buy_stop_gap);
 UPDATE position
-SET buy_stop_price = TRUNC(stock.price::numeric * (1 + g.gap), stock.price_rounding::integer),
-    buy_price = TRUNC(stock.price::numeric * (1 + g.gap) * 1.01, stock.price_rounding::integer)
+SET buy_stop_price = TRUNC(stock.price::numeric * (1 + v_gap), stock.price_rounding::integer),
+    buy_price = TRUNC(stock.price::numeric * (1 + v_gap) * 1.01, stock.price_rounding::integer)
 FROM stock
 -- 2026-10-07: cash-scaled gap from the ONE shared place (vw_buy_stop_gap:
 -- buy_stop_base_pct/100 * sqrt(equity / free USD), USD only, no max).
 -- Replaces the inline 1 + 0.02 * (equity / free USD) of 2026-10-05.
-CROSS JOIN vw_buy_stop_gap g
+-- (gap: v_gap, set just before this statement)
 WHERE position.stock_id = stock.stock_id
 AND position.buy_coinbase_order_id IS NULL
 AND position.buy_filled_price IS NULL
@@ -1687,4 +1760,5 @@ TRUNCATE TABLE bulk_fills;
 -- this procedure finishes. Needed for vw_position_order_balance_audit to be
 -- queryable anytime, not just in the brief window mid-cycle.
 
+END;
 $$;
