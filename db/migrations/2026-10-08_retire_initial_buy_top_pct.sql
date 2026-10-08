@@ -1,0 +1,14 @@
+-- 2026-10-08: config.initial_buy_top_pct is RETIRED (Theodore: "can you take
+-- out the top 50% we talked about yesterday and add a where statement where
+-- priority > 0").
+--
+-- thee_procedure's initial-buy INSERT no longer ranks the year-uptrend set
+-- and keeps only the top initial_buy_top_pct percent (added 2026-10-07 in
+-- ba3e579, migration 2026-10-07_initial_buy_top_pct.sql). It now filters
+-- with a plain WHERE s.priority > 0 and still picks one coin by priority
+-- DESC. The v_initial_buy_top_pct variable was removed from the procedure.
+--
+-- The config row is deliberately LEFT IN PLACE (nothing reads it any more;
+-- deleting data isn't needed). This file changes nothing in the database.
+-- To clean up later: DELETE FROM config WHERE key = 'initial_buy_top_pct';
+SELECT 1;  -- no-op so the file runs cleanly with psql -f

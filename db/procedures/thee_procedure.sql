@@ -46,7 +46,8 @@ AS $$
 --   v_listing_limit_cushion_pct    listing_limit_cushion_pct  (2)        top
 --   v_listing_max_open_bags        listing_max_open_bags      (3, int)   top
 --   v_listing_usdc_fallback        listing_usdc_fallback = 'true' (missing = false)  top
---   v_initial_buy_top_pct          initial_buy_top_pct (50), clamped 0..100          top
+--   (v_initial_buy_top_pct / config.initial_buy_top_pct retired 2026-10-08: the
+--    initial-buy top-50% cut was replaced by WHERE s.priority > 0.)
 --   v_sell_net_cushion             sell_net_cushion           (0.015)    top
 --   v_fee_percent                  fee_percent                (1.20)     top
 --     CONSEQUENCE: read BEFORE the fee-learning INSERT/UPDATE below, so a fee
@@ -77,7 +78,6 @@ DECLARE
     v_listing_limit_cushion_pct  numeric;
     v_listing_max_open_bags      integer;
     v_listing_usdc_fallback      boolean;
-    v_initial_buy_top_pct        numeric;
     v_sell_net_cushion           numeric;
     v_fee_percent                numeric;
     v_bba_fresh                  boolean;
@@ -111,7 +111,6 @@ v_listing_limit_cushion_pct  := COALESCE((SELECT value::numeric FROM config WHER
 v_listing_max_open_bags      := COALESCE((SELECT value::int     FROM config WHERE key = 'listing_max_open_bags'), 3);
 -- Kill switch; a missing row means OFF.
 v_listing_usdc_fallback      := COALESCE((SELECT value FROM config WHERE key = 'listing_usdc_fallback'), 'false') = 'true';
-v_initial_buy_top_pct        := LEAST(100, GREATEST(0, COALESCE((SELECT value::numeric FROM config WHERE key = 'initial_buy_top_pct'), 50)));
 v_sell_net_cushion           := COALESCE((SELECT value::numeric FROM config WHERE key = 'sell_net_cushion'), 0.015);
 -- Is this minute's best bid/ask data fresh enough to judge spread at all?
 v_bba_fresh                  := EXISTS (SELECT 1 FROM bulk_best_bid_ask WHERE loaded_at > NOW() - INTERVAL '3 minutes');
@@ -902,10 +901,12 @@ AND sz.shares * px.limit_price > v_listing_max_buy_usd;
 -- Always recorded as period_type 'day' (the existing $1-size bucket), even
 -- though the signal driving the pick is the year row. One new position per
 -- cycle.
--- 2026-10-07 (Theodore): only coins in the top config.initial_buy_top_pct
--- (default 50) percent of the year-uptrend set by priority may be picked
--- (join "topbuy" below), and the pick is by priority alone -- the order
--- book no longer ranks candidates (its gates still filter).
+-- 2026-10-07 (Theodore): the pick is by priority alone -- the order book
+-- no longer ranks candidates (its gates still filter).
+-- 2026-10-08 (Theodore: "take out the top 50% ... add a where statement
+-- where priority > 0"): the top-50% ranking/cutoff (join "topbuy",
+-- config.initial_buy_top_pct) is removed; any coin with s.priority > 0 that
+-- passes the other gates may be picked, highest priority first.
 -- Clip size: $1 for a brand-new day position on this coin; if this INSERT
 -- is instead an add while open day rows already exist (price below the
 -- lowest filled buy), use $N where N = open_count + 1 (2nd order $2, 3rd
@@ -926,32 +927,6 @@ SELECT s.stock_id, s.name,
     'day'
 FROM vw_signal s
 JOIN stock ON s.stock_id = stock.stock_id
--- 2026-10-07 TOP-N% PRIORITY SET (config.initial_buy_top_pct, default 50).
--- Ranking set = vw_signal year rows trending up over the year
--- (historical_avg_change_percent > 0) with a priority, minus stablecoins and
--- trading_disabled coins (never buyable, so they must not take up slots).
--- Ranked by priority DESC with stock_id as the tiebreak (ROW_NUMBER, so the
--- cut is deterministic even on equal priorities); the top
--- CEIL(set size x pct / 100) coins are eligible (~43 of 86 at 50%).
--- The ranking runs BEFORE the cash / book / held / dip gates below, so the
--- eligible set does not move when those gates change minute to minute.
-JOIN (
-    SELECT r.stock_id
-    FROM (
-        SELECT v.stock_id,
-               ROW_NUMBER() OVER (ORDER BY v.priority DESC, v.stock_id) AS rn,
-               COUNT(*) OVER () AS set_size
-        FROM vw_signal v
-        JOIN stock vs ON vs.stock_id = v.stock_id
-        WHERE v.period_type = 'year'
-        AND v.historical_avg_change_percent > 0
-        AND v.priority IS NOT NULL
-        AND vs.is_stablecoin IS NOT TRUE
-        AND vs.trading_disabled IS NOT TRUE
-    ) r
-    -- v_initial_buy_top_pct: config.initial_buy_top_pct (default 50), clamped 0..100
-    WHERE r.rn <= CEIL(r.set_size * v_initial_buy_top_pct / 100)
-) topbuy ON topbuy.stock_id = s.stock_id
 CROSS JOIN vw_balance b
 -- 2026-10-07: cash-scaled gap from the ONE shared place (vw_buy_stop_gap:
 -- buy_stop_base_pct/100 * sqrt(equity / free USD), USD only, no max).
@@ -1061,6 +1036,9 @@ AND b.available
 AND s.period_type = 'year'
 AND p.buy_order_id IS NULL
 AND s.historical_avg_change_percent > 0
+-- 2026-10-08 (Theodore): positive year-basis priority only. Replaces the
+-- top-50%-by-priority cut (ba3e579); s is the vw_signal year row.
+AND s.priority > 0
 AND d.current_change_percent < d.historical_avg_change_percent
 AND stock.trading_disabled IS NOT TRUE
 -- 2026-10-07: never open a position in a stablecoin (stock.is_stablecoin,
