@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict bb3xidLq8BpcRHVBcSyTH2RmsTftJo8Fa7WzFEQHcsCRajTP03GQ82D5Ai0IrTG
+\restrict W6O4odFp9Q1Xzb9Ua7W5SckJV9Bjl2RKJMNNWJR5o8SgTkDBjJAruHl2h0sfFkF
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -1174,6 +1174,10 @@ AND sz.shares * px.limit_price > cfg.max_buy_usd;
 -- Always recorded as period_type 'day' (the existing $1-size bucket), even
 -- though the signal driving the pick is the year row. One new position per
 -- cycle.
+-- 2026-10-07 (Theodore): only coins in the top config.initial_buy_top_pct
+-- (default 50) percent of the year-uptrend set by priority may be picked
+-- (join "topbuy" below), and the pick is by priority alone -- the order
+-- book no longer ranks candidates (its gates still filter).
 -- Clip size: $1 for a brand-new day position on this coin; if this INSERT
 -- is instead an add while open day rows already exist (price below the
 -- lowest filled buy), use $N where N = open_count + 1 (2nd order $2, 3rd
@@ -1194,6 +1198,32 @@ SELECT s.stock_id, s.name,
     'day'
 FROM vw_signal s
 JOIN stock ON s.stock_id = stock.stock_id
+-- 2026-10-07 TOP-N% PRIORITY SET (config.initial_buy_top_pct, default 50).
+-- Ranking set = vw_signal year rows trending up over the year
+-- (historical_avg_change_percent > 0) with a priority, minus stablecoins and
+-- trading_disabled coins (never buyable, so they must not take up slots).
+-- Ranked by priority DESC with stock_id as the tiebreak (ROW_NUMBER, so the
+-- cut is deterministic even on equal priorities); the top
+-- CEIL(set size x pct / 100) coins are eligible (~43 of 86 at 50%).
+-- The ranking runs BEFORE the cash / book / held / dip gates below, so the
+-- eligible set does not move when those gates change minute to minute.
+JOIN (
+    SELECT r.stock_id
+    FROM (
+        SELECT v.stock_id,
+               ROW_NUMBER() OVER (ORDER BY v.priority DESC, v.stock_id) AS rn,
+               COUNT(*) OVER () AS set_size
+        FROM vw_signal v
+        JOIN stock vs ON vs.stock_id = v.stock_id
+        WHERE v.period_type = 'year'
+        AND v.historical_avg_change_percent > 0
+        AND v.priority IS NOT NULL
+        AND vs.is_stablecoin IS NOT TRUE
+        AND vs.trading_disabled IS NOT TRUE
+    ) r
+    WHERE r.rn <= CEIL(r.set_size * LEAST(100, GREATEST(0,
+              COALESCE((SELECT value::numeric FROM config WHERE key = 'initial_buy_top_pct'), 50))) / 100)
+) topbuy ON topbuy.stock_id = s.stock_id
 CROSS JOIN vw_balance b
 -- 2026-10-07: cash-scaled gap from the ONE shared place (vw_buy_stop_gap:
 -- buy_stop_base_pct/100 * sqrt(equity / free USD), USD only, no max).
@@ -1339,7 +1369,9 @@ AND (
 --              and >= -0.4 in index.js -- now one rule). NULL = allow.
 --   thin ask:  near-ask notional >= order cost (eff.cost_usd, i.e. shares x
 --              limit, same notional index.js used) * multiple. NULL = allow.
--- Prefer bid-heavy (+0.2) via ORDER BY below is unchanged.
+-- 2026-10-07: these are filters only. The book no longer ranks candidates
+-- (the bid-heavy +0.2 preference / imbalance DESC were removed from the
+-- ORDER BY below; the pick is by priority).
 AND (NOT bookcfg.bba_fresh OR bba.spread_pct <= bookcfg.max_spread_pct)
 AND (book.imbalance IS NULL OR book.imbalance >= bookcfg.skip_imbalance)
 AND (book.near_ask_usd IS NULL OR book.near_ask_usd >= eff.cost_usd * bookcfg.min_ask_mult)
@@ -1357,10 +1389,11 @@ AND stock.price::numeric < CASE WHEN paid.min_paid IS NOT NULL THEN fin.stop_pri
 AND plan.shares > 0
 AND plan.shares >= COALESCE(stock.min_shares, 0)
 AND eff.cost_usd >= COALESCE(stock.min_price, 0)
+-- 2026-10-07: highest priority wins; stock_id makes ties deterministic.
+-- (Was: bid-heavy book first, then imbalance DESC, then priority.)
 ORDER BY
-    CASE WHEN book.imbalance IS NOT NULL AND book.imbalance > 0.2 THEN 0 ELSE 1 END,
-    book.imbalance DESC NULLS LAST,
-    s.priority DESC NULLS LAST
+    s.priority DESC NULLS LAST,
+    s.stock_id
 LIMIT 1;
 
 -- Buy again if current price has dropped below the MOST RECENT
@@ -3942,5 +3975,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict bb3xidLq8BpcRHVBcSyTH2RmsTftJo8Fa7WzFEQHcsCRajTP03GQ82D5Ai0IrTG
+\unrestrict W6O4odFp9Q1Xzb9Ua7W5SckJV9Bjl2RKJMNNWJR5o8SgTkDBjJAruHl2h0sfFkF
 
