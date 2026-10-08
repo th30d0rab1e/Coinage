@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict lumwVvl8j8x3PaGHlmYJjAJeQ80KOzULkiWqkqXY9xUgbbSyhmS4VfYQHPnZP4N
+\restrict sIS7oD8tUA4UZW8zQFaT6C2vGIL8RawgWaggfwPRIc1bIc8ZHssSJgqz4jSYw2y
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -366,6 +366,17 @@ CREATE PROCEDURE public.thee_procedure()
 -- inserts write the final stop/limit and judge the cash and thin-ask checks
 -- on shares x that final limit; the add-on UPDATE re-applies the rule after
 -- the stale refresh; clean-up (e) uses the highest stop the rule allows.
+
+-- 2026-10-07 (migrations/2026-10-07_avg_profit_config.sql): refresh
+-- config.avg_profit = all-time AVG(profit_history.profit), the average
+-- realized profit (USD) per closed position. Runs first, so it reflects
+-- profit_history as of the previous run (this run's closes are recorded
+-- further down). Text like every config value, 6 decimals, 0 when
+-- profit_history is empty. Stored only: nothing reads it yet. If the row
+-- is missing (migration not applied) this updates nothing.
+UPDATE config
+SET value = (SELECT ROUND(COALESCE(AVG(profit), 0)::numeric, 6)::text FROM profit_history)
+WHERE key = 'avg_profit';
 
 INSERT INTO stock (name, date_created)
 SELECT bs.id, NOW()
@@ -3917,5 +3928,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict lumwVvl8j8x3PaGHlmYJjAJeQ80KOzULkiWqkqXY9xUgbbSyhmS4VfYQHPnZP4N
+\unrestrict sIS7oD8tUA4UZW8zQFaT6C2vGIL8RawgWaggfwPRIc1bIc8ZHssSJgqz4jSYw2y
 
