@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict FKItD6BH40QfkBTgDnNtBvzKeH4nIwGTRDu0DPwK0uaYxYTOZlQOdvxgIzzSFVT
+\restrict Y8TtNijMhtYsDcxxiRHJhgLh0OixmFIBf4v4fiXd6bKF4nykKHzAUtCLCIHlx6d
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -2998,7 +2998,8 @@ CREATE TABLE public."position" (
     profit_converted_usdc numeric,
     buy_quote_currency text,
     buy_source text,
-    buy_remade_price numeric
+    buy_remade_price numeric,
+    sell_remade_price numeric
 );
 
 
@@ -3035,6 +3036,13 @@ COMMENT ON COLUMN public."position".buy_source IS 'Which feature created the buy
 --
 
 COMMENT ON COLUMN public."position".buy_remade_price IS 'Live price (stock.price) at the last successful BUY remake, set by index.js processRemakeOrders(). vw_edit_orders only remakes a buy again once the price is below this. NULL = never remade.';
+
+
+--
+-- Name: COLUMN "position".sell_remade_price; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public."position".sell_remade_price IS 'Live price (stock.price) at the last successful SELL remake, set by index.js processRemakeOrders(). vw_edit_orders only remakes a sell again once the price is above this. NULL = never remade.';
 
 
 --
@@ -3637,7 +3645,7 @@ UNION ALL
      CROSS JOIN LATERAL ( SELECT (((ns.new_stop * (p.shares)::numeric) * ((1)::numeric - COALESCE((NULLIF((p.buy_fee)::numeric, (0)::numeric) / NULLIF(((p.buy_filled_price)::numeric * (p.shares)::numeric), (0)::numeric)), (cfg.fee_percent / (100)::numeric)))) - (((p.buy_filled_price)::numeric * (p.shares)::numeric) + COALESCE((p.buy_fee)::numeric, (0)::numeric))) AS net_at_new_stop) pr)
   WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND ((p.daily_sell = true) OR (p.period_type = 'listing'::text)) AND (p.sell_stop_price < (ns.new_stop)::double precision) AND (ns.new_stop >= (p.sell_price)::numeric) AND (pr.net_at_new_stop > (0)::numeric) AND ((pr.net_at_new_stop)::double precision > ( SELECT COALESCE(avg(profit_history.profit), (0)::double precision) AS "coalesce"
            FROM public.profit_history
-          WHERE (profit_history.period_type = p.period_type))) AND (p.creation_hierarchy = 1))
+          WHERE (profit_history.period_type = p.period_type))) AND (p.creation_hierarchy = 1) AND ((p.sell_remade_price IS NULL) OR ((s.price)::numeric > p.sell_remade_price)))
 UNION ALL
  SELECT p.name,
     p.period_type,
@@ -3677,7 +3685,7 @@ UNION ALL
      CROSS JOIN LATERAL ( SELECT (((ns.new_stop * (p.shares)::numeric) * ((1)::numeric - COALESCE((NULLIF((p.buy_fee)::numeric, (0)::numeric) / NULLIF(((p.buy_filled_price)::numeric * (p.shares)::numeric), (0)::numeric)), (cfg.fee_percent / (100)::numeric)))) - (((p.buy_filled_price)::numeric * (p.shares)::numeric) + COALESCE((p.buy_fee)::numeric, (0)::numeric))) AS net_at_new_stop) pr)
   WHERE ((p.sell_coinbase_order_id IS NOT NULL) AND (p.sell_filled_price IS NULL) AND (p.daily_sell = false) AND (p.period_type IS DISTINCT FROM 'listing'::text) AND (p.sell_stop_price < (ns.new_stop)::double precision) AND (ns.new_stop >= (p.sell_price)::numeric) AND (pr.net_at_new_stop > (0)::numeric) AND ((rule.rule_on IS TRUE) OR ((pr.net_at_new_stop)::double precision > ( SELECT COALESCE(avg(profit_history.profit), (0)::double precision) AS "coalesce"
            FROM public.profit_history
-          WHERE (profit_history.period_type = p.period_type)))) AND (p.creation_hierarchy = 1))
+          WHERE (profit_history.period_type = p.period_type)))) AND (p.creation_hierarchy = 1) AND ((p.sell_remade_price IS NULL) OR ((s.price)::numeric > p.sell_remade_price)))
   ORDER BY 11 NULLS FIRST, 13 DESC;
 
 
@@ -4293,5 +4301,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict FKItD6BH40QfkBTgDnNtBvzKeH4nIwGTRDu0DPwK0uaYxYTOZlQOdvxgIzzSFVT
+\unrestrict Y8TtNijMhtYsDcxxiRHJhgLh0OixmFIBf4v4fiXd6bKF4nykKHzAUtCLCIHlx6d
 

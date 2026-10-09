@@ -1654,7 +1654,9 @@ async function processRemakeOrders () {
                         // vw_edit_orders.sql), and element.order_price is
                         // always that same already-set value -- only
                         // sell_stop_price ever moves on a sell remake.
-                        await db.executeQuery(`UPDATE position SET sell_order_id = '${newOrderId}', sell_coinbase_order_id = '${reMakeResponse.success_response.order_id}', sell_stop_price = ${element.new_stop_price}, sell_counter = sell_counter + 1, last_remade_at = NOW(), error_message = NULL WHERE buy_order_id = '${element.buy_order_id}'`)
+                        // 2026-10-08: sell_remade_price = live price at this remake; vw_edit_orders
+                        // won't remake this sell again until the price is above it.
+                        await db.executeQuery(`UPDATE position SET sell_order_id = '${newOrderId}', sell_coinbase_order_id = '${reMakeResponse.success_response.order_id}', sell_stop_price = ${element.new_stop_price}, sell_counter = sell_counter + 1, sell_remade_price = ${element.price_now}, last_remade_at = NOW(), error_message = NULL WHERE buy_order_id = '${element.buy_order_id}'`)
                     }
                     console.log(`Remake OK: ${element.name} ${element.order_type} | shares: ${element.shares} | new stop: ${element.new_stop_price} | est profit: ${element.estimated_profit} | counter: ${element.counter + 1}`)
                 } else {

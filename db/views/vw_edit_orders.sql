@@ -1,3 +1,10 @@
+-- 2026-10-08 (migrations/2026-10-08_sell_remake_requires_price_rise.sql,
+-- Theodore): BOTH SELL branches. Mirror of the buy rule below: a sell is
+-- remade again only once the live price is above position.sell_remade_price
+-- (the price at the last successful sell remake, stamped by index.js
+-- processRemakeOrders()). NULL sell_remade_price (never remade) = first
+-- remake allowed as before. BUY branch unchanged.
+--
 -- 2026-10-08 (migrations/2026-10-08_buy_remake_requires_price_drop.sql,
 -- Theodore): BUY branch only. A buy is remade again only once the live
 -- price is below position.buy_remade_price (the price at the last
@@ -292,6 +299,11 @@ AND pr.net_at_new_stop > 0
 AND pr.net_at_new_stop > (SELECT COALESCE(AVG(profit), 0) FROM profit_history WHERE period_type = p.period_type)
 -- Only the cheapest open bag per coin (creation_hierarchy ranks by fill).
 AND p.creation_hierarchy = 1
+-- 2026-10-08: only remake after the price has RISEN since the last sell
+-- remake. sell_remade_price = live price at the last successful sell remake
+-- (stamped by index.js processRemakeOrders()). NULL = never remade, so the
+-- first remake is allowed as before.
+AND (p.sell_remade_price IS NULL OR s.price::numeric > p.sell_remade_price)
 
 UNION ALL
 
@@ -402,4 +414,9 @@ AND (rule.rule_on IS TRUE
      OR pr.net_at_new_stop > (SELECT COALESCE(AVG(profit), 0) FROM profit_history WHERE period_type = p.period_type))
 -- Only the cheapest open bag per coin (creation_hierarchy ranks by fill).
 AND p.creation_hierarchy = 1
+-- 2026-10-08: only remake after the price has RISEN since the last sell
+-- remake. sell_remade_price = live price at the last successful sell remake
+-- (stamped by index.js processRemakeOrders()). NULL = never remade, so the
+-- first remake is allowed as before.
+AND (p.sell_remade_price IS NULL OR s.price::numeric > p.sell_remade_price)
 ORDER BY last_remade_at ASC NULLS FIRST, price_diff DESC;
