@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict Ksbaj10IV2XCPaeDxngAyVK3ucQQ7vKZZVpeCM7xRpp22mFglNghX27rFd7B3wa
+\restrict FKItD6BH40QfkBTgDnNtBvzKeH4nIwGTRDu0DPwK0uaYxYTOZlQOdvxgIzzSFVT
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -2997,7 +2997,8 @@ CREATE TABLE public."position" (
     creation_hierarchy integer,
     profit_converted_usdc numeric,
     buy_quote_currency text,
-    buy_source text
+    buy_source text,
+    buy_remade_price numeric
 );
 
 
@@ -3027,6 +3028,13 @@ COMMENT ON COLUMN public."position".buy_quote_currency IS 'Currency that paid fo
 --
 
 COMMENT ON COLUMN public."position".buy_source IS 'Which feature created the buy: ''dip_buy'' = dip-buy limit order (2026-10-08). NULL = the normal buy flows.';
+
+
+--
+-- Name: COLUMN "position".buy_remade_price; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public."position".buy_remade_price IS 'Live price (stock.price) at the last successful BUY remake, set by index.js processRemakeOrders(). vw_edit_orders only remakes a buy again once the price is below this. NULL = never remade.';
 
 
 --
@@ -3607,7 +3615,7 @@ CREATE VIEW public.vw_edit_orders AS
            FROM public."position" f
           WHERE ((f.stock_id = p.stock_id) AND (f.buy_filled_price IS NOT NULL) AND (f.sell_filled_price IS NULL))) paid ON (true))
      CROSS JOIN LATERAL public.fn_buy_below_paid(trunc(((s.price)::numeric * bal.stop_mult), s.price_rounding), trunc((((s.price)::numeric * bal.stop_mult) * 1.01), s.price_rounding), paid.min_paid, s.price_rounding) bp(stop_price, limit_price))
-  WHERE ((p.buy_coinbase_order_id IS NOT NULL) AND (p.buy_filled_price IS NULL) AND (p.period_type IS DISTINCT FROM 'listing'::text) AND (p.buy_source IS DISTINCT FROM 'dip_buy'::text) AND (p.buy_stop_price > (bp.stop_price)::double precision) AND (p.buy_price > (bp.limit_price)::double precision) AND (bp.stop_price > (s.price)::numeric))
+  WHERE ((p.buy_coinbase_order_id IS NOT NULL) AND (p.buy_filled_price IS NULL) AND (p.period_type IS DISTINCT FROM 'listing'::text) AND (p.buy_source IS DISTINCT FROM 'dip_buy'::text) AND (p.buy_stop_price > (bp.stop_price)::double precision) AND (p.buy_price > (bp.limit_price)::double precision) AND (bp.stop_price > (s.price)::numeric) AND ((p.buy_remade_price IS NULL) OR ((s.price)::numeric < p.buy_remade_price)))
 UNION ALL
  SELECT p.name,
     p.period_type,
@@ -4285,5 +4293,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict Ksbaj10IV2XCPaeDxngAyVK3ucQQ7vKZZVpeCM7xRpp22mFglNghX27rFd7B3wa
+\unrestrict FKItD6BH40QfkBTgDnNtBvzKeH4nIwGTRDu0DPwK0uaYxYTOZlQOdvxgIzzSFVT
 

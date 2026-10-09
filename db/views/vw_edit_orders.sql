@@ -1,3 +1,11 @@
+-- 2026-10-08 (migrations/2026-10-08_buy_remake_requires_price_drop.sql,
+-- Theodore): BUY branch only. A buy is remade again only once the live
+-- price is below position.buy_remade_price (the price at the last
+-- successful buy remake, stamped by index.js processRemakeOrders()).
+-- Before this, buy_counter alone stepped the stop down ~0.5% per minute
+-- even with a flat price. NULL buy_remade_price (never remade) = first
+-- remake allowed as before. SELL branches unchanged.
+--
 -- 2026-10-08 (migrations/2026-10-08_vw_edit_orders_cfg_single_scan.sql,
 -- Theodore): refactor only, NO logic change. The cfg CTE now reads the
 -- config table once and selects each value with MAX(value) FILTER (...)
@@ -221,6 +229,11 @@ AND p.buy_stop_price > bp.stop_price::double precision
 AND p.buy_price > bp.limit_price::double precision
 -- the new stop must sit above the live price (see header)
 AND bp.stop_price > s.price::numeric
+-- 2026-10-08: only remake after the price has DROPPED since the last buy
+-- remake. buy_remade_price = live price at the last successful buy remake
+-- (stamped by index.js processRemakeOrders()). NULL = never remade, so the
+-- first remake is allowed as before.
+AND (p.buy_remade_price IS NULL OR s.price::numeric < p.buy_remade_price)
 
 UNION ALL
 

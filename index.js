@@ -1646,7 +1646,9 @@ async function processRemakeOrders () {
                 }
                 if(reMakeResponse?.success == true) {
                     if(element.order_type === 'buy') {
-                        await db.executeQuery(`UPDATE position SET buy_order_id = '${newOrderId}', buy_coinbase_order_id = '${reMakeResponse.success_response.order_id}', buy_stop_price = ${element.new_stop_price}, buy_price = ${element.order_price}, buy_counter = buy_counter + 1, last_remade_at = NOW(), buy_placed_at = NOW(), error_message = NULL WHERE buy_order_id = '${element.buy_order_id}'`)
+                        // 2026-10-08: buy_remade_price = live price at this remake; vw_edit_orders
+                        // won't remake this buy again until the price is below it.
+                        await db.executeQuery(`UPDATE position SET buy_order_id = '${newOrderId}', buy_coinbase_order_id = '${reMakeResponse.success_response.order_id}', buy_stop_price = ${element.new_stop_price}, buy_price = ${element.order_price}, buy_counter = buy_counter + 1, buy_remade_price = ${element.price_now}, last_remade_at = NOW(), buy_placed_at = NOW(), error_message = NULL WHERE buy_order_id = '${element.buy_order_id}'`)
                     } else {
                         // sell_price intentionally absent: it's frozen (see
                         // vw_edit_orders.sql), and element.order_price is
