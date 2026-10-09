@@ -306,7 +306,16 @@ con.fetchNextHistorical = async function () {
     // Skip delisted coins (trading_disabled): Coinbase answers 'ProductID is
     // invalid' for their candles, so picking one just wastes this minute's
     // backfill slot and logs an error.
-    let query = `SELECT stock_id, name, COALESCE(historical_last_date, NOW()::DATE) as end_date, COALESCE(historical_last_date, NOW()::DATE) - INTERVAL '350 days' AS start_date FROM stock WHERE trading_disabled IS NOT TRUE order by historical_finished, RANDOM() limit 1;`
+    //
+    // 2026-10-08: ORDER BY historical_finished NULLS FIRST. Coins added by
+    // processNewCoins() get historical_finished = NULL (not 0), and Postgres
+    // sorts NULL *last* in ascending order, so every pick came from the
+    // already-finished (= 1) coins and the 17 coins listed since 2026-06-16
+    // (O, RE, ARX, ... WHUF, DATA) never had their daily candles backfilled.
+    // NULLS FIRST puts unfinished coins (NULL or 0) ahead of finished ones;
+    // once their backfill window comes back empty, insert_aggregate() sets
+    // them to 1 and the pick goes back to random re-checks as before.
+    let query = `SELECT stock_id, name, COALESCE(historical_last_date, NOW()::DATE) as end_date, COALESCE(historical_last_date, NOW()::DATE) - INTERVAL '350 days' AS start_date FROM stock WHERE trading_disabled IS NOT TRUE order by historical_finished NULLS FIRST, RANDOM() limit 1;`
     let results = await con.query(query);
     return results.rows;
     console.log(results)
