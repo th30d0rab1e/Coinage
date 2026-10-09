@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict ibsPtrMnSI8hs3MmQFgA2dvfDUPdlZmCOtmdG1Lg5zmEAZJYcP4izWpWZvDIRha
+\restrict mzIJDhVoocEVVERXDbKj0RcB5eJZgUZZT7KXrB5Q7CvDBXUc7TDfXdz2EPu8ZbV
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -3477,6 +3477,13 @@ CREATE VIEW public.vw_buy_stop_gap AS
             ( SELECT (vw_balance.hold)::numeric AS hold
                    FROM public.vw_balance
                   WHERE (vw_balance.name = 'USD'::text)) AS usd_hold
+        ), gc AS (
+         SELECT
+                CASE
+                    WHEN ((cash_1.free_usd IS NULL) AND (cash_1.usd_hold IS NULL)) THEN NULL::numeric
+                    ELSE (COALESCE(cash_1.free_usd, (0)::numeric) + COALESCE(cash_1.usd_hold, (0)::numeric))
+                END AS gap_cash_usd
+           FROM cash cash_1
         ), eq AS (
          SELECT (((COALESCE(( SELECT sum(((p2.shares)::numeric * (s2.price)::numeric)) AS sum
                    FROM (public."position" p2
@@ -3498,11 +3505,15 @@ CREATE VIEW public.vw_buy_stop_gap AS
     (NOT COALESCE((cash.free_usd > (0)::numeric), false)) AS free_usd_fallback,
     ((cfg.base_pct / (100)::numeric) * sqrt((GREATEST(eq.total_equity, (0)::numeric) /
         CASE
-            WHEN (cash.free_usd > (0)::numeric) THEN cash.free_usd
+            WHEN (gc.gap_cash_usd > (0)::numeric) THEN gc.gap_cash_usd
             ELSE 0.01
-        END))) AS gap
+        END))) AS gap,
+    cash.usd_hold,
+    gc.gap_cash_usd,
+    (NOT COALESCE((gc.gap_cash_usd > (0)::numeric), false)) AS gap_cash_fallback
    FROM cfg,
     cash,
+    gc,
     eq;
 
 
@@ -3510,7 +3521,7 @@ CREATE VIEW public.vw_buy_stop_gap AS
 -- Name: VIEW vw_buy_stop_gap; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.vw_buy_stop_gap IS 'Cash-scaled buy-stop gap (one row): buy_stop_base_pct/100 * sqrt(total_equity / free USD); free USD 0/NULL -> $0.01. Read by thee_procedure (placement) and vw_edit_orders (buy remake).';
+COMMENT ON VIEW public.vw_buy_stop_gap IS 'Cash-scaled buy-stop gap (one row): buy_stop_base_pct/100 * sqrt(total_equity / (USD available + USD hold)); USDC excluded; cash 0/NULL -> $0.01; no max (2026-10-08: hold included). Read by thee_procedure (placement) and vw_edit_orders (buy remake). Affordability checks do NOT use this.';
 
 
 --
@@ -4272,5 +4283,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict ibsPtrMnSI8hs3MmQFgA2dvfDUPdlZmCOtmdG1Lg5zmEAZJYcP4izWpWZvDIRha
+\unrestrict mzIJDhVoocEVVERXDbKj0RcB5eJZgUZZT7KXrB5Q7CvDBXUc7TDfXdz2EPu8ZbV
 
