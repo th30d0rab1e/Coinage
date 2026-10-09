@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict sa9CLO1PmWjRkRO5dycgomu9VXFdmE6Kr6Nj0tnotrhoidRees3jK7FgTVew0dV
+\restrict Ksbaj10IV2XCPaeDxngAyVK3ucQQ7vKZZVpeCM7xRpp22mFglNghX27rFd7B3wa
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -3573,18 +3573,12 @@ CREATE VIEW public.vw_dip_buy_actions AS
 
 CREATE VIEW public.vw_edit_orders AS
  WITH cfg AS (
-         SELECT COALESCE(( SELECT (config.value)::numeric AS value
-                   FROM public.config
-                  WHERE (config.key = 'buy_remake_floor_pct'::text)), 0.1) AS buy_remake_floor_pct,
-            COALESCE(( SELECT (config.value)::numeric AS value
-                   FROM public.config
-                  WHERE (config.key = 'buy_remake_step_pct'::text)), 0.5) AS buy_remake_step_pct,
-            COALESCE(( SELECT (config.value)::numeric AS value
-                   FROM public.config
-                  WHERE (config.key = 'fee_percent'::text)), 1.20) AS fee_percent,
-            ( SELECT (config.value)::numeric AS value
-                   FROM public.config
-                  WHERE (config.key = 'avg_profit'::text)) AS avg_profit
+         SELECT COALESCE((max(config.value) FILTER (WHERE (config.key = 'buy_remake_floor_pct'::text)))::numeric, 0.1) AS buy_remake_floor_pct,
+            COALESCE((max(config.value) FILTER (WHERE (config.key = 'buy_remake_step_pct'::text)))::numeric, 0.5) AS buy_remake_step_pct,
+            COALESCE((max(config.value) FILTER (WHERE (config.key = 'fee_percent'::text)))::numeric, 1.20) AS fee_percent,
+            (max(config.value) FILTER (WHERE (config.key = 'avg_profit'::text)))::numeric AS avg_profit
+           FROM public.config
+          WHERE (config.key = ANY (ARRAY['buy_remake_floor_pct'::text, 'buy_remake_step_pct'::text, 'fee_percent'::text, 'avg_profit'::text]))
         ), gap AS (
          SELECT g.gap
            FROM public.vw_buy_stop_gap g
@@ -4291,5 +4285,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict sa9CLO1PmWjRkRO5dycgomu9VXFdmE6Kr6Nj0tnotrhoidRees3jK7FgTVew0dV
+\unrestrict Ksbaj10IV2XCPaeDxngAyVK3ucQQ7vKZZVpeCM7xRpp22mFglNghX27rFd7B3wa
 

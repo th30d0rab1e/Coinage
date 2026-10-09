@@ -1,3 +1,9 @@
+-- 2026-10-08 (migrations/2026-10-08_vw_edit_orders_cfg_single_scan.sql,
+-- Theodore): refactor only, NO logic change. The cfg CTE now reads the
+-- config table once and selects each value with MAX(value) FILTER (...)
+-- instead of one scalar subquery per key. Same defaults, still exactly one
+-- row. Verified identical output (EXCEPT ALL both directions = 0 rows).
+--
 -- 2026-10-08 (migrations/2026-10-08_vw_edit_orders_cfg_cte.sql, Theodore):
 -- refactor only, NO logic change. Every config value and the
 -- vw_buy_stop_gap row are now read ONCE in the WITH block at the top of the
@@ -116,16 +122,23 @@
 -- cover every remake path.
 CREATE OR REPLACE VIEW public.vw_edit_orders AS
 -- "Variables": read once here, used by every branch below.
--- cfg is always exactly ONE row (scalar subqueries, no FROM), so
+-- cfg reads the config table ONCE (a single scan filtered to the four keys
+-- it needs) and pivots each key into its own column with
+-- MAX(value) FILTER (WHERE key = ...). config.key is the primary key, so
+-- each FILTER sees at most one value and MAX just returns it.
+-- One-row guarantee: an aggregate with no GROUP BY always returns exactly
+-- ONE row, even when none of the keys exist (then every MAX is NULL), so
 -- CROSS JOIN cfg never adds or removes rows. A missing config key gives the
 -- same default the old inline COALESCE gave (avg_profit has no default:
 -- missing -> NULL -> the 1% trail rule stays off, as before).
 WITH cfg AS (
     SELECT
-        COALESCE((SELECT value::numeric FROM config WHERE key = 'buy_remake_floor_pct'), 0.1) AS buy_remake_floor_pct, -- BUY: lowest stop, % over price
-        COALESCE((SELECT value::numeric FROM config WHERE key = 'buy_remake_step_pct'), 0.5)  AS buy_remake_step_pct,  -- BUY: % taken off per remake
-        COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20)         AS fee_percent,          -- SELL: fee % when the bag's own fee is unknown
-        (SELECT value::numeric FROM config WHERE key = 'avg_profit')                          AS avg_profit            -- SELL 2: 1% trail threshold
+        COALESCE(MAX(value) FILTER (WHERE key = 'buy_remake_floor_pct')::numeric, 0.1) AS buy_remake_floor_pct, -- BUY: lowest stop, % over price
+        COALESCE(MAX(value) FILTER (WHERE key = 'buy_remake_step_pct')::numeric, 0.5)  AS buy_remake_step_pct,  -- BUY: % taken off per remake
+        COALESCE(MAX(value) FILTER (WHERE key = 'fee_percent')::numeric, 1.20)         AS fee_percent,          -- SELL: fee % when the bag's own fee is unknown
+        MAX(value) FILTER (WHERE key = 'avg_profit')::numeric                          AS avg_profit            -- SELL 2: 1% trail threshold
+    FROM config
+    WHERE key IN ('buy_remake_floor_pct', 'buy_remake_step_pct', 'fee_percent', 'avg_profit')
 ),
 -- The cash-scaled buy-stop gap (db/views/vw_buy_stop_gap.sql, the ONE place
 -- it is computed). Its own CTE, joined only by the BUY branch exactly like
