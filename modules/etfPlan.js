@@ -59,7 +59,8 @@ function baseSizeFor(notional, limitPrice, baseIncrement) {
     return Number(size) > 0 ? size : null
 }
 
-// Walk the planned placements in ticker order and keep only the ones
+// Walk the planned placements in plan order (random since 2026-10-09,
+// see index.js buildEtfPlan) and keep only the ones
 // Default USD can cover. Skipped tickers are not reserved, so crypto is
 // not blocked by dollars this run will not spend.
 function fundAttempts(chosen, available) {

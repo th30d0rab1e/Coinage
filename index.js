@@ -870,12 +870,20 @@ async function buildEtfPlan() {
         // invested are below the enabled-ETF average, else etf.quote_usd ($1).
         // Recomputed every run. Both the market buy and the limit size from
         // it, so the USD reserve (plan.reserve -> etf_usd_reserve) matches.
+        // 2026-10-09 (Theodore): ORDER BY random() instead of ORDER BY
+        // e.ticker. This order is the order etfPlan.fundAttemptsByCurrency
+        // walks the USD/USDC pots in, so when cash only covers some ETFs the
+        // ones first in line get bought. By ticker that was always the same
+        // alphabetical ETFs; random() gives a fair rotation among the
+        // eligible ETFs with no preference order. Eligibility (enabled,
+        // catch-up sizing, pending/resting skips, cash/USDC funding) is
+        // unchanged.
         `SELECT e.ticker, e.product_id, e.usdc_product_id,
                 COALESCE(v.buy_usd, e.quote_usd) AS quote_usd
          FROM etf e
          LEFT JOIN vw_etf_buy_usd v ON v.ticker = e.ticker
          WHERE e.enabled
-         ORDER BY e.ticker`
+         ORDER BY random()`
     )
     const rows = listed?.rows || []
     const book = await equity.equitySnapshot()
