@@ -1,3 +1,13 @@
+-- 2026-10-08 (migrations/2026-10-08_vw_edit_orders_cfg_cte.sql, Theodore):
+-- refactor only, NO logic change. Every config value and the
+-- vw_buy_stop_gap row are now read ONCE in the WITH block at the top of the
+-- view (cfg / gap -- the view's "variables", like the DECLARE block of
+-- thee_procedure) instead of repeated inline
+-- (SELECT value FROM config WHERE key = ...) subqueries. Defaults are the
+-- same COALESCE values as before. Verified before going live: output
+-- identical to the old view (EXCEPT both directions = 0 rows), same
+-- columns / types / order.
+--
 -- 2026-10-07: SELL branch 2 adds the "1% trail once above average profit"
 -- rule (config.avg_profit); see the comment at that branch. Branch 1 and
 -- the BUY branch are unchanged.
@@ -105,6 +115,24 @@
 -- in its place. processRemakeOrders() reads only this view, so these rules
 -- cover every remake path.
 CREATE OR REPLACE VIEW public.vw_edit_orders AS
+-- "Variables": read once here, used by every branch below.
+-- cfg is always exactly ONE row (scalar subqueries, no FROM), so
+-- CROSS JOIN cfg never adds or removes rows. A missing config key gives the
+-- same default the old inline COALESCE gave (avg_profit has no default:
+-- missing -> NULL -> the 1% trail rule stays off, as before).
+WITH cfg AS (
+    SELECT
+        COALESCE((SELECT value::numeric FROM config WHERE key = 'buy_remake_floor_pct'), 0.1) AS buy_remake_floor_pct, -- BUY: lowest stop, % over price
+        COALESCE((SELECT value::numeric FROM config WHERE key = 'buy_remake_step_pct'), 0.5)  AS buy_remake_step_pct,  -- BUY: % taken off per remake
+        COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20)         AS fee_percent,          -- SELL: fee % when the bag's own fee is unknown
+        (SELECT value::numeric FROM config WHERE key = 'avg_profit')                          AS avg_profit            -- SELL 2: 1% trail threshold
+),
+-- The cash-scaled buy-stop gap (db/views/vw_buy_stop_gap.sql, the ONE place
+-- it is computed). Its own CTE, joined only by the BUY branch exactly like
+-- the old CROSS JOIN vw_buy_stop_gap, so the sell branches never depend on it.
+gap AS (
+    SELECT g.gap FROM vw_buy_stop_gap g
+)
 -- BUY branch. 2026-10-07 (migrations/2026-10-07_buy_stop_cash_scaled.sql,
 -- Theodore): the remake now starts from the same cash-scaled gap as first
 -- placement (vw_buy_stop_gap.gap, the ONE shared place) instead of a fixed
@@ -140,12 +168,13 @@ SELECT p.name,
     ABS(bp.stop_price - p.buy_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
 FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
-CROSS JOIN vw_buy_stop_gap g
+CROSS JOIN gap g
+CROSS JOIN cfg  -- one-row "variables" (see WITH at the top)
 CROSS JOIN LATERAL (
     SELECT GREATEST(
-               1 + COALESCE((SELECT value::numeric FROM config WHERE key = 'buy_remake_floor_pct'), 0.1) / 100,
+               1 + cfg.buy_remake_floor_pct / 100,
                1 + g.gap - p.buy_counter::numeric
-                   * COALESCE((SELECT value::numeric FROM config WHERE key = 'buy_remake_step_pct'), 0.5) / 100
+                   * cfg.buy_remake_step_pct / 100
            ) AS stop_mult
 ) bal
 -- Lowest price paid among this coin's open filled bags (NULL = not held).
@@ -201,6 +230,7 @@ SELECT p.name,
     ABS(ns.new_stop - p.sell_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
 FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
+CROSS JOIN cfg  -- one-row "variables" (see WITH at the top)
 -- FIX 2: the one place the new stop is calculated for this branch.
 -- Old: GREATEST(sell_price, trunc(price * (0.99 + counter*0.005)))
 -- New: same, but LEAST'd against trunc(price * 0.995) so the stop is
@@ -218,7 +248,7 @@ CROSS JOIN LATERAL (
 CROSS JOIN LATERAL (
     SELECT ns.new_stop
         * p.shares::numeric
-        * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
+        * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), cfg.fee_percent / 100))
         - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0)) AS net_at_new_stop
 ) pr
 WHERE p.sell_coinbase_order_id IS NOT NULL
@@ -276,6 +306,7 @@ SELECT p.name,
 FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
 JOIN price_aggregate_total pat ON p.stock_id = pat.stock_id AND p.period_type = pat.period_type
+CROSS JOIN cfg  -- one-row "variables" (see WITH at the top)
 CROSS JOIN LATERAL (
     SELECT CASE p.period_type
         WHEN 'day'::text   THEN LEAST(0.99, GREATEST(0.90, 1::numeric - pat.std_dev::numeric / 200::numeric))
@@ -293,9 +324,9 @@ CROSS JOIN LATERAL (
 CROSS JOIN LATERAL (
     SELECT t.stop99,
            t.stop99 * p.shares::numeric
-             * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
+             * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), cfg.fee_percent / 100))
              - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0)) AS net99,
-           (SELECT value::numeric FROM config WHERE key = 'avg_profit') AS avg_profit
+           cfg.avg_profit AS avg_profit
     FROM (SELECT trunc(s.price::numeric * 0.99, s.price_rounding) AS stop99) t
 ) r99
 CROSS JOIN LATERAL (
@@ -326,7 +357,7 @@ CROSS JOIN LATERAL (
 CROSS JOIN LATERAL (
     SELECT ns.new_stop
         * p.shares::numeric
-        * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20) / 100))
+        * (1 - COALESCE(NULLIF(p.buy_fee::numeric, 0) / NULLIF(p.buy_filled_price::numeric * p.shares::numeric, 0), cfg.fee_percent / 100))
         - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0)) AS net_at_new_stop
 ) pr
 WHERE p.sell_coinbase_order_id IS NOT NULL
