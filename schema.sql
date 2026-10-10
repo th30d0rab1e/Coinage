@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict Y8TtNijMhtYsDcxxiRHJhgLh0OixmFIBf4v4fiXd6bKF4nykKHzAUtCLCIHlx6d
+\restrict JDs71M5ApA8pcOUo6XbYp4jUEje7JeYdQsJmVaaf2r6anIpJXUxuDIlTbDDtnWV
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -3541,6 +3541,73 @@ COMMENT ON VIEW public.vw_buy_stop_gap IS 'Cash-scaled buy-stop gap (one row): b
 
 
 --
+-- Name: vw_coin_close_stats; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.vw_coin_close_stats AS
+ WITH buy_fill_time AS (
+         SELECT fills.order_id,
+            min(fills.trade_time) AS filled_at
+           FROM public.fills
+          WHERE (fills.side = 'BUY'::text)
+          GROUP BY fills.order_id
+        ), closed AS (
+         SELECT ph.name AS coin,
+            count(*) AS closes,
+            avg(ph.profit) AS avg_profit,
+            sum(ph.profit) AS total_profit,
+            count(*) FILTER (WHERE (ph.date_created >= (now() - '30 days'::interval))) AS closes_30d,
+            sum(ph.profit) FILTER (WHERE (ph.date_created >= (now() - '30 days'::interval))) AS profit_30d,
+            count(*) FILTER (WHERE ((ph.date_created)::date = CURRENT_DATE)) AS closes_today,
+            avg((EXTRACT(epoch FROM ((ph.date_created)::timestamp with time zone - bft.filled_at)) / 3600.0)) FILTER (WHERE ((bft.filled_at IS NOT NULL) AND ((ph.date_created)::timestamp with time zone > bft.filled_at))) AS avg_hours_to_close,
+            max(ph.date_created) AS last_close
+           FROM (public.profit_history ph
+             LEFT JOIN buy_fill_time bft ON ((bft.order_id = ph.buy_coinbase_order_id)))
+          GROUP BY ph.name
+        ), open_bags AS (
+         SELECT p.name AS coin,
+            count(*) AS open_bags,
+            sum((p.shares * p.buy_filled_price)) AS open_cost
+           FROM public."position" p
+          WHERE ((p.buy_filled_price IS NOT NULL) AND (p.sell_filled_price IS NULL))
+          GROUP BY p.name
+        ), combined AS (
+         SELECT COALESCE(c.coin, o.coin) AS coin,
+            COALESCE(c.closes, (0)::bigint) AS closes,
+            c.avg_profit,
+            COALESCE(c.total_profit, (0)::double precision) AS total_profit,
+            COALESCE(o.open_bags, (0)::bigint) AS open_bags,
+            (COALESCE(c.closes, (0)::bigint) + COALESCE(o.open_bags, (0)::bigint)) AS fills,
+            COALESCE(o.open_cost, (0)::double precision) AS open_cost,
+            COALESCE(c.closes_30d, (0)::bigint) AS closes_30d,
+            COALESCE(c.profit_30d, (0)::double precision) AS profit_30d,
+            COALESCE(c.closes_today, (0)::bigint) AS closes_today,
+            c.avg_hours_to_close,
+            c.last_close
+           FROM (closed c
+             FULL JOIN open_bags o ON ((o.coin = c.coin)))
+        )
+ SELECT row_number() OVER (ORDER BY (closes >= 3) DESC, combined.total_profit DESC, ((closes)::numeric / (NULLIF(fills, 0))::numeric) DESC NULLS LAST, coin) AS rank,
+    coin,
+    closes,
+    round((avg_profit)::numeric, 4) AS avg_profit,
+    round((total_profit)::numeric, 2) AS total_profit,
+    open_bags,
+    fills,
+    round(((closes)::numeric / (NULLIF(fills, 0))::numeric), 2) AS fill_to_close_ratio,
+    round(((total_profit / (NULLIF(fills, 0))::double precision))::numeric, 4) AS profit_per_fill,
+    round((open_cost)::numeric, 2) AS open_cost,
+    closes_30d,
+    round((profit_30d)::numeric, 2) AS profit_30d,
+    round(((profit_30d / (NULLIF(closes_30d, 0))::double precision))::numeric, 4) AS avg_profit_30d,
+    closes_today,
+    round(avg_hours_to_close, 1) AS avg_hours_to_close,
+    last_close
+   FROM combined
+  ORDER BY (row_number() OVER (ORDER BY (closes >= 3) DESC, combined.total_profit DESC, ((closes)::numeric / (NULLIF(fills, 0))::numeric) DESC NULLS LAST, coin));
+
+
+--
 -- Name: vw_dip_buy_actions; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -4301,5 +4368,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict Y8TtNijMhtYsDcxxiRHJhgLh0OixmFIBf4v4fiXd6bKF4nykKHzAUtCLCIHlx6d
+\unrestrict JDs71M5ApA8pcOUo6XbYp4jUEje7JeYdQsJmVaaf2r6anIpJXUxuDIlTbDDtnWV
 
