@@ -34,6 +34,11 @@
 --   closes_today         closes since local midnight
 --   avg_hours_to_close   mean hours from buy fill to close (matched closes only)
 --   last_close           timestamp of the most recent close
+--   stock_id             stock.stock_id of the coin (2026-10-10, Theodore): the
+--                        join key for vw_signal's close_factor. Taken from
+--                        profit_history / position.stock_id (the same rows the
+--                        counts come from). Appended last so CREATE OR REPLACE
+--                        VIEW can add it without dropping the view.
 --
 -- Ranking (built into rank + ORDER BY)
 --   1. coins with >= 3 closes first (sample-size floor, so one lucky close
@@ -52,6 +57,7 @@ WITH buy_fill_time AS (
 ),
 closed AS (
     SELECT ph.name AS coin,
+        ph.stock_id,
         count(*) AS closes,
         avg(ph.profit) AS avg_profit,
         sum(ph.profit) AS total_profit,
@@ -63,19 +69,21 @@ closed AS (
         max(ph.date_created) AS last_close
     FROM profit_history ph
     LEFT JOIN buy_fill_time bft ON bft.order_id = ph.buy_coinbase_order_id
-    GROUP BY ph.name
+    GROUP BY ph.name, ph.stock_id
 ),
 open_bags AS (
     SELECT p.name AS coin,
+        p.stock_id,
         count(*) AS open_bags,
         sum(p.shares * p.buy_filled_price) AS open_cost
     FROM position p
     WHERE p.buy_filled_price IS NOT NULL
       AND p.sell_filled_price IS NULL
-    GROUP BY p.name
+    GROUP BY p.name, p.stock_id
 ),
 combined AS (
     SELECT COALESCE(c.coin, o.coin) AS coin,
+        COALESCE(c.stock_id, o.stock_id) AS stock_id,
         COALESCE(c.closes, 0) AS closes,
         c.avg_profit,
         COALESCE(c.total_profit, 0) AS total_profit,
@@ -88,7 +96,7 @@ combined AS (
         c.avg_hours_to_close,
         c.last_close
     FROM closed c
-    FULL JOIN open_bags o ON o.coin = c.coin
+    FULL JOIN open_bags o ON o.stock_id = c.stock_id
 )
 SELECT
     row_number() OVER (
@@ -109,6 +117,7 @@ SELECT
     round((profit_30d / NULLIF(closes_30d, 0))::numeric, 4) AS avg_profit_30d,
     closes_today,
     round(avg_hours_to_close::numeric, 1) AS avg_hours_to_close,
-    last_close
+    last_close,
+    stock_id
 FROM combined
 ORDER BY rank;

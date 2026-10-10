@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict JDs71M5ApA8pcOUo6XbYp4jUEje7JeYdQsJmVaaf2r6anIpJXUxuDIlTbDDtnWV
+\restrict uA0yBiEppYw02bPiV3rcRbpgfkkyv1By0Jaa29eOqgwsCgjg9AaPdGpiRnBMkO0
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -3553,6 +3553,7 @@ CREATE VIEW public.vw_coin_close_stats AS
           GROUP BY fills.order_id
         ), closed AS (
          SELECT ph.name AS coin,
+            ph.stock_id,
             count(*) AS closes,
             avg(ph.profit) AS avg_profit,
             sum(ph.profit) AS total_profit,
@@ -3563,16 +3564,18 @@ CREATE VIEW public.vw_coin_close_stats AS
             max(ph.date_created) AS last_close
            FROM (public.profit_history ph
              LEFT JOIN buy_fill_time bft ON ((bft.order_id = ph.buy_coinbase_order_id)))
-          GROUP BY ph.name
+          GROUP BY ph.name, ph.stock_id
         ), open_bags AS (
          SELECT p.name AS coin,
+            p.stock_id,
             count(*) AS open_bags,
             sum((p.shares * p.buy_filled_price)) AS open_cost
            FROM public."position" p
           WHERE ((p.buy_filled_price IS NOT NULL) AND (p.sell_filled_price IS NULL))
-          GROUP BY p.name
+          GROUP BY p.name, p.stock_id
         ), combined AS (
          SELECT COALESCE(c.coin, o.coin) AS coin,
+            COALESCE(c.stock_id, o.stock_id) AS stock_id,
             COALESCE(c.closes, (0)::bigint) AS closes,
             c.avg_profit,
             COALESCE(c.total_profit, (0)::double precision) AS total_profit,
@@ -3585,7 +3588,7 @@ CREATE VIEW public.vw_coin_close_stats AS
             c.avg_hours_to_close,
             c.last_close
            FROM (closed c
-             FULL JOIN open_bags o ON ((o.coin = c.coin)))
+             FULL JOIN open_bags o ON ((o.stock_id = c.stock_id)))
         )
  SELECT row_number() OVER (ORDER BY (closes >= 3) DESC, combined.total_profit DESC, ((closes)::numeric / (NULLIF(fills, 0))::numeric) DESC NULLS LAST, coin) AS rank,
     coin,
@@ -3602,7 +3605,8 @@ CREATE VIEW public.vw_coin_close_stats AS
     round(((profit_30d / (NULLIF(closes_30d, 0))::double precision))::numeric, 4) AS avg_profit_30d,
     closes_today,
     round(avg_hours_to_close, 1) AS avg_hours_to_close,
-    last_close
+    last_close,
+    stock_id
    FROM combined
   ORDER BY (row_number() OVER (ORDER BY (closes >= 3) DESC, combined.total_profit DESC, ((closes)::numeric / (NULLIF(fills, 0))::numeric) DESC NULLS LAST, coin));
 
@@ -3967,13 +3971,13 @@ CREATE VIEW public.vw_signal AS
     trunc((pac.change_percent)::numeric, 2) AS current_change_percent,
     trunc((((pac.change_percent - pat.avg_change_percent) / NULLIF(pat.std_dev, (0)::double precision)))::numeric, 2) AS signal,
     trunc(((((period_score.cnt)::double precision * pat.avg_change_percent) / NULLIF(pat.std_dev, (0)::double precision)))::numeric, 2) AS score,
-    trunc((((((period_score.cnt)::double precision * pat.avg_change_percent) / NULLIF(pat.std_dev, (0)::double precision)) * abs(((pac.change_percent - pat.avg_change_percent) / NULLIF(pat.std_dev, (0)::double precision)))))::numeric, 2) AS priority,
+    trunc(((((((period_score.cnt)::double precision * pat.avg_change_percent) / NULLIF(pat.std_dev, (0)::double precision)) * abs(((pac.change_percent - pat.avg_change_percent) / NULLIF(pat.std_dev, (0)::double precision)))) * (GREATEST(COALESCE(ccs.fill_to_close_ratio, 1.0), 0.1))::double precision))::numeric, 2) AS priority,
         CASE
             WHEN (((pac.change_percent - pat.avg_change_percent) / NULLIF(pat.std_dev, (0)::double precision)) < (0)::double precision) THEN 'BUY'::text
             WHEN (((pac.change_percent - pat.avg_change_percent) / NULLIF(pat.std_dev, (0)::double precision)) > (0)::double precision) THEN 'SELL'::text
             ELSE 'HOLD'::text
         END AS recommendation
-   FROM ((((public.price_aggregate pa
+   FROM (((((public.price_aggregate pa
      JOIN public.price_aggregate_comparison pac ON ((pa.price_aggregate_id = pac.after_id)))
      JOIN public.stock s ON ((s.stock_id = pa.stock_id)))
      JOIN public.price_aggregate_total pat ON (((pa.stock_id = pat.stock_id) AND (pa.period_type = pat.period_type))))
@@ -3983,8 +3987,9 @@ CREATE VIEW public.vw_signal AS
             string_agg((trunc((price_aggregate.close)::numeric, 2))::text, ','::text ORDER BY price_aggregate.period_date) AS prices
            FROM public.price_aggregate
           GROUP BY price_aggregate.stock_id, price_aggregate.period_type) period_score ON (((pa.stock_id = period_score.stock_id) AND (pa.period_type = period_score.period_type))))
+     LEFT JOIN public.vw_coin_close_stats ccs ON ((ccs.stock_id = s.stock_id)))
   WHERE (((pa.period_type = 'day'::text) AND (pa.period_date = (now())::date)) OR ((pa.period_type = 'month'::text) AND (pa.period_date = (date_trunc('month'::text, now()))::date)) OR ((pa.period_type = 'year'::text) AND (pa.period_date = (date_trunc('year'::text, now()))::date)))
-  ORDER BY pa.period_type DESC, (trunc((((((period_score.cnt)::double precision * pat.avg_change_percent) / NULLIF(pat.std_dev, (0)::double precision)) * abs(((pac.change_percent - pat.avg_change_percent) / NULLIF(pat.std_dev, (0)::double precision)))))::numeric, 2)) DESC NULLS LAST;
+  ORDER BY pa.period_type DESC, (trunc(((((((period_score.cnt)::double precision * pat.avg_change_percent) / NULLIF(pat.std_dev, (0)::double precision)) * abs(((pac.change_percent - pat.avg_change_percent) / NULLIF(pat.std_dev, (0)::double precision)))) * (GREATEST(COALESCE(ccs.fill_to_close_ratio, 1.0), 0.1))::double precision))::numeric, 2)) DESC NULLS LAST;
 
 
 --
@@ -4368,5 +4373,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict JDs71M5ApA8pcOUo6XbYp4jUEje7JeYdQsJmVaaf2r6anIpJXUxuDIlTbDDtnWV
+\unrestrict uA0yBiEppYw02bPiV3rcRbpgfkkyv1By0Jaa29eOqgwsCgjg9AaPdGpiRnBMkO0
 

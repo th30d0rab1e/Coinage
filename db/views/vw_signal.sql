@@ -17,7 +17,7 @@ SELECT s.name,
     trunc(pac.change_percent::numeric, 2) AS current_change_percent,
     trunc(((pac.change_percent - pat.avg_change_percent) / NULLIF(pat.std_dev, 0::double precision))::numeric, 2) AS signal,
     trunc((period_score.cnt::double precision * pat.avg_change_percent / NULLIF(pat.std_dev, 0::double precision))::numeric, 2) AS score,
-    trunc((period_score.cnt::double precision * pat.avg_change_percent / NULLIF(pat.std_dev, 0::double precision) * abs((pac.change_percent - pat.avg_change_percent) / NULLIF(pat.std_dev, 0::double precision)))::numeric, 2) AS priority,
+    trunc((period_score.cnt::double precision * pat.avg_change_percent / NULLIF(pat.std_dev, 0::double precision) * abs((pac.change_percent - pat.avg_change_percent) / NULLIF(pat.std_dev, 0::double precision)) * GREATEST(COALESCE(ccs.fill_to_close_ratio, 1.0), 0.1)::double precision)::numeric, 2) AS priority,
     CASE
         WHEN ((pac.change_percent - pat.avg_change_percent) / NULLIF(pat.std_dev, 0::double precision)) < 0::double precision THEN 'BUY'::text
         WHEN ((pac.change_percent - pat.avg_change_percent) / NULLIF(pat.std_dev, 0::double precision)) > 0::double precision THEN 'SELL'::text
@@ -35,8 +35,16 @@ JOIN (
     FROM price_aggregate
     GROUP BY price_aggregate.stock_id, price_aggregate.period_type
 ) period_score ON pa.stock_id = period_score.stock_id AND pa.period_type = period_score.period_type
+-- 2026-10-10 (Theodore): close_factor. Coins that actually close rank above
+-- coins that just drift up: priority (every period_type, plus the ORDER BY) is
+-- multiplied by GREATEST(COALESCE(ccs.fill_to_close_ratio, 1.0), 0.1).
+-- Joined on stock_id. No row yet (never bought) -> 1.0 = unchanged priority;
+-- floor 0.1 so a 0.00 ratio dampens instead of zeroing. Factor is always
+-- > 0, so the sign of priority (and thee_procedure's priority > 0 filter)
+-- is unchanged; only the ranking of the first-buy pick moves.
+LEFT JOIN vw_coin_close_stats ccs ON ccs.stock_id = s.stock_id
 WHERE pa.period_type = 'day'::text AND pa.period_date = now()::date
    OR pa.period_type = 'month'::text AND pa.period_date = date_trunc('month'::text, now())::date
    OR pa.period_type = 'year'::text AND pa.period_date = date_trunc('year'::text, now())::date
 ORDER BY pa.period_type DESC,
-    trunc((period_score.cnt::double precision * pat.avg_change_percent / NULLIF(pat.std_dev, 0::double precision) * abs((pac.change_percent - pat.avg_change_percent) / NULLIF(pat.std_dev, 0::double precision)))::numeric, 2) DESC NULLS LAST;
+    trunc((period_score.cnt::double precision * pat.avg_change_percent / NULLIF(pat.std_dev, 0::double precision) * abs((pac.change_percent - pat.avg_change_percent) / NULLIF(pat.std_dev, 0::double precision)) * GREATEST(COALESCE(ccs.fill_to_close_ratio, 1.0), 0.1)::double precision)::numeric, 2) DESC NULLS LAST;
