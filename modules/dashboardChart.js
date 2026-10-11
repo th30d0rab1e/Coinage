@@ -32,7 +32,8 @@ async function listCoins () {
         WHERE name IS NOT NULL
           AND name ~ '^[A-Z0-9]+-USD(C)?$'
         GROUP BY name
-        ORDER BY MAX(last_fill) DESC NULLS LAST, name`)
+        -- 2026-10-11: A-Z for the dropdown; All is prepended client-side.
+        ORDER BY name ASC`)
     return rows
 }
 
@@ -269,10 +270,11 @@ function renderSection () {
         function renderCoinOptions (filterText) {
             const q = (filterText || '').trim().toLowerCase()
             const prev = coinSel.value
-            const matched = !q ? allCoins : allCoins.filter(c => {
+            const matched = (!q ? allCoins.slice() : allCoins.filter(c => {
                 const hay = (c.name + ' ' + (c.fill_count || '')).toLowerCase()
                 return hay.includes(q)
-            })
+            })).sort((a, b) => a.name.localeCompare(b.name))
+            // All always first, then coins A-Z.
             coinSel.innerHTML = '<option value="">All</option>' + matched.map(c => {
                 const label = c.fill_count ? (c.name + ' (' + c.fill_count + ' fills)') : c.name
                 return '<option value="' + c.name + '">' + label + '</option>'
