@@ -1,5 +1,7 @@
 const http = require('http')
 const db = require('./modules/database.js')
+// 2026-10-11: new searchable Price & Fills chart (separate section + JSON API)
+const pfChart = require('./modules/dashboardChart.js')
 
 const PORT = 3000
 
@@ -231,12 +233,28 @@ function renderPage (profitSummary, profitHistory24h, openBuyOrders, openPositio
         <tr><th>Coin</th><th>Type</th><th>Price</th><th>When</th></tr>
         ${fillRows || '<tr><td class="empty" colspan="4">No fills recorded</td></tr>'}
     </table>
+
+    ${pfChart.renderSection()}
 </body>
 </html>`
 }
 
 const server = http.createServer(async (req, res) => {
     try {
+        // 2026-10-11: JSON routes for the Price & Fills chart, fetched client-side
+        // so the main page doesn't embed thousands of price points on every load.
+        const url = new URL(req.url, 'http://localhost')
+        if (url.pathname === '/api/coins') {
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            return res.end(JSON.stringify(await pfChart.listCoins()))
+        }
+        if (url.pathname === '/api/chart') {
+            const coin = (url.searchParams.get('coin') || '').toUpperCase()
+            if (!coin) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end('{"error":"coin required"}') }
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            return res.end(JSON.stringify(await pfChart.chartData(coin, url.searchParams.get('range') || '7d')))
+        }
+        if (url.pathname !== '/') { res.writeHead(404); return res.end('not found') }
         const [profitSummary, profitHistory24h, openBuyOrders, openPositions, recentFills] = await Promise.all([
             db.executeQuery(PROFIT_SUMMARY_QUERY),
             db.executeQuery(PROFIT_HISTORY_24H_QUERY),
