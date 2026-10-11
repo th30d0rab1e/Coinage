@@ -137,7 +137,7 @@ function renderSection () {
     </div>
     <div style="position:relative;height:420px;background:#151515;border-radius:8px;padding:8px"><canvas id="pf-chart"></canvas></div>
     <div class="dim" style="font-size:12px;margin-top:4px">
-        Polls sells every 5s while this tab is open. Leave the browser window open on this machine to keep watching.
+        Polls sells every 1 minute while this tab is open. Leave the browser window open on this machine to keep watching.
         <span class="buy-tag">● buy fill</span> <span class="sell-tag">● sell fill</span>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
@@ -151,7 +151,7 @@ function renderSection () {
         const autoFollow = document.getElementById('pf-autofollow')
         const status = document.getElementById('pf-status')
         let chart = null, current = null, lastSellKey = null, loading = false
-        const POLL_MS = 5000
+        const POLL_MS = 60000
         const toXY = a => a.map(d => ({ x: d.t, y: d.p, size: d.size, fee: d.fee }))
 
         function draw (data) {
