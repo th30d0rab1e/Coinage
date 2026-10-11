@@ -244,7 +244,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
         <tr>
             <th>Kind</th><th>Coin</th><th>Shares</th><th>Bought @</th><th>Buy Limit</th><th>Buy Stop</th>
             <th>Current</th><th>Limit Price</th><th>Stop Price</th><th>Sell Order</th>
-            <th>% to Trigger</th><th>Target Profit</th><th>Current Profit</th><th>Error</th><th>Placed</th>
+            <th>Buy % to Trigger</th><th>Target Profit</th><th>Current Profit</th><th>Error</th><th>Placed</th>
         </tr>
         ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="15">No open positions or buy orders</td></tr>'}
     </table>
