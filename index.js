@@ -39,6 +39,15 @@ if (require.main === module) main()
 
 async function main () {
     try {
+        // 2026-10-11: kill switch — set config.bot_enabled to anything but
+        // 'true' to stop the minute cron without needing crontab edits.
+        {
+            const en = await db.query(`SELECT value FROM config WHERE key = 'bot_enabled'`)
+            if ((en?.rows?.[0]?.value ?? 'true') !== 'true') {
+                console.log('Bot disabled (config.bot_enabled != true); exiting')
+                return
+            }
+        }
 
         //fetch fresh data first so thee_procedure sees current orders, fills, and balance
         const pnc = processNewCoins();
