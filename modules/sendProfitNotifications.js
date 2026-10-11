@@ -6,6 +6,7 @@
 //                                          rows joined to their buy/sell fills
 //   Profit / SellTotal / Sell Fee /     -> Profit, coin, buy + sell price,
 //   Buy Total / Buy Fee message            shares, buy + sell time, totals,
+//                                        month (Chicago MTD) + lifetime profit,
 //                                          fees, live USD + USDC balance
 //   push.send(userKey, ProductID, msg)  -> same node-pushover call, title =
 //                                          product id (e.g. "XTZ-USD")
@@ -126,7 +127,12 @@ async function run(db, ca) {
                    c.buy_fee, c.sell_fee,
                    b.price AS buy_price, b.shares, b.total AS buy_total, b.at AS bought_at,
                    s.price AS sell_price, s.total AS sell_total, s.at AS sold_at,
-                   (SELECT SUM(profit) FROM profit_history) AS lifetime_profit
+                   (SELECT SUM(profit) FROM profit_history) AS lifetime_profit,
+                   -- Chicago calendar month MTD (e.g. Oct 1 00:00 CT through now)
+                   (SELECT COALESCE(SUM(profit), 0) FROM profit_history
+                     WHERE (date_created AT TIME ZONE 'America/Chicago')::date
+                           >= date_trunc('month', (NOW() AT TIME ZONE 'America/Chicago'))::date
+                   ) AS month_profit
               FROM claimed c
               LEFT JOIN LATERAL (
                     SELECT SUM(price * size) / NULLIF(SUM(size), 0) AS price,
@@ -159,6 +165,8 @@ async function run(db, ca) {
                 + `Buy Total: ${money(r.buy_total)}  Buy Fee: ${money(r.buy_fee)}\n`
                 + `Sell Total: ${money(r.sell_total)}  Sell Fee: ${money(r.sell_fee)}\n`
                 + `USD: ${money(bal.usd)}  USDC: ${money(bal.usdc)}\n`
+                + `Month Profit: ${money(r.month_profit)}
+`
                 + `Lifetime Profit: ${money(r.lifetime_profit)}`
             try {
                 await pushSend(push, c.pushover_user_key, r.name, message)
