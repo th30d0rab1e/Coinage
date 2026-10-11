@@ -105,6 +105,8 @@ function renderSection () {
         <select id="pf-coin" style="background:#1a1a1a;color:#ddd;border:1px solid #333;border-radius:6px;padding:6px 10px;min-width:220px;max-width:360px">
             <option value="">Loading coins…</option>
         </select>
+        <button type="button" id="pf-prev" title="Previous coin (←) — newer fills are first" style="background:#333;color:#ddd;border:0;border-radius:6px;padding:6px 10px">← Prev</button>
+        <button type="button" id="pf-next" title="Next coin (→) — older fills next" style="background:#333;color:#ddd;border:0;border-radius:6px;padding:6px 10px">Next →</button>
         <select id="pf-range" style="background:#1a1a1a;color:#ddd;border:1px solid #333;border-radius:6px;padding:6px">${ranges}</select>
         <button id="pf-reset" style="background:#333;color:#ddd;border:0;border-radius:6px;padding:6px 10px">Reset zoom</button>
         <span id="pf-status" class="dim"></span>
@@ -164,11 +166,33 @@ function renderSection () {
             } catch (e) { status.textContent = 'Error: ' + e.message }
         }
 
+        // 2026-10-11: cycle coins in /api/coins order (most recent fill first).
+        function stepCoin (delta) {
+            const opts = Array.from(coinSel.options).filter(o => o.value)
+            if (!opts.length) return
+            let i = opts.findIndex(o => o.value === coinSel.value)
+            if (i < 0) i = 0
+            i = (i + delta + opts.length) % opts.length
+            coinSel.value = opts[i].value
+            load(coinSel.value)
+        }
+
         coinSel.addEventListener('change', () => load(coinSel.value))
         rangeSel.addEventListener('change', () => load(current))
+        document.getElementById('pf-prev').addEventListener('click', () => stepCoin(-1))
+        document.getElementById('pf-next').addEventListener('click', () => stepCoin(1))
         document.getElementById('pf-reset').addEventListener('click', () => chart && chart.resetZoom())
+        // Arrow keys when focus is not in another control that needs them.
+        document.addEventListener('keydown', e => {
+            if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+            const tag = (e.target && e.target.tagName || '').toLowerCase()
+            if (tag === 'input' || tag === 'textarea') return
+            e.preventDefault()
+            stepCoin(e.key === 'ArrowRight' ? 1 : -1)
+        })
 
         // Same /api/coins source as before — stock names plus any product_id that has fills.
+        // listCoins() already ORDER BY MAX(last_fill) DESC, so dropdown + Prev/Next share that order.
         fetch('/api/coins').then(r => r.json()).then(list => {
             coinSel.innerHTML = list.map(c => {
                 const label = c.fill_count ? (c.name + ' (' + c.fill_count + ' fills)') : c.name
