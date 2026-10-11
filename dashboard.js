@@ -48,6 +48,7 @@ const OPEN_BUY_ORDERS_QUERY = `
 const OPEN_POSITIONS_QUERY = `
     SELECT p.name, p.shares,
         p.buy_filled_price, s.price AS current_price, p.sell_price AS sell_target,
+        p.sell_stop_price,
         p.sell_coinbase_order_id IS NOT NULL AND p.sell_coinbase_order_id != '' AS has_live_sell,
         p.error_message,
         (
@@ -154,6 +155,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
             <td>${num(r.buy_filled_price)}</td>
             <td>${num(r.current_price)}</td>
             <td>${num(r.sell_target)}</td>
+            <td>${num(r.sell_stop_price)}</td>
             <td>${r.has_live_sell ? '<span class="pos">live</span>' : '<span class="dim">none</span>'}</td>
             <td>${money(r.target_profit)}</td>
             <td>${money(r.current_profit)}</td>
@@ -224,12 +226,12 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     ${pfChart.renderSection()}
 
     <h2 id="h-positions">Open Positions &amp; Estimated Profit (${openPositions.length})</h2>
-    <table class="coin-filter" data-title="Open Positions" data-total="${openPositions.length}" data-colspan="9">
+    <table class="coin-filter" data-title="Open Positions" data-total="${openPositions.length}" data-colspan="10">
         <tr>
-            <th>Coin</th><th>Shares</th><th>Bought @</th><th>Current</th><th>Limit Price</th>
+            <th>Coin</th><th>Shares</th><th>Bought @</th><th>Current</th><th>Limit Price</th><th>Stop Price</th>
             <th>Sell Order</th><th>Target Profit</th><th>Current Profit</th><th>Error</th>
         </tr>
-        ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="9">No open positions</td></tr>'}
+        ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="10">No open positions</td></tr>'}
     </table>
 
     <h2 id="h-buys">Open Buy Orders (${openBuyOrders.length})</h2>
