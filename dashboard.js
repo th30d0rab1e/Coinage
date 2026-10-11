@@ -49,6 +49,7 @@ const OPEN_POSITIONS_QUERY = `
     SELECT p.name, p.shares,
         p.buy_filled_price, s.price AS current_price, p.sell_price AS sell_target,
         p.sell_stop_price,
+        ROUND(((p.sell_stop_price::numeric - s.price::numeric) / NULLIF(s.price::numeric, 0) * 100)::numeric, 4) AS sell_pct_to_trigger,
         p.sell_coinbase_order_id IS NOT NULL AND p.sell_coinbase_order_id != '' AS has_live_sell,
         p.error_message,
         (
@@ -136,6 +137,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     `).join('')
 
     // 2026-10-11: one "Position" table — held bags + pending buys merged.
+    // Buy % sits with buy cols; Sell % uses same (stop-price)/price shape for held bags.
     const heldRows = openPositions.map(r => `
         <tr data-coin="${esc(r.name)}">
             <td><span class="pos">Held</span></td>
@@ -144,11 +146,12 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
             <td>${num(r.buy_filled_price)}</td>
             <td class="dim">—</td>
             <td class="dim">—</td>
+            <td class="dim">—</td>
             <td>${num(r.current_price)}</td>
             <td>${num(r.sell_target)}</td>
             <td>${num(r.sell_stop_price)}</td>
+            <td>${r.sell_pct_to_trigger == null ? '—' : (r.sell_pct_to_trigger + '%')}</td>
             <td>${r.has_live_sell ? '<span class="pos">live</span>' : '<span class="dim">none</span>'}</td>
-            <td class="dim">—</td>
             <td>${money(r.target_profit)}</td>
             <td>${money(r.current_profit)}</td>
             <td class="dim">${esc(r.error_message)}</td>
@@ -163,11 +166,12 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
             <td class="dim">—</td>
             <td>${num(r.buy_price)}</td>
             <td>${num(r.buy_stop_price)}</td>
+            <td>${r.pct_to_trigger}%</td>
             <td>${num(r.current_price)}</td>
             <td class="dim">—</td>
             <td class="dim">—</td>
             <td class="dim">—</td>
-            <td>${r.pct_to_trigger}%</td>
+            <td class="dim">—</td>
             <td class="dim">—</td>
             <td class="dim">—</td>
             <td class="dim">${esc(r.error_message)}</td>
@@ -240,13 +244,13 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     ${pfChart.renderSection()}
 
     <h2 id="h-positions">Position (${positionTotal})</h2>
-    <table class="coin-filter" data-title="Position" data-total="${positionTotal}" data-colspan="15">
+    <table class="coin-filter" data-title="Position" data-total="${positionTotal}" data-colspan="16">
         <tr>
-            <th>Kind</th><th>Coin</th><th>Shares</th><th>Bought @</th><th>Buy Limit</th><th>Buy Stop</th>
-            <th>Current</th><th>Limit Price</th><th>Stop Price</th><th>Sell Order</th>
-            <th>Buy % to Trigger</th><th>Target Profit</th><th>Current Profit</th><th>Error</th><th>Placed</th>
+            <th>Kind</th><th>Coin</th><th>Shares</th><th>Bought @</th><th>Buy Limit</th><th>Buy Stop</th><th>Buy % to Trigger</th>
+            <th>Current</th><th>Limit Price</th><th>Stop Price</th><th>Sell % to Trigger</th><th>Sell Order</th>
+            <th>Target Profit</th><th>Current Profit</th><th>Error</th><th>Placed</th>
         </tr>
-        ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="15">No open positions or buy orders</td></tr>'}
+        ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="16">No open positions or buy orders</td></tr>'}
     </table>
 
     <h2 id="h-fills">Last 100 Fills</h2>
