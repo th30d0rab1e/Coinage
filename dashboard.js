@@ -53,26 +53,15 @@ const OPEN_POSITIONS_QUERY = `
 `
 
 const RECENT_FILLS_QUERY = `
-    SELECT
-        pa.position_id,
-        COALESCE(cur.name, ins.new_value::jsonb ->> 'name', del.old_value::jsonb ->> 'name') AS name,
-        CASE pa.column_name WHEN 'buy_filled_price' THEN 'BUY' ELSE 'SELL' END AS fill_type,
-        pa.new_value AS price,
-        pa.changed_at
-    FROM position_audit pa
-    LEFT JOIN position cur ON cur.position_id = pa.position_id
-    LEFT JOIN LATERAL (
-        SELECT new_value FROM position_audit ins
-        WHERE ins.position_id = pa.position_id AND ins.operation = 'INSERT'
-        LIMIT 1
-    ) ins ON true
-    LEFT JOIN LATERAL (
-        SELECT old_value FROM position_audit del
-        WHERE del.position_id = pa.position_id AND del.operation = 'DELETE'
-        LIMIT 1
-    ) del ON true
-    WHERE pa.column_name IN ('buy_filled_price', 'sell_filled_price')
-    ORDER BY pa.changed_at DESC
+    -- 2026-10-11: use fills (not position_audit). Audit rows are deleted
+    -- when a position closes, so closed coins like ABT-USD vanished from
+    -- "Last 100 Fills" even though the trades still exist in fills.
+    SELECT product_id AS name,
+           side AS fill_type,
+           price,
+           trade_time AS changed_at
+    FROM fills
+    ORDER BY trade_time DESC
     LIMIT 100
 `
 
