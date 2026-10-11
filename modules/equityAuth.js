@@ -85,40 +85,85 @@ async function equityRequest(method, requestPath, query, data) {
     return response
 }
 
-// Weekend full close, holiday full close, or anything that is not the
-// regular session. Market orders are only valid in EQUITY_TRADING_SESSION_NORMAL.
+// 2026-10-11 (all-session trading): the equity session is OPEN in ANY
+// session Coinbase reports as tradable -- PRE_MARKET, NORMAL, AFTER_HOURS,
+// OVERNIGHT, MULTI_SESSION -- not only NORMAL. The user wants ETF orders
+// going out as often as Coinbase allows.
+//
+// Hours are 100% API-driven. Nothing here hard-codes a clock or a weekday:
+// current_session says which session Coinbase is in right now, and
+// trading_day_info.trading_sessions gives that day's windows
+// (session_start_time / session_end_time, plus support_fractional and
+// limit_only per window). When the US 23/5 schedule goes live (target
+// Dec 6, 2026) the new/longer OVERNIGHT windows simply show up in this
+// same response and the bot trades them with no code change.
+//
+// Why the old Chicago weekday check is gone: Coinbase's OVERNIGHT session
+// for Monday's trade date already starts Sunday ~7 PM CT (00:00Z Monday),
+// which a "Sat/Sun = closed" rule would block. Weekends / holidays are
+// still closed via trade_date_type FULL_CLOSE (holiday_name "WEEKEND") and
+// current_session UNKNOWN.
+//
+// Order rules (Coinbase): only NORMAL takes market / fractional / notional
+// orders. Every other session takes whole-share LIMIT orders only. The
+// window's own limit_only / support_fractional flags are used when present.
 // A closed result must not place an order and must not reserve USD.
-function interpretEquitySession(product) {
+const OPEN_SESSIONS = new Set([
+    'EQUITY_TRADING_SESSION_PRE_MARKET',
+    'EQUITY_TRADING_SESSION_NORMAL',
+    'EQUITY_TRADING_SESSION_AFTER_HOURS',
+    'EQUITY_TRADING_SESSION_OVERNIGHT',
+    'EQUITY_TRADING_SESSION_MULTI_SESSION',
+])
+const NORMAL_SESSION = 'EQUITY_TRADING_SESSION_NORMAL'
+
+function inWindow(w, now) {
+    const start = Date.parse(w?.session_start_time)
+    const end = Date.parse(w?.session_end_time)
+    return Number.isFinite(start) && Number.isFinite(end) && now >= start && now < end
+}
+
+function interpretEquitySession(product, nowMs) {
     const details = product?.equity_product_details || {}
     const day = details.trading_day_info || {}
-    const weekday = new Intl.DateTimeFormat('en-US', {
-        timeZone: 'America/Chicago',
-        weekday: 'short',
-    }).format(new Date())
-    const weekend = weekday === 'Sat' || weekday === 'Sun'
+    const now = Number.isFinite(nowMs) ? nowMs : Date.now()
+    const session = details.current_session || null
     const fullClose = day.trade_date_type === 'TRADE_DATE_TYPE_FULL_CLOSE'
-    const normal = details.current_session === 'EQUITY_TRADING_SESSION_NORMAL'
-    const windows = day.trading_sessions || []
-    const normalWindow = windows.find((w) => w.session_type === 'EQUITY_TRADING_SESSION_NORMAL')
-    let inWindow = true
-    if (normalWindow?.session_start_time && normalWindow?.session_end_time) {
-        const now = Date.now()
-        inWindow = now >= Date.parse(normalWindow.session_start_time)
-            && now < Date.parse(normalWindow.session_end_time)
-    }
     const halted = details.trading_halted === true
-    const open = !weekend && !fullClose && normal && inWindow && !halted
-    let reason = 'open'
-    if (weekend) reason = 'weekend full close'
-    else if (fullClose) reason = `full close${day.holiday_name ? ` (${day.holiday_name})` : ''}`
+    const disabled = product?.trading_disabled === true
+    const knownSession = OPEN_SESSIONS.has(session)
+    const windows = day.trading_sessions || []
+    // The window for the session Coinbase says we are in. MULTI_SESSION (or
+    // any session with no same-named window) falls back to whichever
+    // window contains now. No windows at all (field missing) = trust
+    // current_session alone.
+    const window = windows.find((w) => w.session_type === session && inWindow(w, now))
+        || windows.find((w) => inWindow(w, now))
+        || null
+    const insideWindow = windows.length === 0 ? true : window != null
+    const open = !fullClose && !halted && !disabled && knownSession && insideWindow
+    // Market / fractional only when the live session is NORMAL and the
+    // window (if any) allows it; everything else is whole-share limit only.
+    const isNormal = session === NORMAL_SESSION
+    const limitOnly = !isNormal || window?.limit_only === true
+    const fractional = isNormal && window?.support_fractional !== false
+    let reason = `open (${session}${window ? ` until ${window.session_end_time}` : ''}${limitOnly ? ', whole-share limits only' : ''})`
+    if (fullClose) reason = `full close${day.holiday_name ? ` (${day.holiday_name})` : ''}`
     else if (halted) reason = 'trading halted'
-    else if (!normal) reason = `session ${details.current_session || 'unknown'}`
-    else if (!inWindow) reason = 'outside NORMAL window'
+    else if (disabled) reason = 'trading disabled'
+    else if (!knownSession) reason = `session ${session || 'unknown'}`
+    else if (!insideWindow) reason = `outside ${session} window`
     return {
         open,
         reason,
         tradeDateType: day.trade_date_type || null,
-        currentSession: details.current_session || null,
+        // Passed straight into equity_order_metadata.equity_trading_session.
+        currentSession: open ? session : null,
+        rawSession: session,
+        isNormal: open && isNormal,
+        limitOnly,
+        fractional: open && fractional,
+        sessionEnd: window?.session_end_time || null,
     }
 }
 
@@ -151,6 +196,8 @@ function isClosedMarket(payload) {
 // re-buys and the 2:45 PM market catch-up that also used it are retired.
 // Market buy for exactly quoteUsd. No retail_portfolio_id: the equity key's
 // default portfolio is implicit, and setting it is not part of this order.
+// Market orders are only valid in NORMAL (Coinbase rule), so the session
+// is always NORMAL here; index.js only sends market buys in NORMAL.
 async function createMarketBuy(productId, quoteUsd, clientOrderId) {
     const quote = Number(quoteUsd).toFixed(2)
     const body = {
@@ -163,7 +210,7 @@ async function createMarketBuy(productId, quoteUsd, clientOrderId) {
             },
         },
         equity_order_metadata: {
-            equity_trading_session: 'EQUITY_TRADING_SESSION_NORMAL',
+            equity_trading_session: NORMAL_SESSION,
             displayed_order_config: 'MARKET_GFD',
         },
     }
@@ -214,9 +261,19 @@ async function readFill(orderId) {
 // LIMIT_GFD or LIMIT_GTC. So we place LIMIT_GTC and the bot emulates the
 // expiry: etf_buy.expires_at = placed + config.etf_limit_ttl_hours, and
 // index.js syncEtfLimitOrders cancels the order once that time passes.
-// Fractional base_size is only allowed in EQUITY_TRADING_SESSION_NORMAL,
-// so the order is NORMAL-session (it is not eligible pre/after/overnight).
-async function createLimitBuy(productId, baseSize, limitPrice, clientOrderId) {
+// 2026-10-11: session = the LIVE current_session from equitySession()
+// (PRE_MARKET / NORMAL / AFTER_HOURS / OVERNIGHT / MULTI_SESSION), not a
+// hard-coded NORMAL. Outside NORMAL Coinbase only accepts whole-share
+// base_size, so a fractional size is refused here before it is sent
+// (index.js sizes non-NORMAL limits to whole shares).
+async function createLimitBuy(productId, baseSize, limitPrice, clientOrderId, session) {
+    const tradingSession = OPEN_SESSIONS.has(session) ? session : NORMAL_SESSION
+    if (tradingSession !== NORMAL_SESSION && !Number.isInteger(Number(baseSize))) {
+        return {
+            success: false,
+            error_response: { message: `fractional base_size ${baseSize} not allowed in ${tradingSession} (whole shares only)` },
+        }
+    }
     const body = {
         client_order_id: clientOrderId,
         product_id: productId,
@@ -232,7 +289,7 @@ async function createLimitBuy(productId, baseSize, limitPrice, clientOrderId) {
             },
         },
         equity_order_metadata: {
-            equity_trading_session: 'EQUITY_TRADING_SESSION_NORMAL',
+            equity_trading_session: tradingSession,
             displayed_order_config: 'LIMIT_GTC',
         },
     }
@@ -399,12 +456,18 @@ async function equityProduct(productId) {
         let blocked = null
         if (p.trading_disabled || p.is_disabled || p.cancel_only || p.view_only) blocked = 'product disabled / cancel-only / view-only'
         else if (d.liquidate_only === true) blocked = 'liquidate_only (sell-only)'
-        else if (d.fractionable === false || flags.buy_fractional_shares === false) blocked = 'whole shares only (not fractionable)'
         else if (flags.buy_enabled === false) blocked = 'buy disabled'
         else if (d.trading_halted === true) blocked = 'trading halted'
+        // 2026-10-11: fractional is only needed for NORMAL-session fractional
+        // limits. Outside NORMAL every limit is whole shares, so index.js
+        // ignores this block there (wholeBlocked = can't even buy whole).
+        const fractionalBlocked = (d.fractionable === false || flags.buy_fractional_shares === false)
+            ? 'whole shares only (not fractionable)' : null
+        const wholeBlocked = blocked || (flags.buy_whole_shares === false ? 'whole-share buys disabled' : null)
         return {
             ok: true,
-            blocked,
+            blocked: blocked || fractionalBlocked,
+            wholeBlocked,
             baseIncrement: p.base_increment || '0.00001',
             priceIncrement: p.price_increment || p.quote_increment || '0.01',
             quoteMinSize: Number(p.quote_min_size) || 0,
@@ -439,6 +502,8 @@ module.exports = {
     signRequest: signJwt,
     interpretEquitySession,
     equitySession,
+    OPEN_SESSIONS,
+    NORMAL_SESSION,
     isClosedMarket,
     // Morning $1 market buy (kept 2026-10-06).
     createMarketBuy,

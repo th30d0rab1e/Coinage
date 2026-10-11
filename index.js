@@ -21,13 +21,18 @@ var convertUsdc = require('./modules/convert.js')
 // stamps profit_history.pushover_notified_at, one read-only Coinbase GET
 // for live USD/USDC. Never throws. See modules/sendProfitNotifications.js.
 var profitAlerts = require('./modules/sendProfitNotifications.js')
-// Set each run before thee_procedure. False means the equity NORMAL session
-// is closed: place no new ETF order and reserve no USD (resting limits are
+// Set each run before thee_procedure. False means no Coinbase equity
+// session (pre-market, regular, after-hours, overnight) is open: place no new ETF order and reserve no USD (resting limits are
 // still synced / expired every run). When it is true, etfAttemptsThisRun is
 // this minute's ETF orders (daily market buy and/or ladder limits, see the
 // ETF block below) and config.etf_usd_reserve is their total so
 // thee_procedure cannot spend that Default USD on a new crypto plan.
 let equitySessionOpen = false
+// 2026-10-11 (all-session trading): the full equitySession() result for
+// this run. currentSession is the live Coinbase session (PRE_MARKET /
+// NORMAL / AFTER_HOURS / OVERNIGHT / MULTI_SESSION) that ETF orders are
+// placed in; isNormal decides market vs whole-share-limit-only.
+let equitySessionInfo = null
 let etfAttemptsThisRun = []
 // 2026-10-07: run the minute only when started as `node index.js` (cron).
 // require('./index.js') from a test harness loads the functions without
@@ -422,13 +427,18 @@ function chicagoToday() {
 }
 
 // Read BLOX equity_product_details and store config.equity_session_open.
-// Closed (including weekend full close) stays 'false': no ETF order.
+// 2026-10-11: 'true' in ANY open Coinbase equity session (pre-market,
+// regular, after-hours, overnight), read from the API windows -- no
+// hard-coded hours, so the Dec 6, 2026 23/5 overnight hours appear here
+// automatically. Closed (weekend / holiday full close, halted, the gap
+// between after-hours and overnight) stays 'false': no ETF order.
 // Crypto planning does not read this flag. The reserve is a separate
 // config value written only when the flag is true.
 async function refreshEquitySession() {
     try {
         const session = await equity.equitySession()
         equitySessionOpen = session.open === true
+        equitySessionInfo = equitySessionOpen ? session : null
         const value = equitySessionOpen ? 'true' : 'false'
         await db.query(
             `INSERT INTO config (key, value) VALUES ('equity_session_open', $1)
@@ -438,6 +448,7 @@ async function refreshEquitySession() {
         console.log(`Equity session ${equitySessionOpen ? 'OPEN' : 'closed'}: ${session.reason}`)
     } catch (error) {
         equitySessionOpen = false
+        equitySessionInfo = null
         console.log('refreshEquitySession() ERROR', error?.message || error)
         try {
             await db.query(
@@ -455,7 +466,8 @@ async function refreshEquitySession() {
 //
 //  1. Daily market buy (order_type 'market'): one $1 market buy per enabled
 //     ticker per Chicago day, the first minute the NORMAL session is open
-//     and Default USD covers it. Unconditional (no dip / red P&L check).
+//     and Default USD covers it. NORMAL only: Coinbase allows market
+//     orders in no other session. Unconditional (no dip / red P&L check).
 //  2. Limit ladder (order_type 'limit'): each enabled ticker keeps exactly
 //     ONE resting limit buy for ~$1 (quote_usd). Price = basis *
 //     (1 - etf_limit_step_pct/100), where basis = VWAP of the latest BUY
@@ -913,6 +925,14 @@ async function buildEtfPlan() {
         return { attempts: [], reserve: 0, notes }
     }
     const stepPct = await configNumber('etf_limit_step_pct', 0.10)
+    // 2026-10-11 (all-session trading): which session this plan is for.
+    // NORMAL = daily market buy + fractional ~$1 limit (unchanged).
+    // PRE_MARKET / AFTER_HOURS / OVERNIGHT / MULTI_SESSION = Coinbase takes
+    // whole-share LIMIT orders only, so the daily market buy waits for the
+    // next NORMAL session and the ladder limit is sized to whole shares.
+    const session = equitySessionInfo?.currentSession || 'EQUITY_TRADING_SESSION_NORMAL'
+    const wholeShares = !(equitySessionInfo?.fractional === true)
+    notes.push(`ETF plan session ${session}${wholeShares ? ' (whole-share limits only, no market buy)' : ''}`)
     // Today's market rows: filled = the daily buy is done; an unfilled one
     // that might still fill blocks a second market send.
     const market = await db.query(
@@ -969,8 +989,11 @@ async function buildEtfPlan() {
             notes.push(`ETF skip ${t}: today's market buy might still fill`)
             continue
         }
-        if (!marketDone.has(t)) {
+        if (!marketDone.has(t) && !wholeShares) {
             // The ladder waits for this fill; it steps from it next minute.
+            // NORMAL only (wholeShares false). Outside NORMAL the market buy
+            // is impossible, so fall through and ladder a whole-share limit;
+            // the daily market buy still goes out next NORMAL session.
             chosen.push({ kind: 'market', ticker: t, product_id: row.product_id, usdcProductId: row.usdc_product_id || null, notional: Number(row.quote_usd), reason: `daily $${Number(row.quote_usd).toFixed(2)} market buy (first of the Chicago day)` })
             continue
         }
@@ -995,8 +1018,11 @@ async function buildEtfPlan() {
             notes.push(`ETF skip ${t}: product read failed (${product.reason})`)
             continue
         }
-        if (product.blocked) {
-            notes.push(`ETF skip ${t}: ${product.blocked}`)
+        // Whole-share sessions ignore the "not fractionable" block: they
+        // never send a fractional size.
+        const productBlock = wholeShares ? product.wholeBlocked : product.blocked
+        if (productBlock) {
+            notes.push(`ETF skip ${t}: ${productBlock}`)
             continue
         }
         let basis = null
@@ -1010,8 +1036,16 @@ async function buildEtfPlan() {
         const limitPrice = etfPlan.limitPriceFrom(basis.price, stepPct, product.priceIncrement)
         // Notional: quote_usd ($1, or $2 catch-up via vw_etf_buy_usd), raised
         // to Coinbase's minimums if higher.
-        const target = Math.max(Number(row.quote_usd) || 0, product.notionalMin || 0, product.quoteMinSize || 0)
-        const baseSize = limitPrice ? etfPlan.baseSizeFor(target, limitPrice, product.baseIncrement) : null
+        // Outside NORMAL: whole shares only (Coinbase rule) -> at least 1
+        // share, rounded UP so it covers the target. On a ~$14 ETF that is
+        // one share (~$14), not $1; the funding walk below skips it if the
+        // USD/USDC pot cannot cover it.
+        const target = wholeShares
+            ? Math.max(Number(row.quote_usd) || 0, product.quoteMinSize || 0)
+            : Math.max(Number(row.quote_usd) || 0, product.notionalMin || 0, product.quoteMinSize || 0)
+        const baseSize = !limitPrice ? null
+            : wholeShares ? etfPlan.wholeSharesFor(target, limitPrice)
+            : etfPlan.baseSizeFor(target, limitPrice, product.baseIncrement)
         if (!limitPrice || !baseSize) {
             notes.push(`ETF skip ${t}: could not size a limit (basis ${basis.price})`)
             continue
@@ -1026,7 +1060,9 @@ async function buildEtfPlan() {
             notional: Number(baseSize) * Number(limitPrice),
             basisPrice: basis.price,
             priceBasis: basis.source,
-            reason: `limit ${stepPct}% under ${basis.source} ${Number(basis.price).toFixed(4)}`,
+            // Live Coinbase session the order is placed in.
+            session,
+            reason: `limit ${stepPct}% under ${basis.source} ${Number(basis.price).toFixed(4)}${wholeShares ? ` [${session.replace('EQUITY_TRADING_SESSION_', '')} whole shares]` : ''}`,
         })
     }
     // 2026-10-07: profit queued for the USDC sweep is not spendable on ETFs.
@@ -1054,6 +1090,7 @@ async function buildEtfPlan() {
 // Mark the equity session closed after a closed-market reject.
 async function markEquitySessionClosed() {
     equitySessionOpen = false
+    equitySessionInfo = null
     await db.query(`UPDATE config SET value = 'false' WHERE key = 'equity_session_open'`)
 }
 
@@ -1095,7 +1132,10 @@ async function placeEtfLimit(row, today, ttlHours) {
     const id = inserted.rows[0].etf_buy_id
     const expiresAt = inserted.rows[0].expires_at
     // 2026-10-07: USDC product id when funded with USDC, else the USD one.
-    const response = await equity.createLimitBuy(etfOrderProductId(row), row.baseSize, row.limitPrice, clientOrderId)
+    // 2026-10-11: placed in the live session the plan was built for
+    // (row.session), not a hard-coded NORMAL.
+    const session = row.session || equitySessionInfo?.currentSession || 'EQUITY_TRADING_SESSION_NORMAL'
+    const response = await equity.createLimitBuy(etfOrderProductId(row), row.baseSize, row.limitPrice, clientOrderId, session)
     if (response?.success === true) {
         const orderId = response.success_response?.order_id
         await db.query(
@@ -1103,7 +1143,7 @@ async function placeEtfLimit(row, today, ttlHours) {
             [id, orderId]
         )
         const expCt = new Date(expiresAt).toLocaleString('en-US', { timeZone: 'America/Chicago' })
-        console.log(`ETF limit placed: ${row.ticker} ${row.baseSize} @ ${row.limitPrice} (~${Number(row.notional).toFixed(2)} ${row.quoteCurrency || 'USD'}; ${row.reason}) expires ${expCt} CT, order ${orderId}`)
+        console.log(`ETF limit placed: ${row.ticker} ${row.baseSize} @ ${row.limitPrice} (~${Number(row.notional).toFixed(2)} ${row.quoteCurrency || 'USD'}; ${row.reason}; ${session}) expires ${expCt} CT, order ${orderId}`)
         return { placed: true }
     }
     const closed = equity.isClosedMarket(response)
@@ -1236,6 +1276,12 @@ async function processEquityEtfBuys() {
             }
             if (row.quoteCurrency !== 'USDC' && !(cash >= cost)) {
                 console.log(`ETF ${row.kind} skipped: ${row.ticker} needs $${cost.toFixed(2)}, have $${cash.toFixed(2)}`)
+                continue
+            }
+            // Market orders are NORMAL-only (Coinbase). The plan never
+            // builds one outside NORMAL; this guards a session change.
+            if (row.kind === 'market' && !equitySessionInfo?.isNormal) {
+                console.log(`ETF market skipped: ${row.ticker} session is ${equitySessionInfo?.currentSession || 'closed'} (market is NORMAL only)`)
                 continue
             }
             const result = row.kind === 'market'

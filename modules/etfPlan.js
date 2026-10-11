@@ -59,6 +59,18 @@ function baseSizeFor(notional, limitPrice, baseIncrement) {
     return Number(size) > 0 ? size : null
 }
 
+// 2026-10-11: whole-share size for PRE_MARKET / AFTER_HOURS / OVERNIGHT /
+// MULTI_SESSION limits (Coinbase rejects fractional outside NORMAL).
+// notional / limit rounded UP, minimum 1 share. Returned as an integer
+// string ("1", "2").
+function wholeSharesFor(notional, limitPrice) {
+    const n = Number(notional)
+    const p = Number(limitPrice)
+    if (!(p > 0)) return null
+    const shares = Math.max(1, Math.ceil((n > 0 ? n : 0) / p - 1e-9))
+    return Number.isFinite(shares) ? String(shares) : null
+}
+
 // Walk the planned placements in plan order (random since 2026-10-09,
 // see index.js buildEtfPlan) and keep only the ones
 // Default USD can cover. Skipped tickers are not reserved, so crypto is
@@ -144,6 +156,7 @@ module.exports = {
     snap,
     limitPriceFrom,
     baseSizeFor,
+    wholeSharesFor,
     fundAttempts,
     fundAttemptsByCurrency,
 }
