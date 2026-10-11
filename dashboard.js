@@ -5,6 +5,20 @@ const pfChart = require('./modules/dashboardChart.js')
 
 const PORT = 3000
 
+// 2026-10-11: live cash above the chart (vw_balance totals = available + hold).
+// profit_history.usd_balance/usdc_balance are snapshots at close only — not for this.
+const BALANCE_QUERY = `
+    SELECT
+        MAX(balance::numeric) FILTER (WHERE name = 'USD')  AS usd,
+        MAX(available::numeric) FILTER (WHERE name = 'USD') AS usd_available,
+        MAX(hold::numeric) FILTER (WHERE name = 'USD') AS usd_hold,
+        MAX(balance::numeric) FILTER (WHERE name = 'USDC') AS usdc,
+        MAX(available::numeric) FILTER (WHERE name = 'USDC') AS usdc_available,
+        MAX(hold::numeric) FILTER (WHERE name = 'USDC') AS usdc_hold
+    FROM vw_balance
+    WHERE name IN ('USD', 'USDC')
+`
+
 const PROFIT_SUMMARY_QUERY = `SELECT * FROM vw_profit_summary`
 
 const PROFIT_HISTORY_24H_QUERY = `
@@ -89,7 +103,7 @@ function esc (value) {
     return String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 }
 
-function renderPage (profitSummary, profitHistory24h, openBuyOrders, openPositions, recentFills) {
+function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, openPositions, recentFills) {
     const summaryRows = profitSummary.map(r => `
         <tr>
             <td>${esc(r.period_type)}</td>
@@ -182,12 +196,30 @@ function renderPage (profitSummary, profitHistory24h, openBuyOrders, openPositio
     .empty { color: #666; padding: 12px 0; }
     tr.coin-filter-empty td { color: #666; }
     .coin-filter-note { font-size: 12px; color: #888; margin: -24px 0 8px; }
+    .cash-bar { display:flex; gap:24px; flex-wrap:wrap; align-items:baseline; margin: 12px 0 8px;
+                padding: 12px 16px; background:#151515; border:1px solid #2a2a2a; border-radius:8px; }
+    .cash-bar .amt { font-size: 22px; font-weight: 600; color: #f5f5f5; }
+    .cash-bar .lbl { font-size: 13px; color: #999; text-transform: uppercase; letter-spacing: 0.06em; margin-right: 8px; }
+    .cash-bar .split { font-size: 12px; color: #777; margin-left: 8px; }
 </style>
 </head>
 <body>
     <h1>Coinbase Bot Dashboard</h1>
     <div class="meta">Generated ${new Date().toLocaleString()}</div>
     <a class="refresh" href="/">Refresh</a>
+
+    <div class="cash-bar">
+        <div>
+            <span class="lbl">USD</span>
+            <span class="amt">${money(balances && balances.usd)}</span>
+            <span class="split">avail ${money(balances && balances.usd_available)} · hold ${money(balances && balances.usd_hold)}</span>
+        </div>
+        <div>
+            <span class="lbl">USDC</span>
+            <span class="amt">${money(balances && balances.usdc)}</span>
+            <span class="split">avail ${money(balances && balances.usdc_available)} · hold ${money(balances && balances.usdc_hold)}</span>
+        </div>
+    </div>
 
     ${pfChart.renderSection()}
 
@@ -317,16 +349,18 @@ const server = http.createServer(async (req, res) => {
             return res.end(JSON.stringify(await pfChart.chartData(coin, url.searchParams.get('range') || '7d')))
         }
         if (url.pathname !== '/') { res.writeHead(404); return res.end('not found') }
-        const [profitSummary, profitHistory24h, openBuyOrders, openPositions, recentFills] = await Promise.all([
+        const [balanceRows, profitSummary, profitHistory24h, openBuyOrders, openPositions, recentFills] = await Promise.all([
+            db.executeQuery(BALANCE_QUERY),
             db.executeQuery(PROFIT_SUMMARY_QUERY),
             db.executeQuery(PROFIT_HISTORY_24H_QUERY),
             db.executeQuery(OPEN_BUY_ORDERS_QUERY),
             db.executeQuery(OPEN_POSITIONS_QUERY),
             db.executeQuery(RECENT_FILLS_QUERY),
         ])
+        const balances = balanceRows[0] || {}
         // 2026-10-11: no-store so a hard-refresh isn't required to see chart updates
         res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' })
-        res.end(renderPage(profitSummary, profitHistory24h, openBuyOrders, openPositions, recentFills))
+        res.end(renderPage(balances, profitSummary, profitHistory24h, openBuyOrders, openPositions, recentFills))
     } catch (error) {
         console.log('dashboard request error', error)
         res.writeHead(500, { 'Content-Type': 'text/plain' })
