@@ -76,13 +76,24 @@ function num(n, digits = 6) {
 // Coinbase at send time. Falls back to this minute's bulk_currency snapshot
 // (also from gatherBalance, taken at the start of the run) if the GET fails.
 async function liveCashBalances(db, ca) {
-    const out = { usd: null, usdc: null, source: 'coinbase' }
+    // Totals plus USD available / hold split (Theodore asked for both on alerts).
+    const out = {
+        usd: null, usdc: null,
+        usd_available: null, usd_hold: null,
+        source: 'coinbase'
+    }
     try {
         const accounts = await ca.gatherBalance()
         if (Array.isArray(accounts)) {
             for (const a of accounts) {
-                const total = parseFloat(a?.available_balance?.value ?? 0) + parseFloat(a?.hold?.value ?? 0)
-                if (a.currency === 'USD') out.usd = (out.usd ?? 0) + total
+                const avail = parseFloat(a?.available_balance?.value ?? 0)
+                const hold = parseFloat(a?.hold?.value ?? 0)
+                const total = avail + hold
+                if (a.currency === 'USD') {
+                    out.usd = (out.usd ?? 0) + total
+                    out.usd_available = (out.usd_available ?? 0) + avail
+                    out.usd_hold = (out.usd_hold ?? 0) + hold
+                }
                 if (a.currency === 'USDC') out.usdc = (out.usdc ?? 0) + total
             }
         }
@@ -95,6 +106,7 @@ async function liveCashBalances(db, ca) {
               FROM bulk_currency`)
         out.usd = out.usd ?? rows?.[0]?.usd ?? null
         out.usdc = out.usdc ?? rows?.[0]?.usdc ?? null
+        // Snapshot has no available/hold split — leave those null if missing.
     }
     return out
 }
@@ -183,7 +195,7 @@ async function run(db, ca) {
                 + `Sold: ${fmtTime(r.sold_at)}\n`
                 + `Buy Total: ${money(r.buy_total)}  Buy Fee: ${money(r.buy_fee)}\n`
                 + `Sell Total: ${money(r.sell_total)}  Sell Fee: ${money(r.sell_fee)}\n`
-                + `USD: ${money(bal.usd)}  USDC: ${money(bal.usdc)}\n`
+                + `USD: ${money(bal.usd)} (avail ${money(bal.usd_available)} / hold ${money(bal.usd_hold)})  USDC: ${money(bal.usdc)}\n`
                 + `Month Profit: ${money(r.month_profit)}\n`
                 + `Lifetime Profit: ${money(r.lifetime_profit)}`
             try {
