@@ -17,23 +17,18 @@ const RANGES = {
     'all': [5 * 365 * 86400, 86400],
 }
 
-// Coins the user can search: stock table ONLY (clean COIN-USD symbols).
-// 2026-10-11: never source from fills — that table carried ETF/Kalshi product
-// id hashes and USDC pairs (BTC-USDC). Dropdown is ^[A-Z0-9]+-USD$ only.
+// Coins the user can search: stock table ONLY — no fills join/union/fallback.
+// 2026-10-11: ^[A-Z0-9]+-USD$ only (no USDC). fill_count is always 0 here;
+// labels just show the symbol. All / A-Z / search stay client-side.
 async function listCoins () {
     const { rows } = await db.query(`
-        SELECT s.name,
-               COALESCE(f.fill_count, 0)::int AS fill_count,
-               f.last_fill
-        FROM stock s
-        LEFT JOIN (
-            SELECT product_id, COUNT(*)::int AS fill_count, MAX(trade_time) AS last_fill
-            FROM fills
-            GROUP BY product_id
-        ) f ON f.product_id = s.name
-        WHERE s.name IS NOT NULL
-          AND s.name ~ '^[A-Z0-9]+-USD$'
-        ORDER BY s.name ASC`)
+        SELECT name,
+               0::int AS fill_count,
+               NULL::timestamptz AS last_fill
+        FROM stock
+        WHERE name IS NOT NULL
+          AND name ~ '^[A-Z0-9]+-USD$'
+        ORDER BY name ASC`)
     return rows
 }
 
