@@ -212,12 +212,12 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
         <div>
             <span class="lbl">USD</span>
             <span class="amt">${money(balances && balances.usd)}</span>
-            <span class="split">avail ${money(balances && balances.usd_available)} · hold ${money(balances && balances.usd_hold)}</span>
+            <span class="split">total · ${money(balances && balances.usd_available)} available · ${money(balances && balances.usd_hold)} held</span>
         </div>
         <div>
             <span class="lbl">USDC</span>
             <span class="amt">${money(balances && balances.usdc)}</span>
-            <span class="split">avail ${money(balances && balances.usdc_available)} · hold ${money(balances && balances.usdc_hold)}</span>
+            <span class="split">total · ${money(balances && balances.usdc_available)} available · ${money(balances && balances.usdc_hold)} held</span>
         </div>
     </div>
 
