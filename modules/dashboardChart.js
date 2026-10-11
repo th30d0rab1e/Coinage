@@ -193,6 +193,15 @@ function renderSection () {
             })
         }
 
+        function emitFilter (coin) {
+            // null/'' = All — restore full tables. Auto-follow and manual
+            // picks both go through here so the rest of the page stays in sync.
+            window.dispatchEvent(new CustomEvent('pf-coin-filter', { detail: { coin: coin || null } }))
+            if (typeof window.applyDashboardCoinFilter === 'function') {
+                window.applyDashboardCoinFilter(coin || null)
+            }
+        }
+
         async function load (coin, note) {
             if (!coin || loading) return
             loading = true
@@ -201,6 +210,7 @@ function renderSection () {
                 const opt = Array.from(coinSel.options).find(o => o.value === coin)
                 if (opt) coinSel.value = coin
             }
+            emitFilter(coin)
             status.textContent = (note ? note + ' · ' : '') + 'Loading ' + coin + '…'
             try {
                 const r = await fetch('/api/chart?coin=' + encodeURIComponent(coin) + '&range=' + rangeSel.value)
@@ -210,6 +220,14 @@ function renderSection () {
                 status.textContent = (note ? note + ' · ' : '') + data.prices.length + ' price points · ' + data.buys.length + ' buys · ' + data.sells.length + ' sells · ' + data.source
             } catch (e) { status.textContent = 'Error: ' + e.message }
             finally { loading = false }
+        }
+
+        function showAll (note) {
+            current = null
+            coinSel.value = ''
+            if (chart) { chart.destroy(); chart = null }
+            emitFilter(null)
+            status.textContent = (note ? note + ' · ' : '') + 'All coins — tables unfiltered'
         }
 
         async function pollLatestSell () {
@@ -228,22 +246,28 @@ function renderSection () {
             } catch (e) { /* keep last chart; next poll retries */ }
         }
 
-        // Manual override: picking a coin loads it; leave auto-follow on to jump again on the next sell.
-        coinSel.addEventListener('change', () => load(coinSel.value, 'Manual'))
-        rangeSel.addEventListener('change', () => load(current))
+        // Manual override: All clears filter; a coin loads chart + filters tables.
+        // Auto-follow still jumps on the next sell (and refilters).
+        coinSel.addEventListener('change', () => {
+            if (!coinSel.value) showAll('Manual')
+            else load(coinSel.value, 'Manual')
+        })
+        rangeSel.addEventListener('change', () => { if (current) load(current) })
         autoFollow.addEventListener('change', () => { if (autoFollow.checked) pollLatestSell() })
         document.getElementById('pf-reset').addEventListener('click', () => chart && chart.resetZoom())
 
         fetch('/api/coins').then(r => r.json()).then(list => {
-            coinSel.innerHTML = list.map(c => {
+            // 2026-10-11: leading All clears chart filter / restores full tables.
+            coinSel.innerHTML = '<option value="">All</option>' + (list.map(c => {
                 const label = c.fill_count ? (c.name + ' (' + c.fill_count + ' fills)') : c.name
                 return '<option value="' + c.name + '">' + label + '</option>'
-            }).join('') || '<option value="">No coins</option>'
+            }).join('') || '')
             // Start on the latest sell (not merely latest fill of any side).
             pollLatestSell().then(() => {
                 if (!current && list[0]) load(list[0].name)
+                else if (!current) emitFilter(null)
             })
-        }).catch(e => { coinSel.innerHTML = '<option value="">Failed to load coins</option>'; status.textContent = 'Error: ' + e.message })
+        }).catch(e => { coinSel.innerHTML = '<option value="">All</option>'; status.textContent = 'Error: ' + e.message })
 
         setInterval(pollLatestSell, POLL_MS)
         document.addEventListener('visibilitychange', () => { if (!document.hidden) pollLatestSell() })

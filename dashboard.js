@@ -113,8 +113,10 @@ function renderPage (profitSummary, profitHistory24h, openBuyOrders, openPositio
         </tr>
     `).join('')
 
+    // 2026-10-11: data-coin on each row so the Price & Fills dropdown can
+    // filter these tables client-side (see applyCoinFilter script below).
     const historyRows = profitHistory24h.map(r => `
-        <tr>
+        <tr data-coin="${esc(r.name)}">
             <td>${esc(r.name)}</td>
             <td>${esc(r.period_type)}</td>
             <td>${num(r.buy_price)}</td>
@@ -127,7 +129,7 @@ function renderPage (profitSummary, profitHistory24h, openBuyOrders, openPositio
     `).join('')
 
     const buyOrderRows = openBuyOrders.map(r => `
-        <tr>
+        <tr data-coin="${esc(r.name)}">
             <td>${esc(r.name)}</td>
             <td>${num(r.shares)}</td>
             <td>${num(r.buy_price)}</td>
@@ -140,7 +142,7 @@ function renderPage (profitSummary, profitHistory24h, openBuyOrders, openPositio
     `).join('')
 
     const positionRows = openPositions.map(r => `
-        <tr>
+        <tr data-coin="${esc(r.name)}">
             <td>${esc(r.name)}</td>
             <td>${num(r.shares)}</td>
             <td>${num(r.buy_filled_price)}</td>
@@ -154,7 +156,7 @@ function renderPage (profitSummary, profitHistory24h, openBuyOrders, openPositio
     `).join('')
 
     const fillRows = recentFills.map(r => `
-        <tr>
+        <tr data-coin="${esc(r.name)}">
             <td>${esc(r.name)}</td>
             <td class="${r.fill_type === 'BUY' ? 'buy-tag' : 'sell-tag'}">${r.fill_type}</td>
             <td>${num(r.price)}</td>
@@ -184,6 +186,8 @@ function renderPage (profitSummary, profitHistory24h, openBuyOrders, openPositio
     .buy-tag { color: #4ade80; }
     .sell-tag { color: #f87171; }
     .empty { color: #666; padding: 12px 0; }
+    tr.coin-filter-empty td { color: #666; }
+    .coin-filter-note { font-size: 12px; color: #888; margin: -24px 0 8px; }
 </style>
 </head>
 <body>
@@ -193,31 +197,32 @@ function renderPage (profitSummary, profitHistory24h, openBuyOrders, openPositio
 
     ${pfChart.renderSection()}
 
-    <h2>Open Positions &amp; Estimated Profit (${openPositions.length})</h2>
-    <table>
+    <h2 id="h-positions">Open Positions &amp; Estimated Profit (${openPositions.length})</h2>
+    <table class="coin-filter" data-title="Open Positions" data-total="${openPositions.length}" data-colspan="9">
         <tr>
             <th>Coin</th><th>Shares</th><th>Bought @</th><th>Current</th><th>Sell Target</th>
             <th>Sell Order</th><th>Target Profit</th><th>Current Profit</th><th>Error</th>
         </tr>
-        ${positionRows || '<tr><td class="empty" colspan="9">No open positions</td></tr>'}
+        ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="9">No open positions</td></tr>'}
     </table>
 
-    <h2>Open Buy Orders (${openBuyOrders.length})</h2>
-    <table>
+    <h2 id="h-buys">Open Buy Orders (${openBuyOrders.length})</h2>
+    <table class="coin-filter" data-title="Open Buy Orders" data-total="${openBuyOrders.length}" data-colspan="8">
         <tr>
             <th>Coin</th><th>Shares</th><th>Buy Limit</th><th>Buy Stop</th><th>Current</th>
             <th>% to Trigger</th><th>Error</th><th>Placed</th>
         </tr>
-        ${buyOrderRows || '<tr><td class="empty" colspan="8">No pending buy orders</td></tr>'}
+        ${buyOrderRows || '<tr class="coin-filter-empty"><td class="empty" colspan="8">No pending buy orders</td></tr>'}
     </table>
 
-    <h2>Last 100 Fills</h2>
-    <table>
+    <h2 id="h-fills">Last 100 Fills</h2>
+    <table class="coin-filter" data-title="Last 100 Fills" data-total="${recentFills.length}" data-colspan="4">
         <tr><th>Coin</th><th>Type</th><th>Price</th><th>When</th></tr>
-        ${fillRows || '<tr><td class="empty" colspan="4">No fills recorded</td></tr>'}
+        ${fillRows || '<tr class="coin-filter-empty"><td class="empty" colspan="4">No fills recorded</td></tr>'}
     </table>
 
     <h2>Profit Summary</h2>
+    <p class="coin-filter-note">Portfolio-wide by period type — not filtered by the chart coin (no per-coin summary query yet).</p>
     <table>
         <tr>
             <th>Period</th><th>Total Trades</th><th>All-Time Profit</th><th>All-Time Avg</th>
@@ -227,14 +232,72 @@ function renderPage (profitSummary, profitHistory24h, openBuyOrders, openPositio
         ${summaryRows || '<tr><td class="empty" colspan="10">No data</td></tr>'}
     </table>
 
-    <h2>Profit History — Last 24 Hours (${profitHistory24h.length})</h2>
-    <table>
+    <h2 id="h-history">Profit History — Last 24 Hours (${profitHistory24h.length})</h2>
+    <table class="coin-filter" data-title="Profit History — Last 24 Hours" data-total="${profitHistory24h.length}" data-colspan="8">
         <tr>
             <th>Coin</th><th>Period</th><th>Buy Price</th><th>Sell Price</th>
             <th>Buy Fee</th><th>Sell Fee</th><th>Profit</th><th>When</th>
         </tr>
-        ${historyRows || '<tr><td class="empty" colspan="8">No trades in the last 24 hours</td></tr>'}
+        ${historyRows || '<tr class="coin-filter-empty"><td class="empty" colspan="8">No trades in the last 24 hours</td></tr>'}
     </table>
+    <script>
+    // 2026-10-11: filter coin-tagged tables from the Price & Fills dropdown
+    // (CustomEvent pf-coin-filter from modules/dashboardChart.js).
+    (function () {
+        const headingFor = {
+            'Open Positions': 'h-positions',
+            'Open Buy Orders': 'h-buys',
+            'Last 100 Fills': 'h-fills',
+            'Profit History — Last 24 Hours': 'h-history',
+        }
+        function applyCoinFilter (coin) {
+            document.querySelectorAll('table.coin-filter').forEach(table => {
+                const total = Number(table.dataset.total || 0)
+                const title = table.dataset.title || ''
+                const colspan = table.dataset.colspan || '4'
+                let shown = 0
+                table.querySelectorAll('tr[data-coin]').forEach(tr => {
+                    const match = !coin || tr.getAttribute('data-coin') === coin
+                    tr.style.display = match ? '' : 'none'
+                    if (match) shown++
+                })
+                let empty = table.querySelector('tr.coin-filter-empty')
+                if (!empty) {
+                    empty = document.createElement('tr')
+                    empty.className = 'coin-filter-empty'
+                    empty.innerHTML = '<td class="empty" colspan="' + colspan + '"></td>'
+                    table.appendChild(empty)
+                }
+                const cell = empty.querySelector('td')
+                if (coin && shown === 0) {
+                    empty.style.display = ''
+                    cell.textContent = 'No rows for ' + coin
+                } else if (!coin && total === 0) {
+                    empty.style.display = ''
+                    // keep server-rendered empty copy if present
+                    if (!cell.textContent) cell.textContent = 'No data'
+                } else if (shown > 0) {
+                    empty.style.display = 'none'
+                }
+                const hid = headingFor[title]
+                const h = hid && document.getElementById(hid)
+                if (h) {
+                    if (title === 'Last 100 Fills') {
+                        h.textContent = coin
+                            ? ('Last 100 Fills (' + shown + ' of ' + total + ' · ' + coin + ')')
+                            : ('Last 100 Fills')
+                    } else {
+                        h.textContent = coin
+                            ? (title + ' (' + shown + ' of ' + total + ' · ' + coin + ')')
+                            : (title + ' (' + total + ')')
+                    }
+                }
+            })
+        }
+        window.applyDashboardCoinFilter = applyCoinFilter
+        window.addEventListener('pf-coin-filter', e => applyCoinFilter(e.detail && e.detail.coin))
+    })()
+    </script>
 </body>
 </html>`
 }
