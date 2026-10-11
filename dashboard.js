@@ -163,69 +163,77 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     // bought  = filled bag, no live Coinbase sell order
     // selling = filled bag with live sell_coinbase_order_id
     // sold    = position row with sell_filled_price set (fills not used)
-    const buyingRows = openBuyOrders.map(r => `
+    const buyingRows = openBuyOrders.map(r => {
+        const buyCost = (parseFloat(r.buy_price) || 0) * (parseFloat(r.shares) || 0)
+        return `
         <tr data-coin="${esc(r.name)}">
-            <td><span class="kind-buying">buying</span></td>
-            <td>${esc(r.name)}</td>
-            <td>${num(r.shares)}</td>
-            <td class="dim">—</td>
-            <td>${num(r.buy_price)}</td>
-            <td>${num(r.buy_stop_price)}</td>
-            <td>${r.pct_to_trigger}%</td>
+            <td class="buy-l"><span class="kind-buying">buying</span></td>
+            <td class="buy-m">${esc(r.name)}</td>
+            <td class="buy-m">${num(r.shares)}</td>
+            <td class="buy-m dim">—</td>
+            <td class="buy-m">${money(buyCost)}</td>
+            <td class="buy-m">${num(r.buy_price)}</td>
+            <td class="buy-m">${num(r.buy_stop_price)}</td>
+            <td class="buy-r">${r.pct_to_trigger}%</td>
             <td>${num(r.current_price)}</td>
-            <td class="dim">—</td>
-            <td class="dim">—</td>
-            <td class="dim">—</td>
-            <td class="dim">—</td>
-            <td class="dim">—</td>
-            <td class="dim">—</td>
+            <td class="sell-l dim">—</td>
+            <td class="sell-m dim">—</td>
+            <td class="sell-m dim">—</td>
+            <td class="sell-m dim">—</td>
+            <td class="sell-m dim">—</td>
+            <td class="sell-r dim">—</td>
             <td class="dim">${esc(r.error_message)}</td>
             <td class="dim">${new Date(r.date_created).toLocaleString()}</td>
-        </tr>
-    `).join('')
+        </tr>`
+    }).join('')
     const openBagRows = openPositions.map(r => {
         const kind = r.has_live_sell ? 'selling' : 'bought'
         const kindClass = r.has_live_sell ? 'kind-selling' : 'kind-bought'
+        const buyCost = (parseFloat(r.buy_filled_price) || 0) * (parseFloat(r.shares) || 0)
         return `
         <tr data-coin="${esc(r.name)}">
-            <td><span class="${kindClass}">${kind}</span></td>
-            <td>${esc(r.name)}</td>
-            <td>${num(r.shares)}</td>
-            <td>${num(r.buy_filled_price)}</td>
-            <td class="dim">—</td>
-            <td class="dim">—</td>
-            <td class="dim">—</td>
+            <td class="buy-l"><span class="${kindClass}">${kind}</span></td>
+            <td class="buy-m">${esc(r.name)}</td>
+            <td class="buy-m">${num(r.shares)}</td>
+            <td class="buy-m">${num(r.buy_filled_price)}</td>
+            <td class="buy-m">${money(buyCost)}</td>
+            <td class="buy-m dim">—</td>
+            <td class="buy-m dim">—</td>
+            <td class="buy-r dim">—</td>
             <td>${num(r.current_price)}</td>
-            <td>${num(r.sell_target)}</td>
-            <td>${num(r.sell_stop_price)}</td>
-            <td>${r.sell_pct_to_trigger == null ? '—' : (r.sell_pct_to_trigger + '%')}</td>
-            <td>${r.has_live_sell ? '<span class="pos">live</span>' : '<span class="dim">none</span>'}</td>
-            <td>${money(r.current_profit)}</td>
-            <td>${money(r.target_profit)}</td>
+            <td class="sell-l">${num(r.sell_target)}</td>
+            <td class="sell-m">${num(r.sell_stop_price)}</td>
+            <td class="sell-m">${r.sell_pct_to_trigger == null ? '—' : (r.sell_pct_to_trigger + '%')}</td>
+            <td class="sell-m">${r.has_live_sell ? '<span class="pos">live</span>' : '<span class="dim">none</span>'}</td>
+            <td class="sell-m">${money(r.current_profit)}</td>
+            <td class="sell-r">${money(r.target_profit)}</td>
             <td class="dim">${esc(r.error_message)}</td>
             <td class="dim">—</td>
         </tr>`
     }).join('')
-    const soldRows = soldPositions.map(r => `
+    const soldRows = soldPositions.map(r => {
+        const buyCost = (parseFloat(r.buy_filled_price) || 0) * (parseFloat(r.shares) || 0)
+        return `
         <tr data-coin="${esc(r.name)}">
-            <td><span class="kind-sold">sold</span></td>
-            <td>${esc(r.name)}</td>
-            <td>${num(r.shares)}</td>
-            <td>${num(r.buy_filled_price)}</td>
+            <td class="buy-l"><span class="kind-sold">sold</span></td>
+            <td class="buy-m">${esc(r.name)}</td>
+            <td class="buy-m">${num(r.shares)}</td>
+            <td class="buy-m">${num(r.buy_filled_price)}</td>
+            <td class="buy-m">${money(buyCost)}</td>
+            <td class="buy-m dim">—</td>
+            <td class="buy-m dim">—</td>
+            <td class="buy-r dim">—</td>
             <td class="dim">—</td>
-            <td class="dim">—</td>
-            <td class="dim">—</td>
-            <td class="dim">—</td>
-            <td>${num(r.sell_fill_price)}</td>
-            <td class="dim">—</td>
-            <td class="dim">—</td>
-            <td class="dim">filled</td>
-            <td>${money(r.realized_profit)}</td>
-            <td class="dim">—</td>
+            <td class="sell-l">${num(r.sell_fill_price)}</td>
+            <td class="sell-m dim">—</td>
+            <td class="sell-m dim">—</td>
+            <td class="sell-m dim">filled</td>
+            <td class="sell-m">${money(r.realized_profit)}</td>
+            <td class="sell-r dim">—</td>
             <td class="dim">—</td>
             <td class="dim">${new Date(r.closed_at).toLocaleString()}</td>
-        </tr>
-    `).join('')
+        </tr>`
+    }).join('')
     // Order: buying → bought → selling → sold (openBags already sorted live-first)
     const boughtRows = openBagRows // includes bought+selling in DB order (selling first)
     const positionRows = buyingRows + boughtRows + soldRows
@@ -267,6 +275,20 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     .kind-bought { color: #4ade80; }
     .kind-selling { color: #fbbf24; }
     .kind-sold { color: #a78bfa; }
+    /* Square outlines (border-radius: 0) around buy / sell column blocks */
+    table.coin-filter { border-collapse: separate; border-spacing: 0; }
+    th.buy-l, td.buy-l { border-left: 2px solid #22c55e !important; }
+    th.buy-r, td.buy-r { border-right: 2px solid #22c55e !important; }
+    th.buy-l, th.buy-m, th.buy-r { border-top: 2px solid #22c55e !important; border-radius: 0; }
+    tr:last-child td.buy-l, tr:last-child td.buy-m, tr:last-child td.buy-r {
+        border-bottom: 2px solid #22c55e !important;
+    }
+    th.sell-l, td.sell-l { border-left: 2px solid #ef4444 !important; }
+    th.sell-r, td.sell-r { border-right: 2px solid #ef4444 !important; }
+    th.sell-l, th.sell-m, th.sell-r { border-top: 2px solid #ef4444 !important; border-radius: 0; }
+    tr:last-child td.sell-l, tr:last-child td.sell-m, tr:last-child td.sell-r {
+        border-bottom: 2px solid #ef4444 !important;
+    }
     .empty { color: #666; padding: 12px 0; }
     tr.coin-filter-empty td { color: #666; }
     .coin-filter-note { font-size: 12px; color: #888; margin: -24px 0 8px; }
@@ -298,14 +320,14 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     ${pfChart.renderSection()}
 
     <h2 id="h-positions">Position (${positionTotal})</h2>
-    <table class="coin-filter" data-title="Position" data-total="${positionTotal}" data-colspan="16">
+    <table class="coin-filter" data-title="Position" data-total="${positionTotal}" data-colspan="17">
         <tr>
-            <th>Kind</th><th>Coin</th><th>Shares</th><th>Bought @</th><th>Buy Limit</th><th>Buy Stop</th><th>Buy % to Trigger</th>
+            <th class="buy-l">Kind</th><th class="buy-m">Coin</th><th class="buy-m">Shares</th><th class="buy-m">Bought @</th><th class="buy-m">Buy Cost</th><th class="buy-m">Buy Limit</th><th class="buy-m">Buy Stop</th><th class="buy-r">Buy % to Trigger</th>
             <th>Current</th>
-            <th>Limit Price</th><th>Stop Price</th><th>Sell % to Trigger</th><th>Sell Order</th><th>Current Profit</th><th>Target Profit</th>
+            <th class="sell-l">Limit Price</th><th class="sell-m">Stop Price</th><th class="sell-m">Sell % to Trigger</th><th class="sell-m">Sell Order</th><th class="sell-m">Current Profit</th><th class="sell-r">Target Profit</th>
             <th>Error</th><th>Placed</th>
         </tr>
-        ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="16">No buying / bought / selling / sold rows</td></tr>'}
+        ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="17">No buying / bought / selling / sold rows</td></tr>'}
     </table>
 
     <h2 id="h-fills">Last 100 Fills</h2>
