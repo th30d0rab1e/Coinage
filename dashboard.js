@@ -226,7 +226,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     <h2 id="h-positions">Open Positions &amp; Estimated Profit (${openPositions.length})</h2>
     <table class="coin-filter" data-title="Open Positions" data-total="${openPositions.length}" data-colspan="9">
         <tr>
-            <th>Coin</th><th>Shares</th><th>Bought @</th><th>Current</th><th>Sell Target</th>
+            <th>Coin</th><th>Shares</th><th>Bought @</th><th>Current</th><th>Limit Price</th>
             <th>Sell Order</th><th>Target Profit</th><th>Current Profit</th><th>Error</th>
         </tr>
         ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="9">No open positions</td></tr>'}
