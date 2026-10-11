@@ -97,12 +97,14 @@ async function chartData (coin, range) {
 
 function renderSection () {
     const ranges = Object.keys(RANGES).map(r => `<option value="${r}"${r === '7d' ? ' selected' : ''}>${r}</option>`).join('')
+    // 2026-10-11: coin picker is a <select> dropdown (same /api/coins list), not a text search box.
     return `
     <h2>Price &amp; Fills Chart</h2>
     <div id="pf-controls" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;font-size:13px">
-        <input id="pf-search" list="pf-coins" placeholder="Search coin (e.g. RLC)" autocomplete="off"
-            style="background:#1a1a1a;color:#ddd;border:1px solid #333;border-radius:6px;padding:6px 10px;width:220px">
-        <datalist id="pf-coins"></datalist>
+        <label for="pf-coin" class="dim">Coin</label>
+        <select id="pf-coin" style="background:#1a1a1a;color:#ddd;border:1px solid #333;border-radius:6px;padding:6px 10px;min-width:220px;max-width:360px">
+            <option value="">Loading coins…</option>
+        </select>
         <select id="pf-range" style="background:#1a1a1a;color:#ddd;border:1px solid #333;border-radius:6px;padding:6px">${ranges}</select>
         <button id="pf-reset" style="background:#333;color:#ddd;border:0;border-radius:6px;padding:6px 10px">Reset zoom</button>
         <span id="pf-status" class="dim"></span>
@@ -115,10 +117,10 @@ function renderSection () {
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
     <script>
     (function () {
-        const search = document.getElementById('pf-search')
+        const coinSel = document.getElementById('pf-coin')
         const rangeSel = document.getElementById('pf-range')
         const status = document.getElementById('pf-status')
-        let coins = [], chart = null, current = null
+        let chart = null, current = null
         const toXY = a => a.map(d => ({ x: d.t, y: d.p, size: d.size, fee: d.fee }))
 
         function draw (data) {
@@ -162,24 +164,19 @@ function renderSection () {
             } catch (e) { status.textContent = 'Error: ' + e.message }
         }
 
-        // Accept exact names, or a bare ticker like "rlc" -> RLC-USD.
-        function resolve (q) {
-            q = q.trim().toUpperCase()
-            if (!q) return null
-            return coins.find(c => c.name === q) || coins.find(c => c.name === q + '-USD') || coins.find(c => c.name.startsWith(q)) || null
-        }
-
-        search.addEventListener('change', () => { const c = resolve(search.value); if (c) { search.value = c.name; load(c.name) } else status.textContent = 'No coin matches "' + search.value + '"' })
-        search.addEventListener('keydown', e => { if (e.key === 'Enter') search.dispatchEvent(new Event('change')) })
+        coinSel.addEventListener('change', () => load(coinSel.value))
         rangeSel.addEventListener('change', () => load(current))
         document.getElementById('pf-reset').addEventListener('click', () => chart && chart.resetZoom())
 
+        // Same /api/coins source as before — stock names plus any product_id that has fills.
         fetch('/api/coins').then(r => r.json()).then(list => {
-            coins = list
-            document.getElementById('pf-coins').innerHTML = list.map(c => '<option value="' + c.name + '">' + (c.fill_count ? c.fill_count + ' fills' : 'no fills') + '</option>').join('')
-            // Default: the coin with the most recent fill.
-            if (list[0]) { search.value = list[0].name; load(list[0].name) }
-        })
+            coinSel.innerHTML = list.map(c => {
+                const label = c.fill_count ? (c.name + ' (' + c.fill_count + ' fills)') : c.name
+                return '<option value="' + c.name + '">' + label + '</option>'
+            }).join('') || '<option value="">No coins</option>'
+            // Default: the coin with the most recent fill (list is ordered that way).
+            if (list[0]) { coinSel.value = list[0].name; load(list[0].name) }
+        }).catch(e => { coinSel.innerHTML = '<option value="">Failed to load coins</option>'; status.textContent = 'Error: ' + e.message })
     })()
     </script>`
 }
