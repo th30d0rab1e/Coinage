@@ -154,8 +154,16 @@ async function run(db, ca) {
             if (i > 0) await sleep(1000)
             // Same layout as CoinbasePro's message (Profit first, one field
             // per line), extended with the fields Theodore asked for.
+            // Profit % = net profit / buy cost (buy total + buy fee).
+            const buyCost = Number(r.buy_total) + Number(r.buy_fee)
+            const profitPct = Number.isFinite(buyCost) && buyCost > 0
+                ? (Number(r.profit) / buyCost) * 100
+                : null
+            const profitPctStr = profitPct == null || !Number.isFinite(profitPct)
+                ? 'n/a'
+                : `${profitPct >= 0 ? '+' : ''}${profitPct.toFixed(2)}%`
             const message =
-                  `Profit: ${money(r.profit)}\n`
+                  `Profit: ${money(r.profit)} (${profitPctStr})\n`
                 + `Coin: ${r.name}\n`
                 + `Shares: ${num(r.shares, 8)}\n`
                 + `Buy Price: ${money(r.buy_price, 6)}\n`
