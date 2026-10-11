@@ -193,6 +193,24 @@ function renderPage (profitSummary, profitHistory24h, openBuyOrders, openPositio
 
     ${pfChart.renderSection()}
 
+    <h2>Open Positions &amp; Estimated Profit (${openPositions.length})</h2>
+    <table>
+        <tr>
+            <th>Coin</th><th>Shares</th><th>Bought @</th><th>Current</th><th>Sell Target</th>
+            <th>Sell Order</th><th>Target Profit</th><th>Current Profit</th><th>Error</th>
+        </tr>
+        ${positionRows || '<tr><td class="empty" colspan="9">No open positions</td></tr>'}
+    </table>
+
+    <h2>Open Buy Orders (${openBuyOrders.length})</h2>
+    <table>
+        <tr>
+            <th>Coin</th><th>Shares</th><th>Buy Limit</th><th>Buy Stop</th><th>Current</th>
+            <th>% to Trigger</th><th>Error</th><th>Placed</th>
+        </tr>
+        ${buyOrderRows || '<tr><td class="empty" colspan="8">No pending buy orders</td></tr>'}
+    </table>
+
     <h2>Profit Summary</h2>
     <table>
         <tr>
@@ -210,24 +228,6 @@ function renderPage (profitSummary, profitHistory24h, openBuyOrders, openPositio
             <th>Buy Fee</th><th>Sell Fee</th><th>Profit</th><th>When</th>
         </tr>
         ${historyRows || '<tr><td class="empty" colspan="8">No trades in the last 24 hours</td></tr>'}
-    </table>
-
-    <h2>Open Buy Orders (${openBuyOrders.length})</h2>
-    <table>
-        <tr>
-            <th>Coin</th><th>Shares</th><th>Buy Limit</th><th>Buy Stop</th><th>Current</th>
-            <th>% to Trigger</th><th>Error</th><th>Placed</th>
-        </tr>
-        ${buyOrderRows || '<tr><td class="empty" colspan="8">No pending buy orders</td></tr>'}
-    </table>
-
-    <h2>Open Positions &amp; Estimated Profit (${openPositions.length})</h2>
-    <table>
-        <tr>
-            <th>Coin</th><th>Shares</th><th>Bought @</th><th>Current</th><th>Sell Target</th>
-            <th>Sell Order</th><th>Target Profit</th><th>Current Profit</th><th>Error</th>
-        </tr>
-        ${positionRows || '<tr><td class="empty" colspan="9">No open positions</td></tr>'}
     </table>
 
     <h2>Last 100 Fills</h2>
