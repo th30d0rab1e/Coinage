@@ -217,4 +217,36 @@ async function run(db, ca) {
     }
 }
 
-module.exports = { run }
+// Pushover config shared by every alert module (profit closes, ETF buys,
+// dividends). Returns { push, userKeys } when the given kill switch is
+// 'true' and the app token + at least one user key are set, else null.
+// Same recipients for every alert: pushover_user_key, pushover_user_key_2,
+// and any comma/space-separated extras in either. Secrets stay in the DB.
+async function loadPushover(db, switchKey) {
+    const cfg = await db.query(`
+        SELECT key, value FROM config
+         WHERE key IN ($1, 'pushover_app_token', 'pushover_user_key', 'pushover_user_key_2')`, [switchKey])
+    const c = Object.fromEntries((cfg?.rows || []).map(r => [r.key, String(r.value ?? '').trim()]))
+    if (c[switchKey] !== 'true') return null
+    if (!c.pushover_app_token) return null
+    const userKeys = [...new Set(
+        `${c.pushover_user_key || ''},${c.pushover_user_key_2 || ''}`
+            .split(/[,\s]+/)
+            .map(s => s.trim())
+            .filter(Boolean)
+    )]
+    if (userKeys.length === 0) return null
+    return { push: new Pushover({ token: c.pushover_app_token }), userKeys }
+}
+
+// Send one message to every recipient. Throws on the first failure so the
+// caller can log a single "not sent (warning)" line.
+async function pushSendAll(pushover, title, message) {
+    for (const userKey of pushover.userKeys) {
+        await pushSend(pushover.push, userKey, title, message)
+    }
+}
+
+// run() is the profit-close alert. The helpers are shared with
+// sendEtfBuyNotifications.js and dividendAlerts.js (2026-10-11).
+module.exports = { run, loadPushover, pushSendAll, liveCashBalances, fmtTime, money, num, sleep }

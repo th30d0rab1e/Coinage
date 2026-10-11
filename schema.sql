@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict g1uDuUPmdZAqNbWINK3NksDfwix8KL8NWVExvltbloVBa3BRoDKyGyi7EVSn11H
+\restrict Y8YQJFfcChyX9t5oBpTK0LfGZB2OCdDCUpjWUrcedpKOfr6lHaoQwmQD4q7FEJZ
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -2617,6 +2617,43 @@ CREATE TABLE public.config (
 
 
 --
+-- Name: dividend_receipt; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.dividend_receipt (
+    dividend_receipt_id bigint NOT NULL,
+    coinbase_txn_id text NOT NULL,
+    currency text NOT NULL,
+    ledger_type text NOT NULL,
+    amount numeric NOT NULL,
+    received_at timestamp with time zone NOT NULL,
+    kind text NOT NULL,
+    ticker text,
+    rate numeric,
+    est_shares numeric,
+    ex_date date,
+    pay_date date,
+    match_note text,
+    pushover_notified_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: dividend_receipt_dividend_receipt_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.dividend_receipt ALTER COLUMN dividend_receipt_id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.dividend_receipt_dividend_receipt_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: etf; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -2698,7 +2735,9 @@ CREATE TABLE public.etf_buy (
     price_basis text,
     closed_at timestamp with time zone,
     quote_currency text,
-    product_id text
+    product_id text,
+    pushover_notified_at timestamp with time zone,
+    equity_session text
 );
 
 
@@ -2798,6 +2837,20 @@ COMMENT ON COLUMN public.etf_buy.quote_currency IS 'Currency that paid for this 
 --
 
 COMMENT ON COLUMN public.etf_buy.product_id IS 'Coinbase product id the order was sent to (the USD or the USDC product of the ticker). NULL on rows before 2026-10-07 (all etf.product_id).';
+
+
+--
+-- Name: COLUMN etf_buy.pushover_notified_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.etf_buy.pushover_notified_at IS 'When the Pushover "ETF Buy" alert for this fill was claimed/sent. NULL = not sent yet (sent once the fill is confirmed).';
+
+
+--
+-- Name: COLUMN etf_buy.equity_session; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.etf_buy.equity_session IS 'Coinbase equity session at placement (EQUITY_TRADING_SESSION_NORMAL / PRE_MARKET / AFTER_HOURS / OVERNIGHT). NULL before 2026-10-11.';
 
 
 --
@@ -4172,6 +4225,22 @@ ALTER TABLE ONLY public.config
 
 
 --
+-- Name: dividend_receipt dividend_receipt_coinbase_txn_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.dividend_receipt
+    ADD CONSTRAINT dividend_receipt_coinbase_txn_id_key UNIQUE (coinbase_txn_id);
+
+
+--
+-- Name: dividend_receipt dividend_receipt_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.dividend_receipt
+    ADD CONSTRAINT dividend_receipt_pkey PRIMARY KEY (dividend_receipt_id);
+
+
+--
 -- Name: etf_buy etf_buy_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4299,6 +4368,13 @@ CREATE INDEX book_snapshot_name_created_idx ON public.book_snapshot USING btree 
 
 
 --
+-- Name: dividend_receipt_pushover_unsent; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX dividend_receipt_pushover_unsent ON public.dividend_receipt USING btree (dividend_receipt_id) WHERE (pushover_notified_at IS NULL);
+
+
+--
 -- Name: etf_buy_filled_day_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -4310,6 +4386,13 @@ CREATE INDEX etf_buy_filled_day_idx ON public.etf_buy USING btree (ticker, chica
 --
 
 CREATE UNIQUE INDEX etf_buy_one_open_limit_idx ON public.etf_buy USING btree (ticker) WHERE ((order_type = 'limit'::text) AND (status = ANY (ARRAY['PLACING'::text, 'OPEN'::text])));
+
+
+--
+-- Name: etf_buy_pushover_unsent; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX etf_buy_pushover_unsent ON public.etf_buy USING btree (etf_buy_id) WHERE (pushover_notified_at IS NULL);
 
 
 --
@@ -4394,5 +4477,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict g1uDuUPmdZAqNbWINK3NksDfwix8KL8NWVExvltbloVBa3BRoDKyGyi7EVSn11H
+\unrestrict Y8YQJFfcChyX9t5oBpTK0LfGZB2OCdDCUpjWUrcedpKOfr6lHaoQwmQD4q7FEJZ
 

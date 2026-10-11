@@ -38,7 +38,12 @@ CREATE TABLE IF NOT EXISTS public.etf_buy (
     -- 2026-10-07: which currency paid (USD / USDC) and which product id the
     -- order went to. See db/migrations/2026-10-07_etf_usdc_product.sql.
     quote_currency    text,
-    product_id        text
+    product_id        text,
+    -- 2026-10-11: Pushover "ETF Buy" alert claimed/sent (NULL = pending) and
+    -- the live equity session the order was placed in. See
+    -- db/migrations/2026-10-11_pushover_etf_buy_dividend_alerts.sql.
+    pushover_notified_at timestamptz,
+    equity_session    text
 );
 
 -- At most one resting (PLACING/OPEN) limit per ticker, even if cron runs overlap.

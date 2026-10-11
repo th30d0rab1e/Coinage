@@ -21,6 +21,15 @@ var convertUsdc = require('./modules/convert.js')
 // stamps profit_history.pushover_notified_at, one read-only Coinbase GET
 // for live USD/USDC. Never throws. See modules/sendProfitNotifications.js.
 var profitAlerts = require('./modules/sendProfitNotifications.js')
+// 2026-10-11: Pushover alert per CONFIRMED ETF buy fill (etf_buy +
+// fills; dedup etf_buy.pushover_notified_at). Never throws.
+// See modules/sendEtfBuyNotifications.js.
+var etfBuyAlerts = require('./modules/sendEtfBuyNotifications.js')
+// 2026-10-11: dividends received (positive equity cash credits in the
+// Coinbase v2 ledger, ticker matched via Alpaca's dividend calendar) ->
+// dividend_receipt + Pushover alert. GET-only, every 5 min, never throws.
+// See modules/dividendAlerts.js.
+var dividendAlerts = require('./modules/dividendAlerts.js')
 // Set each run before thee_procedure. False means no Coinbase equity
 // session (pre-market, regular, after-hours, overnight) is open: place no new ETF order and reserve no USD (resting limits are
 // still synced / expired every run). When it is true, etfAttemptsThisRun is
@@ -187,6 +196,13 @@ async function main () {
         // catches its own errors and never throws. Off unless
         // config.pushover_profit_alerts = 'true' and both keys are set.
         await profitAlerts.run(db, ca);
+        // 2026-10-11: same idea for ETF buys (only once the fill is
+        // confirmed by fills / fill_price) and dividends received. Both run
+        // last, catch their own errors and never throw, so an alert problem
+        // cannot stop trading. Switches: config.pushover_etf_buy_alerts /
+        // config.pushover_dividend_alerts.
+        await etfBuyAlerts.run(db, ca);
+        await dividendAlerts.run(db, ca);
 
 
     } catch (error) {
@@ -491,8 +507,8 @@ async function recordEtfAttempt(row) {
     await db.query(
         `INSERT INTO etf_buy
             (ticker, chicago_date, quote_usd, filled, closed_session, coinbase_order_id, client_order_id, error_message, dip_price, fill_price,
-             order_type, status, quote_currency, product_id)
-         VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10, 'market', $11, $12, $13)`,
+             order_type, status, quote_currency, product_id, equity_session)
+         VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10, 'market', $11, $12, $13, $14)`,
         [
             row.ticker,
             row.chicagoDate,
@@ -512,6 +528,9 @@ async function recordEtfAttempt(row) {
             // (etf.product_id or etf.usdc_product_id).
             row.quoteCurrency || null,
             row.productId || null,
+            // 2026-10-11: session shown on the Pushover ETF buy alert.
+            // Market orders only go out in NORMAL.
+            equitySessionInfo?.currentSession || 'EQUITY_TRADING_SESSION_NORMAL',
         ]
     )
 }
@@ -1106,21 +1125,25 @@ function etfOrderProductId(row) {
 // flip the row to OPEN (or REJECTED). expires_at = NOW() + ttl hours.
 async function placeEtfLimit(row, today, ttlHours) {
     const clientOrderId = crypto.randomUUID()
+    // 2026-10-11: placed in the live session the plan was built for
+    // (row.session), not a hard-coded NORMAL. Also stored on the row
+    // (equity_session) for the Pushover ETF buy alert.
+    const session = row.session || equitySessionInfo?.currentSession || 'EQUITY_TRADING_SESSION_NORMAL'
     let inserted
     try {
         inserted = await db.query(
             `INSERT INTO etf_buy
                 (ticker, chicago_date, quote_usd, filled, closed_session, client_order_id,
                  order_type, status, limit_price, base_size, basis_price, price_basis, expires_at,
-                 quote_currency, product_id)
+                 quote_currency, product_id, equity_session)
              VALUES ($1, $2::date, $3, false, false, $4,
                      'limit', 'PLACING', $5, $6, $7, $8, NOW() + ($9::numeric * INTERVAL '1 hour'),
-                     $10, $11)
+                     $10, $11, $12)
              RETURNING etf_buy_id, expires_at`,
             [row.ticker, today, Number(row.notional).toFixed(4), clientOrderId,
                 row.limitPrice, row.baseSize, row.basisPrice, row.priceBasis, ttlHours,
                 // 2026-10-07: which currency / product this limit uses.
-                row.quoteCurrency || 'USD', etfOrderProductId(row)]
+                row.quoteCurrency || 'USD', etfOrderProductId(row), session]
         )
     } catch (error) {
         if (error?.code === '23505') {
@@ -1132,9 +1155,6 @@ async function placeEtfLimit(row, today, ttlHours) {
     const id = inserted.rows[0].etf_buy_id
     const expiresAt = inserted.rows[0].expires_at
     // 2026-10-07: USDC product id when funded with USDC, else the USD one.
-    // 2026-10-11: placed in the live session the plan was built for
-    // (row.session), not a hard-coded NORMAL.
-    const session = row.session || equitySessionInfo?.currentSession || 'EQUITY_TRADING_SESSION_NORMAL'
     const response = await equity.createLimitBuy(etfOrderProductId(row), row.baseSize, row.limitPrice, clientOrderId, session)
     if (response?.success === true) {
         const orderId = response.success_response?.order_id
