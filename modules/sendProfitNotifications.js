@@ -13,7 +13,8 @@
 //
 // Differences on purpose:
 //   * No hardcoded secrets. The Pushover app token and user key are read
-//     from the config table (pushover_app_token / pushover_user_key), never
+//     from the config table (pushover_app_token / pushover_user_key,
+//     optional pushover_user_key_2 or comma-separated keys), never
 //     from source, so nothing secret is committed to git.
 //   * Each close is sent once: rows are CLAIMED (pushover_notified_at stamped)
 //     in the same statement that selects them, before anything is sent. If
@@ -104,10 +105,20 @@ async function run(db, ca) {
     try {
         const cfg = await db.executeQuery(`
             SELECT key, value FROM config
-             WHERE key IN ('pushover_profit_alerts', 'pushover_app_token', 'pushover_user_key')`)
+             WHERE key IN ('pushover_profit_alerts', 'pushover_app_token',
+                           'pushover_user_key', 'pushover_user_key_2')`)
         const c = Object.fromEntries((cfg || []).map(r => [r.key, String(r.value ?? '').trim()]))
         if (c.pushover_profit_alerts !== 'true') return
-        if (!c.pushover_app_token || !c.pushover_user_key) return // keys not set: skip quietly
+        if (!c.pushover_app_token) return
+        // One or more recipients: primary key, optional key_2, and any
+        // comma/space-separated extras in either field (dad / family).
+        const userKeys = [...new Set(
+            `${c.pushover_user_key || ''},${c.pushover_user_key_2 || ''}`
+                .split(/[,\s]+/)
+                .map(s => s.trim())
+                .filter(Boolean)
+        )]
+        if (userKeys.length === 0) return // keys not set: skip quietly
 
         // Claim up to MAX_PER_RUN un-notified closes (stamp first, send after)
         // and pull the trade details from fills in the same statement.
@@ -176,8 +187,10 @@ async function run(db, ca) {
                 + `Month Profit: ${money(r.month_profit)}\n`
                 + `Lifetime Profit: ${money(r.lifetime_profit)}`
             try {
-                await pushSend(push, c.pushover_user_key, r.name, message)
-                console.log(`Pushover profit alert sent: ${r.name} ${money(r.profit)} (profit_history ${r.profit_history_id})`)
+                for (const userKey of userKeys) {
+                    await pushSend(push, userKey, r.name, message)
+                }
+                console.log(`Pushover profit alert sent: ${r.name} ${money(r.profit)} to ${userKeys.length} recipient(s) (profit_history ${r.profit_history_id})`)
             } catch (err) {
                 // Worded as "alert not sent" + "warning" on purpose: this is
                 // optional and must not trip the health check's ERROR grep.
