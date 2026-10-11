@@ -84,7 +84,7 @@ async function chartData (coin, range) {
             FROM price_history ph JOIN stock s ON s.stock_id = ph.stock_id
             WHERE s.name = $1 AND ph.date_created >= $2
             ORDER BY ph.date_created`, [coin, since])
-        prices = rows.map(r => ({ t: new Date(r.t).getTime(), p: r.p }))
+        prices = rows.map(r => ({ t: new Date(r.t).getTime(), p: Number(r.p) }))
         source = 'price_history (1-min, bot DB)'
     } else {
         try {
@@ -96,7 +96,7 @@ async function chartData (coin, range) {
                 FROM price_aggregate pa JOIN stock s ON s.stock_id = pa.stock_id
                 WHERE s.name = $1 AND pa.period_type = 'day' AND pa.period_date >= $2::date
                 ORDER BY pa.period_date`, [coin, since])
-            prices = rows.map(r => ({ t: new Date(r.t).getTime(), p: r.p }))
+            prices = rows.map(r => ({ t: new Date(r.t).getTime(), p: Number(r.p) }))
             source = `price_aggregate day close (Coinbase candles failed: ${e.message})`
         }
     }
@@ -107,7 +107,7 @@ async function chartData (coin, range) {
         WHERE product_id = $1 AND trade_time >= $2
         ORDER BY trade_time`, [coin, since])
 
-    const mapFill = f => ({ t: new Date(f.t).getTime(), p: f.p, size: f.size, fee: f.fee, order_id: f.order_id })
+    const mapFill = f => ({ t: new Date(f.t).getTime(), p: Number(f.p), size: Number(f.size), fee: Number(f.fee), order_id: f.order_id })
     return {
         coin, range, source,
         prices,
@@ -152,23 +152,34 @@ function renderSection () {
         const status = document.getElementById('pf-status')
         let chart = null, current = null, lastSellKey = null, loading = false
         const POLL_MS = 60000
-        const toXY = a => a.map(d => ({ x: d.t, y: d.p, size: d.size, fee: d.fee }))
+        // Coerce numbers: node/JSON can leave price as string; Chart.js then
+        // mis-scales scatter datasets vs the time/line series (markers pin to
+        // the top/bottom of the plot). Use line+showLine:false so buys/sells
+        // share the same linear Y axis as the price series.
+        const toXY = a => a.map(d => ({
+            x: Number(d.t),
+            y: Number(d.p),
+            size: d.size == null ? null : Number(d.size),
+            fee: d.fee == null ? null : Number(d.fee),
+        })).filter(d => Number.isFinite(d.x) && Number.isFinite(d.y))
 
         function draw (data) {
             const ds = [
-                { label: data.coin + ' price', data: toXY(data.prices), type: 'line', borderColor: '#60a5fa', borderWidth: 1.5, pointRadius: 0, tension: 0, order: 3 },
-                { label: 'Buy fills', data: toXY(data.buys), type: 'scatter', backgroundColor: '#22c55e', borderColor: '#bbf7d0', pointRadius: 6, pointHoverRadius: 9, order: 1 },
-                { label: 'Sell fills', data: toXY(data.sells), type: 'scatter', backgroundColor: '#ef4444', borderColor: '#fecaca', pointRadius: 6, pointHoverRadius: 9, order: 1 },
+                { label: data.coin + ' price', data: toXY(data.prices), type: 'line', yAxisID: 'y', borderColor: '#60a5fa', borderWidth: 1.5, pointRadius: 0, tension: 0, order: 3 },
+                { label: 'Buy fills', data: toXY(data.buys), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#22c55e', borderColor: '#bbf7d0', pointBackgroundColor: '#22c55e', pointBorderColor: '#bbf7d0', pointRadius: 6, pointHoverRadius: 9, order: 1 },
+                { label: 'Sell fills', data: toXY(data.sells), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#ef4444', borderColor: '#fecaca', pointBackgroundColor: '#ef4444', pointBorderColor: '#fecaca', pointRadius: 6, pointHoverRadius: 9, order: 1 },
             ]
             if (chart) chart.destroy()
             chart = new Chart(document.getElementById('pf-chart'), {
+                type: 'line',
                 data: { datasets: ds },
                 options: {
                     responsive: true, maintainAspectRatio: false, animation: false, parsing: false,
                     interaction: { mode: 'nearest', intersect: false },
                     scales: {
                         x: { type: 'time', ticks: { color: '#888' }, grid: { color: '#222' } },
-                        y: { ticks: { color: '#888' }, grid: { color: '#222' } },
+                        // Explicit linear Y shared by price + fill markers (yAxisID: 'y').
+                        y: { type: 'linear', position: 'left', stacked: false, ticks: { color: '#888' }, grid: { color: '#222' } },
                     },
                     plugins: {
                         legend: { labels: { color: '#ccc' } },
