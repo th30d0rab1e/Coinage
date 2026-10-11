@@ -136,8 +136,10 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
         </tr>
     `).join('')
 
-    // 2026-10-11: one "Position" table — held bags + pending buys merged.
-    // Buy % sits with buy cols; Sell % uses same (stop-price)/price shape for held bags.
+    // 2026-10-11: Position columns grouped buy-side then sell-side.
+    // Buy: Kind, Coin, Shares, Bought @, Buy Limit, Buy Stop, Buy %.
+    // Then Current. Sell: Limit, Stop, Sell %, Sell Order, Current Profit,
+    // Target Profit. Then Error / Placed.
     const heldRows = openPositions.map(r => `
         <tr data-coin="${esc(r.name)}">
             <td><span class="pos">Held</span></td>
@@ -152,8 +154,8 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
             <td>${num(r.sell_stop_price)}</td>
             <td>${r.sell_pct_to_trigger == null ? '—' : (r.sell_pct_to_trigger + '%')}</td>
             <td>${r.has_live_sell ? '<span class="pos">live</span>' : '<span class="dim">none</span>'}</td>
-            <td>${money(r.target_profit)}</td>
             <td>${money(r.current_profit)}</td>
+            <td>${money(r.target_profit)}</td>
             <td class="dim">${esc(r.error_message)}</td>
             <td class="dim">—</td>
         </tr>
@@ -247,8 +249,9 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     <table class="coin-filter" data-title="Position" data-total="${positionTotal}" data-colspan="16">
         <tr>
             <th>Kind</th><th>Coin</th><th>Shares</th><th>Bought @</th><th>Buy Limit</th><th>Buy Stop</th><th>Buy % to Trigger</th>
-            <th>Current</th><th>Limit Price</th><th>Stop Price</th><th>Sell % to Trigger</th><th>Sell Order</th>
-            <th>Target Profit</th><th>Current Profit</th><th>Error</th><th>Placed</th>
+            <th>Current</th>
+            <th>Limit Price</th><th>Stop Price</th><th>Sell % to Trigger</th><th>Sell Order</th><th>Current Profit</th><th>Target Profit</th>
+            <th>Error</th><th>Placed</th>
         </tr>
         ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="16">No open positions or buy orders</td></tr>'}
     </table>
