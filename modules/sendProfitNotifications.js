@@ -102,11 +102,14 @@ async function liveCashBalances(db, ca) {
         out.source = 'snapshot'
         const rows = await db.executeQuery(`
             SELECT SUM(CASE WHEN currency = 'USD'  THEN balance END) AS usd,
+                   SUM(CASE WHEN currency = 'USD'  THEN available END) AS usd_available,
+                   SUM(CASE WHEN currency = 'USD'  THEN hold END) AS usd_hold,
                    SUM(CASE WHEN currency = 'USDC' THEN balance END) AS usdc
               FROM bulk_currency`)
         out.usd = out.usd ?? rows?.[0]?.usd ?? null
         out.usdc = out.usdc ?? rows?.[0]?.usdc ?? null
-        // Snapshot has no available/hold split — leave those null if missing.
+        out.usd_available = out.usd_available ?? rows?.[0]?.usd_available ?? null
+        out.usd_hold = out.usd_hold ?? rows?.[0]?.usd_hold ?? null
     }
     return out
 }
