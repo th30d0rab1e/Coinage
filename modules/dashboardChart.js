@@ -33,6 +33,27 @@ async function listCoins () {
     return rows
 }
 
+// 2026-10-11: cheapest poll for the auto-follow chart — newest SELL row only.
+async function latestSell () {
+    const { rows } = await db.query(`
+        SELECT product_id AS coin, trade_time AS t, price AS p, size, fee, order_id, side
+        FROM fills
+        WHERE side = 'SELL'
+        ORDER BY trade_time DESC
+        LIMIT 1`)
+    const r = rows[0]
+    if (!r) return null
+    return {
+        coin: r.coin,
+        t: new Date(r.t).getTime(),
+        p: r.p,
+        size: r.size,
+        fee: r.fee,
+        order_id: r.order_id,
+        side: r.side,
+    }
+}
+
 async function coinbaseCandles (coin, startSec, endSec, gran) {
     const out = []
     // Page backwards in 300-candle windows (Coinbase limit).
@@ -97,7 +118,8 @@ async function chartData (coin, range) {
 
 function renderSection () {
     const ranges = Object.keys(RANGES).map(r => `<option value="${r}"${r === '7d' ? ' selected' : ''}>${r}</option>`).join('')
-    // 2026-10-11: coin picker is a <select> dropdown (same /api/coins list), not a text search box.
+    // 2026-10-11: auto-follow the coin of the latest SELL fill (poll /api/latest-sell).
+    // Dropdown remains a manual override; a newer sell jumps the chart again.
     return `
     <h2>Price &amp; Fills Chart</h2>
     <div id="pf-controls" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;font-size:13px">
@@ -105,14 +127,19 @@ function renderSection () {
         <select id="pf-coin" style="background:#1a1a1a;color:#ddd;border:1px solid #333;border-radius:6px;padding:6px 10px;min-width:220px;max-width:360px">
             <option value="">Loading coins…</option>
         </select>
-        <button type="button" id="pf-prev" title="Previous coin (←) — newer fills are first" style="background:#333;color:#ddd;border:0;border-radius:6px;padding:6px 10px">← Prev</button>
-        <button type="button" id="pf-next" title="Next coin (→) — older fills next" style="background:#333;color:#ddd;border:0;border-radius:6px;padding:6px 10px">Next →</button>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer" title="When on, jump to whichever coin just sold">
+            <input type="checkbox" id="pf-autofollow" checked>
+            <span class="dim">Auto-follow latest sell</span>
+        </label>
         <select id="pf-range" style="background:#1a1a1a;color:#ddd;border:1px solid #333;border-radius:6px;padding:6px">${ranges}</select>
         <button id="pf-reset" style="background:#333;color:#ddd;border:0;border-radius:6px;padding:6px 10px">Reset zoom</button>
         <span id="pf-status" class="dim"></span>
     </div>
     <div style="position:relative;height:420px;background:#151515;border-radius:8px;padding:8px"><canvas id="pf-chart"></canvas></div>
-    <div class="dim" style="font-size:12px;margin-top:4px">Scroll / pinch to zoom, drag to pan, hover a point for details. <span class="buy-tag">● buy fill</span> <span class="sell-tag">● sell fill</span></div>
+    <div class="dim" style="font-size:12px;margin-top:4px">
+        Polls sells every 5s while this tab is open. Leave the browser window open on this machine to keep watching.
+        <span class="buy-tag">● buy fill</span> <span class="sell-tag">● sell fill</span>
+    </div>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
@@ -121,8 +148,10 @@ function renderSection () {
     (function () {
         const coinSel = document.getElementById('pf-coin')
         const rangeSel = document.getElementById('pf-range')
+        const autoFollow = document.getElementById('pf-autofollow')
         const status = document.getElementById('pf-status')
-        let chart = null, current = null
+        let chart = null, current = null, lastSellKey = null, loading = false
+        const POLL_MS = 5000
         const toXY = a => a.map(d => ({ x: d.t, y: d.p, size: d.size, fee: d.fee }))
 
         function draw (data) {
@@ -153,56 +182,62 @@ function renderSection () {
             })
         }
 
-        async function load (coin) {
-            if (!coin) return
+        async function load (coin, note) {
+            if (!coin || loading) return
+            loading = true
             current = coin
-            status.textContent = 'Loading ' + coin + '…'
+            if (coinSel.value !== coin) {
+                const opt = Array.from(coinSel.options).find(o => o.value === coin)
+                if (opt) coinSel.value = coin
+            }
+            status.textContent = (note ? note + ' · ' : '') + 'Loading ' + coin + '…'
             try {
                 const r = await fetch('/api/chart?coin=' + encodeURIComponent(coin) + '&range=' + rangeSel.value)
                 const data = await r.json()
                 if (data.error) throw new Error(data.error)
                 draw(data)
-                status.textContent = data.prices.length + ' price points · ' + data.buys.length + ' buys · ' + data.sells.length + ' sells · ' + data.source
+                status.textContent = (note ? note + ' · ' : '') + data.prices.length + ' price points · ' + data.buys.length + ' buys · ' + data.sells.length + ' sells · ' + data.source
             } catch (e) { status.textContent = 'Error: ' + e.message }
+            finally { loading = false }
         }
 
-        // 2026-10-11: cycle coins in /api/coins order (most recent fill first).
-        function stepCoin (delta) {
-            const opts = Array.from(coinSel.options).filter(o => o.value)
-            if (!opts.length) return
-            let i = opts.findIndex(o => o.value === coinSel.value)
-            if (i < 0) i = 0
-            i = (i + delta + opts.length) % opts.length
-            coinSel.value = opts[i].value
-            load(coinSel.value)
+        async function pollLatestSell () {
+            try {
+                const r = await fetch('/api/latest-sell')
+                const data = await r.json()
+                if (!data || !data.coin) return
+                const key = String(data.order_id || '') + '|' + String(data.t || '')
+                if (key === lastSellKey) return
+                lastSellKey = key
+                if (!autoFollow.checked) {
+                    status.textContent = 'New sell on ' + data.coin + ' (auto-follow off) · ' + (status.textContent || '')
+                    return
+                }
+                await load(data.coin, 'Latest sell ' + data.coin)
+            } catch (e) { /* keep last chart; next poll retries */ }
         }
 
-        coinSel.addEventListener('change', () => load(coinSel.value))
+        // Manual override: picking a coin loads it; leave auto-follow on to jump again on the next sell.
+        coinSel.addEventListener('change', () => load(coinSel.value, 'Manual'))
         rangeSel.addEventListener('change', () => load(current))
-        document.getElementById('pf-prev').addEventListener('click', () => stepCoin(-1))
-        document.getElementById('pf-next').addEventListener('click', () => stepCoin(1))
+        autoFollow.addEventListener('change', () => { if (autoFollow.checked) pollLatestSell() })
         document.getElementById('pf-reset').addEventListener('click', () => chart && chart.resetZoom())
-        // Arrow keys when focus is not in another control that needs them.
-        document.addEventListener('keydown', e => {
-            if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
-            const tag = (e.target && e.target.tagName || '').toLowerCase()
-            if (tag === 'input' || tag === 'textarea') return
-            e.preventDefault()
-            stepCoin(e.key === 'ArrowRight' ? 1 : -1)
-        })
 
-        // Same /api/coins source as before — stock names plus any product_id that has fills.
-        // listCoins() already ORDER BY MAX(last_fill) DESC, so dropdown + Prev/Next share that order.
         fetch('/api/coins').then(r => r.json()).then(list => {
             coinSel.innerHTML = list.map(c => {
                 const label = c.fill_count ? (c.name + ' (' + c.fill_count + ' fills)') : c.name
                 return '<option value="' + c.name + '">' + label + '</option>'
             }).join('') || '<option value="">No coins</option>'
-            // Default: the coin with the most recent fill (list is ordered that way).
-            if (list[0]) { coinSel.value = list[0].name; load(list[0].name) }
+            // Start on the latest sell (not merely latest fill of any side).
+            pollLatestSell().then(() => {
+                if (!current && list[0]) load(list[0].name)
+            })
         }).catch(e => { coinSel.innerHTML = '<option value="">Failed to load coins</option>'; status.textContent = 'Error: ' + e.message })
+
+        setInterval(pollLatestSell, POLL_MS)
+        document.addEventListener('visibilitychange', () => { if (!document.hidden) pollLatestSell() })
     })()
     </script>`
 }
 
-module.exports = { listCoins, chartData, renderSection, RANGES }
+module.exports = { listCoins, latestSell, chartData, renderSection, RANGES }

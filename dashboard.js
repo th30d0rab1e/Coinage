@@ -248,6 +248,11 @@ const server = http.createServer(async (req, res) => {
             res.writeHead(200, { 'Content-Type': 'application/json' })
             return res.end(JSON.stringify(await pfChart.listCoins()))
         }
+        // 2026-10-11: poll target for auto-follow — newest SELL in fills.
+        if (url.pathname === '/api/latest-sell') {
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+            return res.end(JSON.stringify(await pfChart.latestSell()))
+        }
         if (url.pathname === '/api/chart') {
             const coin = (url.searchParams.get('coin') || '').toUpperCase()
             if (!coin) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end('{"error":"coin required"}') }
