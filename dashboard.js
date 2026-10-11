@@ -211,6 +211,12 @@ function renderPage (profitSummary, profitHistory24h, openBuyOrders, openPositio
         ${buyOrderRows || '<tr><td class="empty" colspan="8">No pending buy orders</td></tr>'}
     </table>
 
+    <h2>Last 100 Fills</h2>
+    <table>
+        <tr><th>Coin</th><th>Type</th><th>Price</th><th>When</th></tr>
+        ${fillRows || '<tr><td class="empty" colspan="4">No fills recorded</td></tr>'}
+    </table>
+
     <h2>Profit Summary</h2>
     <table>
         <tr>
@@ -228,12 +234,6 @@ function renderPage (profitSummary, profitHistory24h, openBuyOrders, openPositio
             <th>Buy Fee</th><th>Sell Fee</th><th>Profit</th><th>When</th>
         </tr>
         ${historyRows || '<tr><td class="empty" colspan="8">No trades in the last 24 hours</td></tr>'}
-    </table>
-
-    <h2>Last 100 Fills</h2>
-    <table>
-        <tr><th>Coin</th><th>Type</th><th>Price</th><th>When</th></tr>
-        ${fillRows || '<tr><td class="empty" colspan="4">No fills recorded</td></tr>'}
     </table>
 </body>
 </html>`
