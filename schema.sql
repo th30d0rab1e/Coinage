@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict zqQZTll3q7gMiWJriwfk7VMthgnGcovLW5DYfBcSJurGnnqMaKCfB6AhH3Gsbq4
+\restrict g1uDuUPmdZAqNbWINK3NksDfwix8KL8NWVExvltbloVBa3BRoDKyGyi7EVSn11H
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -3250,6 +3250,7 @@ CREATE TABLE public.profit_history (
     usdc_converted_at timestamp with time zone,
     buy_quote_currency text,
     buy_source text,
+    pushover_notified_at timestamp with time zone,
     CONSTRAINT profit_history_usdc_convert_status_check CHECK (((usdc_convert_status IS NULL) OR (usdc_convert_status = ANY (ARRAY['pending'::text, 'completed'::text, 'failed'::text]))))
 );
 
@@ -4361,6 +4362,13 @@ CREATE UNIQUE INDEX position_one_listing_per_stock ON public."position" USING bt
 
 
 --
+-- Name: profit_history_pushover_unsent; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX profit_history_pushover_unsent ON public.profit_history USING btree (profit_history_id) WHERE (pushover_notified_at IS NULL);
+
+
+--
 -- Name: profit_history_usdc_unswept; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -4386,5 +4394,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict zqQZTll3q7gMiWJriwfk7VMthgnGcovLW5DYfBcSJurGnnqMaKCfB6AhH3Gsbq4
+\unrestrict g1uDuUPmdZAqNbWINK3NksDfwix8KL8NWVExvltbloVBa3BRoDKyGyi7EVSn11H
 

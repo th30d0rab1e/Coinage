@@ -16,6 +16,11 @@ var listingWatch = require('./modules/listingWatch.js')
 // 2026-10-07: USD -> USDC convert helper (quote / commit / status), used only
 // by sweepProfitToUsdc() below to move realized profit into USDC.
 var convertUsdc = require('./modules/convert.js')
+// 2026-10-11: Pushover profit alert per new close (ported from the old
+// CoinbasePro bot's sendNotifications.js). Reads profit_history + fills,
+// stamps profit_history.pushover_notified_at, one read-only Coinbase GET
+// for live USD/USDC. Never throws. See modules/sendProfitNotifications.js.
+var profitAlerts = require('./modules/sendProfitNotifications.js')
 // Set each run before thee_procedure. False means the equity NORMAL session
 // is closed: place no new ETF order and reserve no USD (resting limits are
 // still synced / expired every run). When it is true, etfAttemptsThisRun is
@@ -161,6 +166,13 @@ async function main () {
 
         // Let the USD transfer sync started above finish before this run ends.
         await usdTransfers;
+
+        // 2026-10-11: Pushover alert for each NEW close (profit_history rows
+        // thee_procedure wrote this minute). Runs LAST, after every buy / sell
+        // / remake / ETF step, so it can never delay or block trading; it
+        // catches its own errors and never throws. Off unless
+        // config.pushover_profit_alerts = 'true' and both keys are set.
+        await profitAlerts.run(db, ca);
 
 
     } catch (error) {
