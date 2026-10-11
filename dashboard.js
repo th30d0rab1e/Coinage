@@ -322,7 +322,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     <h2 id="h-positions">Position (${positionTotal})</h2>
     <table class="coin-filter" data-title="Position" data-total="${positionTotal}" data-colspan="17">
         <tr>
-            <th class="buy-l">Kind</th><th class="buy-m">Coin</th><th class="buy-m">Shares</th><th class="buy-m">Bought @</th><th class="buy-m">Buy Cost</th><th class="buy-m">Buy Limit</th><th class="buy-m">Buy Stop</th><th class="buy-r">Buy % to Trigger</th>
+            <th class="buy-l">Kind</th><th class="buy-m">Coin</th><th class="buy-m">Shares</th><th class="buy-m">Bought @</th><th class="buy-m">Value</th><th class="buy-m">Buy Limit</th><th class="buy-m">Buy Stop</th><th class="buy-r">Buy % to Trigger</th>
             <th>Current</th>
             <th class="sell-l">Limit Price</th><th class="sell-m">Stop Price</th><th class="sell-m">Sell % to Trigger</th><th class="sell-m">Sell Order</th><th class="sell-m">Current Profit</th><th class="sell-r">Target Profit</th>
             <th>Error</th><th>Placed</th>
