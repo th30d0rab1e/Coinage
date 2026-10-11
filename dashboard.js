@@ -135,33 +135,47 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
         </tr>
     `).join('')
 
-    const buyOrderRows = openBuyOrders.map(r => `
+    // 2026-10-11: one "Position" table — held bags + pending buys merged.
+    const heldRows = openPositions.map(r => `
         <tr data-coin="${esc(r.name)}">
-            <td>${esc(r.name)}</td>
-            <td>${num(r.shares)}</td>
-            <td>${num(r.buy_price)}</td>
-            <td>${num(r.buy_stop_price)}</td>
-            <td>${num(r.current_price)}</td>
-            <td>${r.pct_to_trigger}%</td>
-            <td class="dim">${esc(r.error_message)}</td>
-            <td class="dim">${new Date(r.date_created).toLocaleString()}</td>
-        </tr>
-    `).join('')
-
-    const positionRows = openPositions.map(r => `
-        <tr data-coin="${esc(r.name)}">
+            <td><span class="pos">Held</span></td>
             <td>${esc(r.name)}</td>
             <td>${num(r.shares)}</td>
             <td>${num(r.buy_filled_price)}</td>
+            <td class="dim">—</td>
+            <td class="dim">—</td>
             <td>${num(r.current_price)}</td>
             <td>${num(r.sell_target)}</td>
             <td>${num(r.sell_stop_price)}</td>
             <td>${r.has_live_sell ? '<span class="pos">live</span>' : '<span class="dim">none</span>'}</td>
+            <td class="dim">—</td>
             <td>${money(r.target_profit)}</td>
             <td>${money(r.current_profit)}</td>
             <td class="dim">${esc(r.error_message)}</td>
+            <td class="dim">—</td>
         </tr>
     `).join('')
+    const pendingBuyRows = openBuyOrders.map(r => `
+        <tr data-coin="${esc(r.name)}">
+            <td><span class="buy-tag">Buy</span></td>
+            <td>${esc(r.name)}</td>
+            <td>${num(r.shares)}</td>
+            <td class="dim">—</td>
+            <td>${num(r.buy_price)}</td>
+            <td>${num(r.buy_stop_price)}</td>
+            <td>${num(r.current_price)}</td>
+            <td class="dim">—</td>
+            <td class="dim">—</td>
+            <td class="dim">—</td>
+            <td>${r.pct_to_trigger}%</td>
+            <td class="dim">—</td>
+            <td class="dim">—</td>
+            <td class="dim">${esc(r.error_message)}</td>
+            <td class="dim">${new Date(r.date_created).toLocaleString()}</td>
+        </tr>
+    `).join('')
+    const positionRows = heldRows + pendingBuyRows
+    const positionTotal = openPositions.length + openBuyOrders.length
 
     const fillRows = recentFills.map(r => `
         <tr data-coin="${esc(r.name)}">
@@ -225,22 +239,14 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
 
     ${pfChart.renderSection()}
 
-    <h2 id="h-positions">Open Positions &amp; Estimated Profit (${openPositions.length})</h2>
-    <table class="coin-filter" data-title="Open Positions" data-total="${openPositions.length}" data-colspan="10">
+    <h2 id="h-positions">Position (${positionTotal})</h2>
+    <table class="coin-filter" data-title="Position" data-total="${positionTotal}" data-colspan="15">
         <tr>
-            <th>Coin</th><th>Shares</th><th>Bought @</th><th>Current</th><th>Limit Price</th><th>Stop Price</th>
-            <th>Sell Order</th><th>Target Profit</th><th>Current Profit</th><th>Error</th>
+            <th>Kind</th><th>Coin</th><th>Shares</th><th>Bought @</th><th>Buy Limit</th><th>Buy Stop</th>
+            <th>Current</th><th>Limit Price</th><th>Stop Price</th><th>Sell Order</th>
+            <th>% to Trigger</th><th>Target Profit</th><th>Current Profit</th><th>Error</th><th>Placed</th>
         </tr>
-        ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="10">No open positions</td></tr>'}
-    </table>
-
-    <h2 id="h-buys">Open Buy Orders (${openBuyOrders.length})</h2>
-    <table class="coin-filter" data-title="Open Buy Orders" data-total="${openBuyOrders.length}" data-colspan="8">
-        <tr>
-            <th>Coin</th><th>Shares</th><th>Buy Limit</th><th>Buy Stop</th><th>Current</th>
-            <th>% to Trigger</th><th>Error</th><th>Placed</th>
-        </tr>
-        ${buyOrderRows || '<tr class="coin-filter-empty"><td class="empty" colspan="8">No pending buy orders</td></tr>'}
+        ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="15">No open positions or buy orders</td></tr>'}
     </table>
 
     <h2 id="h-fills">Last 100 Fills</h2>
@@ -273,8 +279,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     // (CustomEvent pf-coin-filter from modules/dashboardChart.js).
     (function () {
         const headingFor = {
-            'Open Positions': 'h-positions',
-            'Open Buy Orders': 'h-buys',
+            'Position': 'h-positions',
             'Last 100 Fills': 'h-fills',
             'Profit History — Last 24 Hours': 'h-history',
         }
