@@ -56,9 +56,12 @@ const RECENT_FILLS_QUERY = `
     -- 2026-10-11: use fills (not position_audit). Audit rows are deleted
     -- when a position closes, so closed coins like ABT-USD vanished from
     -- "Last 100 Fills" even though the trades still exist in fills.
+    -- 2026-10-11: also show size (shares) and fee — both live on fills.
     SELECT product_id AS name,
            side AS fill_type,
            price,
+           size,
+           fee,
            trade_time AS changed_at
     FROM fills
     ORDER BY trade_time DESC
@@ -149,6 +152,8 @@ function renderPage (profitSummary, profitHistory24h, openBuyOrders, openPositio
             <td>${esc(r.name)}</td>
             <td class="${r.fill_type === 'BUY' ? 'buy-tag' : 'sell-tag'}">${r.fill_type}</td>
             <td>${num(r.price)}</td>
+            <td>${num(r.size)}</td>
+            <td>${money(r.fee)}</td>
             <td class="dim">${new Date(r.changed_at).toLocaleString()}</td>
         </tr>
     `).join('')
@@ -205,9 +210,9 @@ function renderPage (profitSummary, profitHistory24h, openBuyOrders, openPositio
     </table>
 
     <h2 id="h-fills">Last 100 Fills</h2>
-    <table class="coin-filter" data-title="Last 100 Fills" data-total="${recentFills.length}" data-colspan="4">
-        <tr><th>Coin</th><th>Type</th><th>Price</th><th>When</th></tr>
-        ${fillRows || '<tr class="coin-filter-empty"><td class="empty" colspan="4">No fills recorded</td></tr>'}
+    <table class="coin-filter" data-title="Last 100 Fills" data-total="${recentFills.length}" data-colspan="6">
+        <tr><th>Coin</th><th>Type</th><th>Price</th><th>Shares</th><th>Fee</th><th>When</th></tr>
+        ${fillRows || '<tr class="coin-filter-empty"><td class="empty" colspan="6">No fills recorded</td></tr>'}
     </table>
 
     <h2>Profit Summary</h2>
