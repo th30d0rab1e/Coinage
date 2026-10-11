@@ -1776,7 +1776,9 @@ AND p.sell_fee IS NOT NULL;
 -- snipe bought on <COIN>-USDC); profit math is unchanged (USDC = USD 1:1).
 -- 2026-10-08: also carries buy_source ('dip_buy' or NULL) so dip-buy
 -- results can be told apart after the position row is gone.
-INSERT INTO profit_history (stock_id, name, period_type, buy_coinbase_order_id, sell_fills_id, buy_fee, sell_fee, profit, profit_converted_usdc, buy_quote_currency, buy_source)
+-- 2026-10-11 (Theodore, voice): also snapshots USD/USDC totals from
+-- vw_balance at insert time (one scan via FILTER). Older rows stay NULL.
+INSERT INTO profit_history (stock_id, name, period_type, buy_coinbase_order_id, sell_fills_id, buy_fee, sell_fee, profit, profit_converted_usdc, buy_quote_currency, buy_source, usd_balance, usdc_balance)
 SELECT
     p.stock_id, p.name, p.period_type, p.buy_coinbase_order_id, p.sell_coinbase_order_id AS sell_fills_id,
     TRUNC(p.buy_fee::numeric, 2) AS buy_fee,
@@ -1785,8 +1787,18 @@ SELECT
          - (p.buy_filled_price::numeric * p.shares::numeric + p.buy_fee::numeric))::numeric, 2) AS profit,
     p.profit_converted_usdc,
     p.buy_quote_currency,
-    p.buy_source
+    p.buy_source,
+    bal.usd_balance,
+    bal.usdc_balance
 FROM position p
+CROSS JOIN LATERAL (
+    -- Single pass over vw_balance (USD + USDC rows only).
+    SELECT
+        MAX(balance::numeric) FILTER (WHERE name = 'USD')  AS usd_balance,
+        MAX(balance::numeric) FILTER (WHERE name = 'USDC') AS usdc_balance
+    FROM vw_balance
+    WHERE name IN ('USD', 'USDC')
+) bal
 WHERE p.buy_coinbase_order_id IS NOT NULL
 AND p.sell_coinbase_order_id IS NOT NULL
 AND p.buy_filled_price IS NOT NULL

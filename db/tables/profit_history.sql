@@ -25,7 +25,15 @@ CREATE TABLE IF NOT EXISTS public.profit_history (
     -- 2026-10-07 (migrations/2026-10-07_listing_usdc_fallback.sql):
     -- copied from position.buy_quote_currency at close. NULL = bought with
     -- USD, 'USDC' = listing snipe bought on <COIN>-USDC with USDC.
-    buy_quote_currency     text
+    buy_quote_currency     text,
+    -- 2026-10-08: 'dip_buy' or NULL, copied from position at close.
+    buy_source             text,
+    -- 2026-10-11: when Pushover profit alert was sent for this close.
+    pushover_notified_at   timestamptz,
+    -- 2026-10-11 (Theodore, voice): cash on hand when this close was recorded.
+    -- Totals from vw_balance (available + hold). NULL on older rows.
+    usd_balance            numeric,
+    usdc_balance           numeric
 );
 
 CREATE INDEX IF NOT EXISTS profit_history_usdc_unswept
