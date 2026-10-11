@@ -191,6 +191,8 @@ function renderPage (profitSummary, profitHistory24h, openBuyOrders, openPositio
     <div class="meta">Generated ${new Date().toLocaleString()}</div>
     <a class="refresh" href="/">Refresh</a>
 
+    ${pfChart.renderSection()}
+
     <h2>Profit Summary</h2>
     <table>
         <tr>
@@ -233,8 +235,6 @@ function renderPage (profitSummary, profitHistory24h, openBuyOrders, openPositio
         <tr><th>Coin</th><th>Type</th><th>Price</th><th>When</th></tr>
         ${fillRows || '<tr><td class="empty" colspan="4">No fills recorded</td></tr>'}
     </table>
-
-    ${pfChart.renderSection()}
 </body>
 </html>`
 }
@@ -262,7 +262,8 @@ const server = http.createServer(async (req, res) => {
             db.executeQuery(OPEN_POSITIONS_QUERY),
             db.executeQuery(RECENT_FILLS_QUERY),
         ])
-        res.writeHead(200, { 'Content-Type': 'text/html' })
+        // 2026-10-11: no-store so a hard-refresh isn't required to see chart updates
+        res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' })
         res.end(renderPage(profitSummary, profitHistory24h, openBuyOrders, openPositions, recentFills))
     } catch (error) {
         console.log('dashboard request error', error)
