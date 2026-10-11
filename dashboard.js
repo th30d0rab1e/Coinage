@@ -68,33 +68,26 @@ const OPEN_POSITIONS_QUERY = `
     ORDER BY has_live_sell DESC, current_profit DESC
 `
 
-// 2026-10-11: closed bags live in profit_history (position rows are deleted).
-// Join fills for shares / buy & sell prices. Newest 100 sold closes.
+// 2026-10-11: sold Kind only from position rows that already have
+// sell_filled_price set. Do NOT use fills/profit_history for this list —
+// closed bags are deleted from position soon after, so sold may be empty
+// most of the time.
 const SOLD_POSITIONS_QUERY = `
-    SELECT ph.name,
-           bf.shares,
-           bf.buy_price AS buy_filled_price,
-           sf.sell_price AS sell_fill_price,
-           ph.profit AS realized_profit,
-           ph.buy_fee,
-           ph.sell_fee,
-           ph.date_created AS closed_at,
-           ph.buy_coinbase_order_id,
-           ph.sell_fills_id
-    FROM profit_history ph
-    LEFT JOIN LATERAL (
-        SELECT SUM(size)::numeric AS shares,
-               CASE WHEN SUM(size) > 0 THEN SUM(price * size) / SUM(size) ELSE NULL END AS buy_price
-        FROM fills
-        WHERE order_id = ph.buy_coinbase_order_id
-    ) bf ON TRUE
-    LEFT JOIN LATERAL (
-        SELECT CASE WHEN SUM(size) > 0 THEN SUM(price * size) / SUM(size) ELSE NULL END AS sell_price
-        FROM fills
-        WHERE order_id = ph.sell_fills_id
-    ) sf ON TRUE
-    ORDER BY ph.date_created DESC
-    LIMIT 100
+    SELECT p.name,
+           p.shares,
+           p.buy_filled_price,
+           p.sell_filled_price AS sell_fill_price,
+           p.sell_price AS sell_target,
+           p.sell_stop_price,
+           (
+               (p.sell_filled_price::numeric * p.shares::numeric - COALESCE(p.sell_fee::numeric, 0))
+               - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0))
+           ) AS realized_profit,
+           p.date_created AS closed_at,
+           p.error_message
+    FROM position p
+    WHERE p.sell_filled_price IS NOT NULL
+    ORDER BY p.date_created DESC
 `
 
 const RECENT_FILLS_QUERY = `
@@ -169,7 +162,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     // buying  = pending buy (no fill yet)
     // bought  = filled bag, no live Coinbase sell order
     // selling = filled bag with live sell_coinbase_order_id
-    // sold    = profit_history close (position row already deleted)
+    // sold    = position row with sell_filled_price set (fills not used)
     const buyingRows = openBuyOrders.map(r => `
         <tr data-coin="${esc(r.name)}">
             <td><span class="kind-buying">buying</span></td>
