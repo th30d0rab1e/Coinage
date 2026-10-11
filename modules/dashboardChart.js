@@ -19,6 +19,8 @@ const RANGES = {
 
 // Coins the user can search: every stock row plus any product that has fills
 // (27 filled products are no longer in stock, e.g. delisted coins).
+// 2026-10-11: drop ETF/Kalshi product-id hashes (e.g. c14a9c069… looks like
+// "C1489C069" in a short dropdown). Only real COIN-USD / COIN-USDC symbols.
 async function listCoins () {
     const { rows } = await db.query(`
         SELECT name, SUM(fill_count)::int AS fill_count, MAX(last_fill) AS last_fill
@@ -28,6 +30,7 @@ async function listCoins () {
             SELECT product_id, COUNT(*), MAX(trade_time) FROM fills GROUP BY product_id
         ) x
         WHERE name IS NOT NULL
+          AND name ~ '^[A-Z0-9]+-USD(C)?$'
         GROUP BY name
         ORDER BY MAX(last_fill) DESC NULLS LAST, name`)
     return rows
@@ -39,6 +42,7 @@ async function latestSell () {
         SELECT product_id AS coin, trade_time AS t, price AS p, size, fee, order_id, side
         FROM fills
         WHERE side = 'SELL'
+          AND product_id ~ '^[A-Z0-9]+-USD(C)?$'
         ORDER BY trade_time DESC
         LIMIT 1`)
     const r = rows[0]
@@ -123,6 +127,9 @@ function renderSection () {
     return `
     <h2>Price &amp; Fills Chart</h2>
     <div id="pf-controls" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;font-size:13px">
+        <label for="pf-coin-search" class="dim">Search</label>
+        <input id="pf-coin-search" type="search" placeholder="Type to filter…" autocomplete="off"
+            style="background:#1a1a1a;color:#ddd;border:1px solid #333;border-radius:6px;padding:6px 10px;min-width:140px;max-width:200px">
         <label for="pf-coin" class="dim">Coin</label>
         <select id="pf-coin" style="background:#1a1a1a;color:#ddd;border:1px solid #333;border-radius:6px;padding:6px 10px;min-width:220px;max-width:360px">
             <option value="">Loading coins…</option>
@@ -256,15 +263,38 @@ function renderSection () {
         autoFollow.addEventListener('change', () => { if (autoFollow.checked) pollLatestSell() })
         document.getElementById('pf-reset').addEventListener('click', () => chart && chart.resetZoom())
 
-        fetch('/api/coins').then(r => r.json()).then(list => {
-            // 2026-10-11: leading All clears chart filter / restores full tables.
-            coinSel.innerHTML = '<option value="">All</option>' + (list.map(c => {
+        const searchBox = document.getElementById('pf-coin-search')
+        let allCoins = []
+
+        function renderCoinOptions (filterText) {
+            const q = (filterText || '').trim().toLowerCase()
+            const prev = coinSel.value
+            const matched = !q ? allCoins : allCoins.filter(c => {
+                const hay = (c.name + ' ' + (c.fill_count || '')).toLowerCase()
+                return hay.includes(q)
+            })
+            coinSel.innerHTML = '<option value="">All</option>' + matched.map(c => {
                 const label = c.fill_count ? (c.name + ' (' + c.fill_count + ' fills)') : c.name
                 return '<option value="' + c.name + '">' + label + '</option>'
-            }).join('') || '')
+            }).join('')
+            // Keep selection if still in the filtered list; else stay on All.
+            if (prev && Array.from(coinSel.options).some(o => o.value === prev)) {
+                coinSel.value = prev
+            } else if (prev && prev !== '') {
+                // Filtered out — leave All; do not auto-load.
+                coinSel.value = ''
+            }
+        }
+
+        searchBox.addEventListener('input', () => renderCoinOptions(searchBox.value))
+
+        fetch('/api/coins').then(r => r.json()).then(list => {
+            // 2026-10-11: leading All clears chart filter / restores full tables.
+            allCoins = list || []
+            renderCoinOptions('')
             // Start on the latest sell (not merely latest fill of any side).
             pollLatestSell().then(() => {
-                if (!current && list[0]) load(list[0].name)
+                if (!current && allCoins[0]) load(allCoins[0].name)
                 else if (!current) emitFilter(null)
             })
         }).catch(e => { coinSel.innerHTML = '<option value="">All</option>'; status.textContent = 'Error: ' + e.message })
