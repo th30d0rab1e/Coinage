@@ -1164,18 +1164,24 @@ sized AS (
         ) + 1 AS clip_usd
     FROM held h
 )
-INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
+-- 2026-10-11 (Theodore, voice): when price has already dropped more than
+-- dip_buy_gap_pct below the cheapest open bag, average-down as a PLAIN
+-- LIMIT at current x (1 - dip_buy_gap_pct/100) with buy_source='dip_buy'
+-- (same path as unheld dip buys). That catches flush lows like OP-USD
+-- noon 2026-10-08 (~0.111 vs ~0.120 bags) instead of parking a stop-limit
+-- above the market that only fills on the later bounce. Mild dips keep the
+-- existing stop-limit + below-lowest-paid path.
+INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type, buy_source)
 SELECT
     s.stock_id,
     s.name,
-    -- 2026-10-05: from the "plan" lateral below.
-    -- 2026-10-07: FINAL stop/limit after the below-lowest-paid rule.
-    fin.limit_price AS buy_price,
-    fin.stop_price  AS buy_stop_price,
+    CASE WHEN deep.is_flush THEN deep.limit_price ELSE fin.limit_price END AS buy_price,
+    CASE WHEN deep.is_flush THEN NULL ELSE fin.stop_price END AS buy_stop_price,
     plan.shares,
     NOW() AS date_created,
     gen_random_uuid(),
-    sized.period_type
+    sized.period_type,
+    CASE WHEN deep.is_flush THEN 'dip_buy' ELSE NULL END AS buy_source
 FROM sized
 JOIN stock s ON s.stock_id = sized.stock_id
 CROSS JOIN vw_balance b
@@ -1220,12 +1226,21 @@ CROSS JOIN LATERAL (
     AND f.sell_filled_price IS NULL
 ) paid
 CROSS JOIN LATERAL fn_buy_below_paid(plan.buy_stop_price, plan.buy_price, paid.min_paid, s.price_rounding::integer) fin
+-- Flush average-down: already > dip_buy_gap_pct under cheapest bag → limit buy.
+CROSS JOIN LATERAL (
+    SELECT
+        (paid.min_paid IS NOT NULL
+         AND s.price::numeric
+             < paid.min_paid * (1 - v_dip_buy_gap_pct / 100)) AS is_flush,
+        TRUNC(s.price::numeric * (1 - v_dip_buy_gap_pct / 100),
+              s.price_rounding::integer) AS limit_price
+) deep
 -- Dollar cost of the REAL order: shares x the final limit, plain and with
 -- the ~1.2% taker-fee pad (1.012).
 CROSS JOIN LATERAL (
     SELECT
-        plan.shares * fin.limit_price         AS cost_usd,
-        plan.shares * fin.limit_price * 1.012 AS cost_with_fee
+        plan.shares * (CASE WHEN deep.is_flush THEN deep.limit_price ELSE fin.limit_price END)         AS cost_usd,
+        plan.shares * (CASE WHEN deep.is_flush THEN deep.limit_price ELSE fin.limit_price END) * 1.012 AS cost_with_fee
 ) eff
 -- 2026-10-07: crypto buys stay USD ONLY on purpose. USDC (vw_balance
 -- name = 'USDC') is never cash here: it is profit parked by the USDC sweep

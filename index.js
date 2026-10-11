@@ -1441,7 +1441,8 @@ async function processBuyOrders () {
             // thee_procedure set buy_price (rounded down to the price
             // increment) and shares (~$dip_buy_usd, rounded up to the size
             // increment). Remake / TTL: processDipBuys().
-            const isDip = element.buy_source === 'dip_buy'
+            // 2026-10-11: flush avg-down also uses NULL buy_stop_price + buy_source dip_buy.
+            const isDip = element.buy_source === 'dip_buy' || element.buy_stop_price == null
             let response = isListing
                 ? await ca.createLimitOrder('buy', element.buy_price, element.shares, buyProductId, newOrderId)
                 : isDip
