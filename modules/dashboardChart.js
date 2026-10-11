@@ -17,23 +17,23 @@ const RANGES = {
     'all': [5 * 365 * 86400, 86400],
 }
 
-// Coins the user can search: every stock row plus any product that has fills
-// (27 filled products are no longer in stock, e.g. delisted coins).
-// 2026-10-11: drop ETF/Kalshi product-id hashes (e.g. c14a9c069… looks like
-// "C1489C069" in a short dropdown). Only real COIN-USD / COIN-USDC symbols.
+// Coins the user can search: stock table ONLY (clean COIN-USD symbols).
+// 2026-10-11: never source from fills — that table carried ETF/Kalshi product
+// id hashes and USDC pairs (BTC-USDC). Dropdown is ^[A-Z0-9]+-USD$ only.
 async function listCoins () {
     const { rows } = await db.query(`
-        SELECT name, SUM(fill_count)::int AS fill_count, MAX(last_fill) AS last_fill
-        FROM (
-            SELECT name, 0 AS fill_count, NULL::timestamptz AS last_fill FROM stock
-            UNION ALL
-            SELECT product_id, COUNT(*), MAX(trade_time) FROM fills GROUP BY product_id
-        ) x
-        WHERE name IS NOT NULL
-          AND name ~ '^[A-Z0-9]+-USD(C)?$'
-        GROUP BY name
-        -- 2026-10-11: A-Z for the dropdown; All is prepended client-side.
-        ORDER BY name ASC`)
+        SELECT s.name,
+               COALESCE(f.fill_count, 0)::int AS fill_count,
+               f.last_fill
+        FROM stock s
+        LEFT JOIN (
+            SELECT product_id, COUNT(*)::int AS fill_count, MAX(trade_time) AS last_fill
+            FROM fills
+            GROUP BY product_id
+        ) f ON f.product_id = s.name
+        WHERE s.name IS NOT NULL
+          AND s.name ~ '^[A-Z0-9]+-USD$'
+        ORDER BY s.name ASC`)
     return rows
 }
 
@@ -43,7 +43,7 @@ async function latestSell () {
         SELECT product_id AS coin, trade_time AS t, price AS p, size, fee, order_id, side
         FROM fills
         WHERE side = 'SELL'
-          AND product_id ~ '^[A-Z0-9]+-USD(C)?$'
+          AND product_id ~ '^[A-Z0-9]+-USD$'
         ORDER BY trade_time DESC
         LIMIT 1`)
     const r = rows[0]
