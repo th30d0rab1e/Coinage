@@ -165,8 +165,7 @@ async function run(db, ca) {
                 + `Buy Total: ${money(r.buy_total)}  Buy Fee: ${money(r.buy_fee)}\n`
                 + `Sell Total: ${money(r.sell_total)}  Sell Fee: ${money(r.sell_fee)}\n`
                 + `USD: ${money(bal.usd)}  USDC: ${money(bal.usdc)}\n`
-                + `Month Profit: ${money(r.month_profit)}
-`
+                + `Month Profit: ${money(r.month_profit)}\n`
                 + `Lifetime Profit: ${money(r.lifetime_profit)}`
             try {
                 await pushSend(push, c.pushover_user_key, r.name, message)
