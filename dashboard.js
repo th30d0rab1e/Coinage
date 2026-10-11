@@ -68,6 +68,35 @@ const OPEN_POSITIONS_QUERY = `
     ORDER BY has_live_sell DESC, current_profit DESC
 `
 
+// 2026-10-11: closed bags live in profit_history (position rows are deleted).
+// Join fills for shares / buy & sell prices. Newest 100 sold closes.
+const SOLD_POSITIONS_QUERY = `
+    SELECT ph.name,
+           bf.shares,
+           bf.buy_price AS buy_filled_price,
+           sf.sell_price AS sell_fill_price,
+           ph.profit AS realized_profit,
+           ph.buy_fee,
+           ph.sell_fee,
+           ph.date_created AS closed_at,
+           ph.buy_coinbase_order_id,
+           ph.sell_fills_id
+    FROM profit_history ph
+    LEFT JOIN LATERAL (
+        SELECT SUM(size)::numeric AS shares,
+               CASE WHEN SUM(size) > 0 THEN SUM(price * size) / SUM(size) ELSE NULL END AS buy_price
+        FROM fills
+        WHERE order_id = ph.buy_coinbase_order_id
+    ) bf ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT CASE WHEN SUM(size) > 0 THEN SUM(price * size) / SUM(size) ELSE NULL END AS sell_price
+        FROM fills
+        WHERE order_id = ph.sell_fills_id
+    ) sf ON TRUE
+    ORDER BY ph.date_created DESC
+    LIMIT 100
+`
+
 const RECENT_FILLS_QUERY = `
     -- 2026-10-11: use fills (not position_audit). Audit rows are deleted
     -- when a position closes, so closed coins like ABT-USD vanished from
@@ -105,7 +134,7 @@ function esc (value) {
     return String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 }
 
-function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, openPositions, recentFills) {
+function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, openPositions, soldPositions, recentFills) {
     const summaryRows = profitSummary.map(r => `
         <tr>
             <td>${esc(r.period_type)}</td>
@@ -136,33 +165,14 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
         </tr>
     `).join('')
 
-    // 2026-10-11: Position columns grouped buy-side then sell-side.
-    // Buy: Kind, Coin, Shares, Bought @, Buy Limit, Buy Stop, Buy %.
-    // Then Current. Sell: Limit, Stop, Sell %, Sell Order, Current Profit,
-    // Target Profit. Then Error / Placed.
-    const heldRows = openPositions.map(r => `
+    // 2026-10-11: Kind = buying | bought | selling | sold
+    // buying  = pending buy (no fill yet)
+    // bought  = filled bag, no live Coinbase sell order
+    // selling = filled bag with live sell_coinbase_order_id
+    // sold    = profit_history close (position row already deleted)
+    const buyingRows = openBuyOrders.map(r => `
         <tr data-coin="${esc(r.name)}">
-            <td><span class="pos">Held</span></td>
-            <td>${esc(r.name)}</td>
-            <td>${num(r.shares)}</td>
-            <td>${num(r.buy_filled_price)}</td>
-            <td class="dim">—</td>
-            <td class="dim">—</td>
-            <td class="dim">—</td>
-            <td>${num(r.current_price)}</td>
-            <td>${num(r.sell_target)}</td>
-            <td>${num(r.sell_stop_price)}</td>
-            <td>${r.sell_pct_to_trigger == null ? '—' : (r.sell_pct_to_trigger + '%')}</td>
-            <td>${r.has_live_sell ? '<span class="pos">live</span>' : '<span class="dim">none</span>'}</td>
-            <td>${money(r.current_profit)}</td>
-            <td>${money(r.target_profit)}</td>
-            <td class="dim">${esc(r.error_message)}</td>
-            <td class="dim">—</td>
-        </tr>
-    `).join('')
-    const pendingBuyRows = openBuyOrders.map(r => `
-        <tr data-coin="${esc(r.name)}">
-            <td><span class="buy-tag">Buy</span></td>
+            <td><span class="kind-buying">buying</span></td>
             <td>${esc(r.name)}</td>
             <td>${num(r.shares)}</td>
             <td class="dim">—</td>
@@ -180,8 +190,53 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
             <td class="dim">${new Date(r.date_created).toLocaleString()}</td>
         </tr>
     `).join('')
-    const positionRows = heldRows + pendingBuyRows
-    const positionTotal = openPositions.length + openBuyOrders.length
+    const openBagRows = openPositions.map(r => {
+        const kind = r.has_live_sell ? 'selling' : 'bought'
+        const kindClass = r.has_live_sell ? 'kind-selling' : 'kind-bought'
+        return `
+        <tr data-coin="${esc(r.name)}">
+            <td><span class="${kindClass}">${kind}</span></td>
+            <td>${esc(r.name)}</td>
+            <td>${num(r.shares)}</td>
+            <td>${num(r.buy_filled_price)}</td>
+            <td class="dim">—</td>
+            <td class="dim">—</td>
+            <td class="dim">—</td>
+            <td>${num(r.current_price)}</td>
+            <td>${num(r.sell_target)}</td>
+            <td>${num(r.sell_stop_price)}</td>
+            <td>${r.sell_pct_to_trigger == null ? '—' : (r.sell_pct_to_trigger + '%')}</td>
+            <td>${r.has_live_sell ? '<span class="pos">live</span>' : '<span class="dim">none</span>'}</td>
+            <td>${money(r.current_profit)}</td>
+            <td>${money(r.target_profit)}</td>
+            <td class="dim">${esc(r.error_message)}</td>
+            <td class="dim">—</td>
+        </tr>`
+    }).join('')
+    const soldRows = soldPositions.map(r => `
+        <tr data-coin="${esc(r.name)}">
+            <td><span class="kind-sold">sold</span></td>
+            <td>${esc(r.name)}</td>
+            <td>${num(r.shares)}</td>
+            <td>${num(r.buy_filled_price)}</td>
+            <td class="dim">—</td>
+            <td class="dim">—</td>
+            <td class="dim">—</td>
+            <td class="dim">—</td>
+            <td>${num(r.sell_fill_price)}</td>
+            <td class="dim">—</td>
+            <td class="dim">—</td>
+            <td class="dim">filled</td>
+            <td>${money(r.realized_profit)}</td>
+            <td class="dim">—</td>
+            <td class="dim">—</td>
+            <td class="dim">${new Date(r.closed_at).toLocaleString()}</td>
+        </tr>
+    `).join('')
+    // Order: buying → bought → selling → sold (openBags already sorted live-first)
+    const boughtRows = openBagRows // includes bought+selling in DB order (selling first)
+    const positionRows = buyingRows + boughtRows + soldRows
+    const positionTotal = openBuyOrders.length + openPositions.length + soldPositions.length
 
     const fillRows = recentFills.map(r => `
         <tr data-coin="${esc(r.name)}">
@@ -215,6 +270,10 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     .dim { color: #777; }
     .buy-tag { color: #4ade80; }
     .sell-tag { color: #f87171; }
+    .kind-buying { color: #60a5fa; }
+    .kind-bought { color: #4ade80; }
+    .kind-selling { color: #fbbf24; }
+    .kind-sold { color: #a78bfa; }
     .empty { color: #666; padding: 12px 0; }
     tr.coin-filter-empty td { color: #666; }
     .coin-filter-note { font-size: 12px; color: #888; margin: -24px 0 8px; }
@@ -253,7 +312,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
             <th>Limit Price</th><th>Stop Price</th><th>Sell % to Trigger</th><th>Sell Order</th><th>Current Profit</th><th>Target Profit</th>
             <th>Error</th><th>Placed</th>
         </tr>
-        ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="16">No open positions or buy orders</td></tr>'}
+        ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="16">No buying / bought / selling / sold rows</td></tr>'}
     </table>
 
     <h2 id="h-fills">Last 100 Fills</h2>
@@ -363,18 +422,19 @@ const server = http.createServer(async (req, res) => {
             return res.end(JSON.stringify(await pfChart.chartData(coin, url.searchParams.get('range') || '7d')))
         }
         if (url.pathname !== '/') { res.writeHead(404); return res.end('not found') }
-        const [balanceRows, profitSummary, profitHistory24h, openBuyOrders, openPositions, recentFills] = await Promise.all([
+        const [balanceRows, profitSummary, profitHistory24h, openBuyOrders, openPositions, soldPositions, recentFills] = await Promise.all([
             db.executeQuery(BALANCE_QUERY),
             db.executeQuery(PROFIT_SUMMARY_QUERY),
             db.executeQuery(PROFIT_HISTORY_24H_QUERY),
             db.executeQuery(OPEN_BUY_ORDERS_QUERY),
             db.executeQuery(OPEN_POSITIONS_QUERY),
+            db.executeQuery(SOLD_POSITIONS_QUERY),
             db.executeQuery(RECENT_FILLS_QUERY),
         ])
         const balances = balanceRows[0] || {}
         // 2026-10-11: no-store so a hard-refresh isn't required to see chart updates
         res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' })
-        res.end(renderPage(balances, profitSummary, profitHistory24h, openBuyOrders, openPositions, recentFills))
+        res.end(renderPage(balances, profitSummary, profitHistory24h, openBuyOrders, openPositions, soldPositions, recentFills))
     } catch (error) {
         console.log('dashboard request error', error)
         res.writeHead(500, { 'Content-Type': 'text/plain' })
