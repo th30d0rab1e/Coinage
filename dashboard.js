@@ -183,7 +183,6 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
             <td class="sell-m dim">—</td>
             <td class="sell-r dim">—</td>
             <td class="dim">${esc(r.error_message)}</td>
-            <td class="dim">${new Date(r.date_created).toLocaleString()}</td>
         </tr>`
     }).join('')
     const openBagRows = openPositions.map(r => {
@@ -208,7 +207,6 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
             <td class="sell-m">${money(r.current_profit)}</td>
             <td class="sell-r">${money(r.target_profit)}</td>
             <td class="dim">${esc(r.error_message)}</td>
-            <td class="dim">—</td>
         </tr>`
     }).join('')
     const soldRows = soldPositions.map(r => {
@@ -231,7 +229,6 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
             <td class="sell-m">${money(r.realized_profit)}</td>
             <td class="sell-r dim">—</td>
             <td class="dim">—</td>
-            <td class="dim">${new Date(r.closed_at).toLocaleString()}</td>
         </tr>`
     }).join('')
     // Order: buying → bought → selling → sold (openBags already sorted live-first)
@@ -320,14 +317,14 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     ${pfChart.renderSection()}
 
     <h2 id="h-positions">Position (${positionTotal})</h2>
-    <table class="coin-filter" data-title="Position" data-total="${positionTotal}" data-colspan="17">
+    <table class="coin-filter" data-title="Position" data-total="${positionTotal}" data-colspan="16">
         <tr>
             <th class="buy-l">Kind</th><th class="buy-m">Coin</th><th class="buy-m">Shares</th><th class="buy-m">Bought @</th><th class="buy-m">Value</th><th class="buy-m">Buy Limit</th><th class="buy-m">Buy Stop</th><th class="buy-r">Buy % to Trigger</th>
             <th>Current</th>
             <th class="sell-l">Limit Price</th><th class="sell-m">Stop Price</th><th class="sell-m">Sell % to Trigger</th><th class="sell-m">Sell Order</th><th class="sell-m">Current Profit</th><th class="sell-r">Target Profit</th>
-            <th>Error</th><th>Placed</th>
+            <th>Error</th>
         </tr>
-        ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="17">No buying / bought / selling / sold rows</td></tr>'}
+        ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="16">No buying / bought / selling / sold rows</td></tr>'}
     </table>
 
     <h2 id="h-fills">Last 100 Fills</h2>
