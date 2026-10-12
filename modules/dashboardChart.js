@@ -108,6 +108,8 @@ function wilderRsiSeries (closes, period = 14) {
 
 async function chartData (coin, range) {
     const [back, gran] = RANGES[range] || RANGES['7d']
+    const nowSec = Math.floor(Date.now() / 1000)
+    const since = new Date((nowSec - back) * 1000)
     // 2026-10-11 (Theodore, voice): stock.rsi (current) + day-close RSI series for the pane.
     // Series is Wilder(14) over price_aggregate day closes — same math as fn_stock_rsi;
     // latest point should match stock.rsi when day history is what aggregate() used.
@@ -123,11 +125,8 @@ async function chartData (coin, range) {
         t: new Date(r.d).getTime(),
         c: Number(r.c),
     })), 14)
-    // Same visible window as the price chart (since = range start).
-    const sinceMs = since.getTime()
-    const rsiSeries = rsiSeriesAll.filter(p => p.t >= sinceMs)
-    const nowSec = Math.floor(Date.now() / 1000)
-    const since = new Date((nowSec - back) * 1000)
+    // Same visible window as the price chart.
+    const rsiSeries = rsiSeriesAll.filter(p => p.t >= since.getTime())
     let prices = []
     let source = ''
 
