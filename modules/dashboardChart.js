@@ -239,20 +239,14 @@ function renderSection () {
         <span id="pf-status" class="dim"></span>
     </div>
     <div style="position:relative;height:420px;background:#151515;border-radius:8px;padding:8px"><canvas id="pf-chart"></canvas></div>
-    <div style="position:relative;height:160px;background:#151515;border-radius:8px;padding:8px;margin-top:8px">
-      <canvas id="pf-rsi-chart"></canvas>
-    </div>
-    <div class="dim" style="font-size:12px;margin-top:2px">
-      Separate RSI(14) panel (not overlaid on price) from day closes; same window as the price chart.
-      <span class="rsi-os">● &lt;30 oversold</span>
-      <span class="rsi-mid">● 30–70</span>
-      <span class="rsi-ob">● &gt;70 overbought</span>
-      — dashed lines at 30 / 70
-    </div>
     <div class="dim" style="font-size:12px;margin-top:4px">
         Polls sells every 1 minute while this tab is open. Leave the browser window open on this machine to keep watching.
         <span class="buy-tag">● buy fill</span> <span class="sell-tag">● sell fill</span>
         <span style="color:#9ca3af">✕ cancelled remake</span>
+        <span class="rsi-os">··· RSI&lt;30</span>
+        <span style="color:#fff">- - RSI 30–70</span>
+        <span class="rsi-ob">··· RSI&gt;70</span>
+        <span class="dim">(RSI dotted/dashed on price axis)</span>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
@@ -275,7 +269,7 @@ function renderSection () {
             const cls = n < 30 ? 'rsi-os' : n > 70 ? 'rsi-ob' : 'rsi-mid'
             rsiBadge.innerHTML = 'RSI <span class="' + cls + '">' + n.toFixed(2) + '</span>'
         }
-        let chart = null, rsiChart = null, current = null, lastSellKey = null, loading = false
+        let chart = null, current = null, lastSellKey = null, loading = false
         const POLL_MS = 60000
         // Coerce numbers: node/JSON can leave price as string; Chart.js then
         // mis-scales scatter datasets vs the time/line series (markers pin to
@@ -289,11 +283,36 @@ function renderSection () {
         })).filter(d => Number.isFinite(d.x) && Number.isFinite(d.y))
 
         function draw (data) {
+            const priceXY = toXY(data.prices)
+            const rsiRaw = (data.rsiSeries || []).map(d => ({ x: Number(d.t), y: Number(d.p) }))
+                .filter(d => Number.isFinite(d.x) && Number.isFinite(d.y))
+            // Scale RSI 0–100 onto the visible price range (overlay on price chart).
+            const priceYs = priceXY.map(d => d.y).filter(Number.isFinite)
+            let pMin = priceYs.length ? Math.min(...priceYs) : 0
+            let pMax = priceYs.length ? Math.max(...priceYs) : 1
+            if (pMax === pMin) { pMin -= 1; pMax += 1 }
+            const scaleRsi = (rsi) => pMin + (rsi / 100) * (pMax - pMin)
+            function zoneScaled (pred) {
+                const out = []
+                for (let i = 0; i < rsiRaw.length; i++) {
+                    const ok = pred(rsiRaw[i].y)
+                    const prevOk = i > 0 && pred(rsiRaw[i - 1].y)
+                    if (ok || prevOk) out.push({ x: rsiRaw[i].x, y: scaleRsi(rsiRaw[i].y) })
+                    else out.push({ x: rsiRaw[i].x, y: null })
+                }
+                return out
+            }
+            // <30 green dotted, 30–70 white dashed, >70 red dotted
+            const rsiOs = zoneScaled(y => y < 30)
+            const rsiMid = zoneScaled(y => y >= 30 && y <= 70)
+            const rsiOb = zoneScaled(y => y > 70)
             const ds = [
-                { label: data.coin + ' price', data: toXY(data.prices), type: 'line', yAxisID: 'y', borderColor: '#60a5fa', borderWidth: 1.5, pointRadius: 0, tension: 0, order: 3 },
+                { label: data.coin + ' price', data: priceXY, type: 'line', yAxisID: 'y', borderColor: '#60a5fa', borderWidth: 1.5, pointRadius: 0, tension: 0, order: 3 },
+                { label: 'RSI <30', data: rsiOs, type: 'line', yAxisID: 'y', borderColor: '#22c55e', borderWidth: 1.5, borderDash: [2, 4], pointRadius: 0, tension: 0, spanGaps: false, order: 2 },
+                { label: 'RSI 30–70', data: rsiMid, type: 'line', yAxisID: 'y', borderColor: '#ffffff', borderWidth: 1.5, borderDash: [6, 4], pointRadius: 0, tension: 0, spanGaps: false, order: 2 },
+                { label: 'RSI >70', data: rsiOb, type: 'line', yAxisID: 'y', borderColor: '#ef4444', borderWidth: 1.5, borderDash: [2, 4], pointRadius: 0, tension: 0, spanGaps: false, order: 2 },
                 { label: 'Buy fills', data: toXY(data.buys), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#22c55e', borderColor: '#bbf7d0', pointBackgroundColor: '#22c55e', pointBorderColor: '#bbf7d0', pointRadius: 6, pointHoverRadius: 9, order: 1 },
                 { label: 'Sell fills', data: toXY(data.sells), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#ef4444', borderColor: '#fecaca', pointBackgroundColor: '#ef4444', pointBorderColor: '#fecaca', pointRadius: 6, pointHoverRadius: 9, order: 1 },
-                // Cancelled remake (old order cancelled, then replaced): gray cross
                 { label: 'Cancelled remake', data: toXY(data.remakes || []), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#9ca3af', borderColor: '#6b7280', pointBackgroundColor: '#9ca3af', pointBorderColor: '#e5e7eb', pointStyle: 'crossRot', pointRadius: 7, pointHoverRadius: 10, borderWidth: 2, order: 0 },
             ]
             if (chart) chart.destroy()
@@ -330,72 +349,6 @@ function renderSection () {
         }
 
 
-        function drawRsi (data) {
-            const canvas = document.getElementById('pf-rsi-chart')
-            if (!canvas) return
-            const series = toXY(data.rsiSeries || [])
-            // Segment-color by zone: <30 green, >70 red, else gray (own panel, not overlay).
-            function zoneSeries (pred) {
-                const out = []
-                for (let i = 0; i < series.length; i++) {
-                    const y = series[i].y
-                    const ok = pred(y)
-                    const prevOk = i > 0 && pred(series[i - 1].y)
-                    // include boundary point so segments connect
-                    if (ok || prevOk) out.push({ x: series[i].x, y: series[i].y })
-                    else out.push({ x: series[i].x, y: null })
-                }
-                return out
-            }
-            const os = zoneSeries(y => y < 30)
-            const mid = zoneSeries(y => y >= 30 && y <= 70)
-            const ob = zoneSeries(y => y > 70)
-            const band30 = series.map(d => ({ x: d.x, y: 30 }))
-            const band70 = series.map(d => ({ x: d.x, y: 70 }))
-            const last = series.length ? series[series.length - 1].y : (data.rsi != null ? Number(data.rsi) : null)
-            const lineColor = (last != null && Number.isFinite(last))
-                ? (last < 30 ? '#22c55e' : last > 70 ? '#ef4444' : '#9ca3af')
-                : '#9ca3af'
-            const cur = (data.rsi != null && Number.isFinite(Number(data.rsi)) && series.length)
-                ? series.map(d => ({ x: d.x, y: Number(data.rsi) }))
-                : []
-            if (rsiChart) rsiChart.destroy()
-            rsiChart = new Chart(canvas, {
-                type: 'line',
-                data: {
-                    datasets: [
-                        { label: 'RSI 70', data: band70, borderColor: 'rgba(239,68,68,0.45)', borderWidth: 1, borderDash: [4,4], pointRadius: 0, tension: 0, order: 4, spanGaps: false },
-                        { label: 'RSI 30', data: band30, borderColor: 'rgba(34,197,94,0.45)', borderWidth: 1, borderDash: [4,4], pointRadius: 0, tension: 0, order: 4, spanGaps: false },
-                        { label: 'stock.rsi', data: cur, borderColor: lineColor, borderWidth: 1, borderDash: [2,2], pointRadius: 0, tension: 0, order: 3 },
-                        { label: 'RSI oversold', data: os, borderColor: '#22c55e', borderWidth: 1.5, pointRadius: 0, tension: 0, order: 1, spanGaps: false },
-                        { label: 'RSI neutral', data: mid, borderColor: '#9ca3af', borderWidth: 1.5, pointRadius: 0, tension: 0, order: 1, spanGaps: false },
-                        { label: 'RSI overbought', data: ob, borderColor: '#ef4444', borderWidth: 1.5, pointRadius: 0, tension: 0, order: 1, spanGaps: false },
-                    ]
-                },
-                options: {
-                    responsive: true, maintainAspectRatio: false, animation: false, parsing: false,
-                    interaction: { mode: 'nearest', intersect: false },
-                    plugins: {
-                        legend: { display: false },
-                        tooltip: {
-                            callbacks: {
-                                label: (ctx) => {
-                                    const y = ctx.parsed.y
-                                    if (y == null) return ctx.dataset.label
-                                    const zone = y < 30 ? 'oversold' : y > 70 ? 'overbought' : 'neutral'
-                                    return ctx.dataset.label + ': ' + Number(y).toFixed(2) + ' (' + zone + ')'
-                                }
-                            }
-                        },
-                        zoom: { pan: { enabled: true, mode: 'x' }, zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' } },
-                    },
-                    scales: {
-                        x: { type: 'time', time: { tooltipFormat: 'MMM d, yyyy' }, grid: { color: '#222' }, ticks: { color: '#888', maxRotation: 0 } },
-                        y: { min: 0, max: 100, grid: { color: '#222' }, ticks: { color: '#888', stepSize: 10 }, title: { display: true, text: 'RSI', color: '#888' } },
-                    },
-                },
-            })
-        }
 
         async function load (coin, note) {
             if (!coin || loading) return
@@ -412,7 +365,6 @@ function renderSection () {
                 const data = await r.json()
                 if (data.error) throw new Error(data.error)
                 draw(data)
-                drawRsi(data)
                 const coinMeta = allCoins.find(x => x.name === coin)
                 const rsiVal = (coinMeta && coinMeta.rsi != null && coinMeta.rsi !== '')
                     ? Number(coinMeta.rsi)
@@ -459,10 +411,7 @@ function renderSection () {
         })
         rangeSel.addEventListener('change', () => { if (current) load(current) })
         autoFollow.addEventListener('change', () => { if (autoFollow.checked) pollLatestSell() })
-        document.getElementById('pf-reset').addEventListener('click', () => {
-            if (chart) chart.resetZoom()
-            if (rsiChart) rsiChart.resetZoom()
-        })
+        document.getElementById('pf-reset').addEventListener('click', () => chart && chart.resetZoom())
 
         const searchBox = document.getElementById('pf-coin-search')
         let allCoins = []
