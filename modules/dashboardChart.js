@@ -284,7 +284,7 @@ function renderSection () {
 
         function draw (data) {
             const priceXY = toXY(data.prices)
-            // One RSI series on yRsi (0–100). Color EACH segment/point by that
+            // One RSI series on y1 (0–100). Color EACH segment/point by that
             // point's RSI — splitting into 3 datasets hid short <30/>70 runs
             // (often a single day) because Chart.js needs 2+ points to draw a
             // line segment. Points make one-day extremes visible.
@@ -302,7 +302,7 @@ function renderSection () {
                     label: 'RSI(14)',
                     data: rsiRaw,
                     type: 'line',
-                    yAxisID: 'yRsi',
+                    yAxisID: 'y1',
                     borderWidth: 2,
                     pointRadius: 4,
                     pointHoverRadius: 6,
@@ -321,10 +321,10 @@ function renderSection () {
                         },
                     },
                 },
-                // Fixed RSI threshold guides on yRsi (full visible X span).
-                { label: 'RSI 70', data: rsiGuide(70), type: 'line', yAxisID: 'yRsi', borderColor: '#ef4444', borderWidth: 1.5, borderDash: [6, 4], pointRadius: 0, tension: 0, order: 4 },
-                { label: 'RSI 50', data: rsiGuide(50), type: 'line', yAxisID: 'yRsi', borderColor: '#ffffff', borderWidth: 1.25, borderDash: [4, 4], pointRadius: 0, tension: 0, order: 4 },
-                { label: 'RSI 30', data: rsiGuide(30), type: 'line', yAxisID: 'yRsi', borderColor: '#22c55e', borderWidth: 1.5, borderDash: [6, 4], pointRadius: 0, tension: 0, order: 4 },
+                // Fixed RSI threshold guides on y1 (full visible X span).
+                { label: 'RSI 70', data: rsiGuide(70), type: 'line', yAxisID: 'y1', borderColor: '#ef4444', borderWidth: 1.5, borderDash: [6, 4], pointRadius: 0, tension: 0, order: 4 },
+                { label: 'RSI 50', data: rsiGuide(50), type: 'line', yAxisID: 'y1', borderColor: '#ffffff', borderWidth: 1.25, borderDash: [4, 4], pointRadius: 0, tension: 0, order: 4 },
+                { label: 'RSI 30', data: rsiGuide(30), type: 'line', yAxisID: 'y1', borderColor: '#22c55e', borderWidth: 1.5, borderDash: [6, 4], pointRadius: 0, tension: 0, order: 4 },
                 { label: 'Buy fills', data: toXY(data.buys), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#22c55e', borderColor: '#bbf7d0', pointBackgroundColor: '#22c55e', pointBorderColor: '#bbf7d0', pointRadius: 6, pointHoverRadius: 9, order: 1 },
                 { label: 'Sell fills', data: toXY(data.sells), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#ef4444', borderColor: '#fecaca', pointBackgroundColor: '#ef4444', pointBorderColor: '#fecaca', pointRadius: 6, pointHoverRadius: 9, order: 1 },
                 { label: 'Cancelled remake', data: toXY(data.remakes || []), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#9ca3af', borderColor: '#6b7280', pointBackgroundColor: '#9ca3af', pointBorderColor: '#e5e7eb', pointStyle: 'crossRot', pointRadius: 7, pointHoverRadius: 10, borderWidth: 2, order: 0 },
@@ -340,9 +340,17 @@ function renderSection () {
                         x: { type: 'time', ticks: { color: '#888' }, grid: { color: '#222' } },
                         // Price + fills + remake markers (left).
                         y: { type: 'linear', position: 'left', stacked: false, ticks: { color: '#888' }, grid: { color: '#222' } },
-                        // RSI 0–100 on the right so the dotted line is visible (not crushed into $ prices).
-                        yRsi: {
-                            type: 'linear', position: 'right', min: 0, max: 100,
+                        // RSI 0–100 on the right (Chart.js standard y1 dual-axis id).
+                        // A custom scale id failed to bind in the browser, so RSI 30–70
+                        // plotted on the LEFT price axis as dollar values and sat near
+                        // the bottom next to the green guide. y1 maps RSI to 0–100 only.
+                        y1: {
+                            type: 'linear',
+                            position: 'right',
+                            display: true,
+                            min: 0,
+                            max: 100,
+                            beginAtZero: true,
                             grid: { drawOnChartArea: false },
                             ticks: { color: '#9ca3af', stepSize: 10 },
                             title: { display: true, text: 'RSI', color: '#9ca3af' },
@@ -353,7 +361,7 @@ function renderSection () {
                         tooltip: { callbacks: { label: c => {
                             const d = c.raw
                             if (!d || d.y == null) return c.dataset.label
-                            if (c.dataset.yAxisID === 'yRsi') {
+                            if (c.dataset.yAxisID === 'y1') {
                                 const zone = d.y < 30 ? 'oversold' : d.y > 70 ? 'overbought' : 'neutral'
                                 return c.dataset.label + ': ' + Number(d.y).toFixed(2) + ' (' + zone + ')'
                             }
