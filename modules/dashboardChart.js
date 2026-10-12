@@ -54,6 +54,76 @@ async function latestSell () {
     }
 }
 
+// 2026-10-11: newest BUY fill (auto-follow buys too).
+async function latestBuy () {
+    const { rows } = await db.query(`
+        SELECT product_id AS coin, trade_time AS t, price AS p, size, fee, order_id, side
+        FROM fills
+        WHERE side = 'BUY'
+          AND product_id ~ '^[A-Z0-9]+-USD$'
+        ORDER BY trade_time DESC
+        LIMIT 1`)
+    const r = rows[0]
+    if (!r) return null
+    return { coin: r.coin, t: new Date(r.t).getTime(), p: r.p, size: r.size, fee: r.fee, order_id: r.order_id, side: r.side }
+}
+
+// 2026-10-11: newest order remake from position_audit (buy_remade_price /
+// sell_remade_price UPDATE). p = new stop/trigger from the same audit moment
+// (matches the chart X), market = remade market price.
+async function latestRemake () {
+    const { rows } = await db.query(`
+        SELECT pa.audit_id, pa.position_id, pa.changed_at AS t, pa.column_name,
+               pa.new_value AS market,
+               (SELECT a.new_value
+                  FROM position_audit a
+                 WHERE a.position_id = pa.position_id
+                   AND a.operation = 'UPDATE'
+                   AND a.changed_at = pa.changed_at
+                   AND a.column_name = CASE WHEN pa.column_name = 'buy_remade_price'
+                                            THEN 'buy_stop_price' ELSE 'sell_stop_price' END
+                   AND a.new_value ~ '^[0-9.]+$'
+                 ORDER BY a.audit_id LIMIT 1) AS stop,
+               COALESCE(p.name,
+                   (SELECT i.new_value::jsonb->>'name'
+                      FROM position_audit i
+                     WHERE i.position_id = pa.position_id AND i.operation = 'INSERT'
+                     ORDER BY i.audit_id LIMIT 1)) AS coin
+        FROM position_audit pa
+        LEFT JOIN position p ON p.position_id = pa.position_id
+        WHERE pa.column_name IN ('buy_remade_price', 'sell_remade_price')
+          AND pa.operation = 'UPDATE'
+          AND pa.new_value ~ '^[0-9.]+$'
+        ORDER BY pa.changed_at DESC, pa.audit_id DESC
+        LIMIT 1`)
+    const r = rows[0]
+    if (!r || !r.coin) return null
+    return {
+        coin: r.coin,
+        t: new Date(r.t).getTime(),
+        p: r.stop != null ? Number(r.stop) : Number(r.market),
+        stop: r.stop != null ? Number(r.stop) : null,
+        market: Number(r.market),
+        side: r.column_name === 'sell_remade_price' ? 'sell_remake' : 'buy_remake',
+        position_id: r.position_id,
+        audit_id: r.audit_id,
+    }
+}
+
+// 2026-10-11: newest of latest sell fill, buy fill, and remake — one poll
+// target for chart auto-follow. kind = 'sell' | 'buy' | 'remake'; key is a
+// stable id the client compares to detect a new event.
+async function latestEvent () {
+    const [sell, buy, remake] = await Promise.all([latestSell(), latestBuy(), latestRemake()])
+    const ev = []
+    if (sell) ev.push({ ...sell, kind: 'sell', key: 'sell|' + sell.order_id + '|' + sell.t })
+    if (buy) ev.push({ ...buy, kind: 'buy', key: 'buy|' + buy.order_id + '|' + buy.t })
+    if (remake) ev.push({ ...remake, kind: 'remake', key: 'remake|' + remake.audit_id + '|' + remake.t })
+    if (!ev.length) return null
+    ev.sort((a, b) => b.t - a.t)
+    return { ...ev[0], latest: { sell, buy, remake } }
+}
+
 async function coinbaseCandles (coin, startSec, endSec, gran) {
     const out = []
     // Page backwards in 300-candle windows (Coinbase limit).
@@ -190,8 +260,9 @@ async function chartData (coin, range) {
 
 function renderSection () {
     const ranges = Object.keys(RANGES).map(r => `<option value="${r}"${r === '7d' ? ' selected' : ''}>${r}</option>`).join('')
-    // 2026-10-11: auto-follow the coin of the latest SELL fill (poll /api/latest-sell).
-    // Dropdown remains a manual override; a newer sell jumps the chart again.
+    // 2026-10-11: auto-follow the coin of the newest event — buy fill, sell fill,
+    // or order remake (poll /api/latest-event). Dropdown is a manual override;
+    // a newer event jumps the chart again.
     return `
     <h2>Price &amp; Fills Chart</h2>
     <div id="pf-controls" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;font-size:13px">
@@ -202,9 +273,9 @@ function renderSection () {
         <select id="pf-coin" style="background:#1a1a1a;color:#ddd;border:1px solid #333;border-radius:6px;padding:6px 10px;min-width:220px;max-width:360px">
             <option value="">Loading coins…</option>
         </select>
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer" title="When on, jump to whichever coin just sold">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer" title="When on, jump to whichever coin had the newest buy fill, sell fill, or order remake">
             <input type="checkbox" id="pf-autofollow" checked>
-            <span class="dim">Auto-follow latest sell</span>
+            <span class="dim">Auto-follow latest buy/sell/remake</span>
         </label>
         <select id="pf-range" style="background:#1a1a1a;color:#ddd;border:1px solid #333;border-radius:6px;padding:6px">${ranges}</select>
         <button id="pf-reset" style="background:#333;color:#ddd;border:0;border-radius:6px;padding:6px 10px">Reset zoom</button>
@@ -212,7 +283,7 @@ function renderSection () {
     </div>
     <div style="position:relative;height:420px;background:#151515;border-radius:8px;padding:8px"><canvas id="pf-chart"></canvas></div>
     <div class="dim" style="font-size:12px;margin-top:4px">
-        Polls sells every 1 minute while this tab is open. Leave the browser window open on this machine to keep watching.
+        Polls buys, sells and remakes every 1 minute while this tab is open. Leave the browser window open on this machine to keep watching.
         <span class="buy-tag">● buy fill</span> <span class="sell-tag">● sell fill</span>
         <span style="color:#22c55e">✕ buy remake</span> <span style="color:#ef4444">✕ sell remake</span>
         <span style="color:#22c55e">··· RSI&lt;50</span> <span style="color:#ef4444">··· RSI&gt;50</span>
@@ -227,7 +298,7 @@ function renderSection () {
         const rangeSel = document.getElementById('pf-range')
         const autoFollow = document.getElementById('pf-autofollow')
         const status = document.getElementById('pf-status')
-        let chart = null, current = null, lastSellKey = null, loading = false
+        let chart = null, current = null, lastEventKey = null, loading = false
         const POLL_MS = 60000
         // Coerce numbers: node/JSON can leave price as string; Chart.js then
         // mis-scales scatter datasets vs the time/line series (markers pin to
@@ -360,19 +431,23 @@ function renderSection () {
             status.textContent = (note ? note + ' · ' : '') + 'All coins — tables unfiltered'
         }
 
-        async function pollLatestSell () {
+        // Newest of buy fill / sell fill / remake (server picks by timestamp),
+        // so buys, sells and remakes never fight — the latest one wins.
+        const KIND_LABEL = { sell: 'Latest sell', buy: 'Latest buy', remake: 'Latest remake' }
+        async function pollLatestEvent () {
             try {
-                const r = await fetch('/api/latest-sell')
+                const r = await fetch('/api/latest-event', { cache: 'no-store' })
                 const data = await r.json()
-                if (!data || !data.coin) return
-                const key = String(data.order_id || '') + '|' + String(data.t || '')
-                if (key === lastSellKey) return
-                lastSellKey = key
+                if (!data || !data.coin || !data.key) return
+                if (data.key === lastEventKey) return
+                lastEventKey = data.key
+                let label = KIND_LABEL[data.kind] || 'Latest'
+                if (data.kind === 'remake') label = data.side === 'sell_remake' ? 'Latest sell remake' : 'Latest buy remake'
                 if (!autoFollow.checked) {
-                    status.textContent = 'New sell on ' + data.coin + ' (auto-follow off) · ' + (status.textContent || '')
+                    status.textContent = label + ' on ' + data.coin + ' (auto-follow off) · ' + (status.textContent || '')
                     return
                 }
-                await load(data.coin, 'Latest sell ' + data.coin)
+                await load(data.coin, label + ' ' + data.coin)
             } catch (e) { /* keep last chart; next poll retries */ }
         }
 
@@ -383,7 +458,7 @@ function renderSection () {
             else load(coinSel.value, 'Manual')
         })
         rangeSel.addEventListener('change', () => { if (current) load(current) })
-        autoFollow.addEventListener('change', () => { if (autoFollow.checked) pollLatestSell() })
+        autoFollow.addEventListener('change', () => { if (autoFollow.checked) pollLatestEvent() })
         document.getElementById('pf-reset').addEventListener('click', () => chart && chart.resetZoom())
 
         const searchBox = document.getElementById('pf-coin-search')
@@ -416,17 +491,17 @@ function renderSection () {
             // 2026-10-11: leading All clears chart filter / restores full tables.
             allCoins = list || []
             renderCoinOptions('')
-            // Start on the latest sell (not merely latest fill of any side).
-            pollLatestSell().then(() => {
+            // Start on the newest buy/sell/remake.
+            pollLatestEvent().then(() => {
                 if (!current && allCoins[0]) load(allCoins[0].name)
                 else if (!current) emitFilter(null)
             })
         }).catch(e => { coinSel.innerHTML = '<option value="">All</option>'; status.textContent = 'Error: ' + e.message })
 
-        setInterval(pollLatestSell, POLL_MS)
-        document.addEventListener('visibilitychange', () => { if (!document.hidden) pollLatestSell() })
+        setInterval(pollLatestEvent, POLL_MS)
+        document.addEventListener('visibilitychange', () => { if (!document.hidden) pollLatestEvent() })
     })()
     </script>`
 }
 
-module.exports = { listCoins, latestSell, chartData, renderSection, RANGES }
+module.exports = { listCoins, latestSell, latestBuy, latestRemake, latestEvent, chartData, renderSection, RANGES }

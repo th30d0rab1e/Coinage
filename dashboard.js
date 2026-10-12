@@ -451,6 +451,20 @@ const server = http.createServer(async (req, res) => {
             res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
             return res.end(JSON.stringify(await pfChart.latestSell()))
         }
+        // 2026-10-11: auto-follow also covers buys and remakes.
+        if (url.pathname === '/api/latest-buy') {
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+            return res.end(JSON.stringify(await pfChart.latestBuy()))
+        }
+        if (url.pathname === '/api/latest-remake') {
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+            return res.end(JSON.stringify(await pfChart.latestRemake()))
+        }
+        // Newest of sell fill / buy fill / remake — what the chart polls.
+        if (url.pathname === '/api/latest-event') {
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+            return res.end(JSON.stringify(await pfChart.latestEvent()))
+        }
         if (url.pathname === '/api/chart') {
             const coin = (url.searchParams.get('coin') || '').toUpperCase()
             if (!coin) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end('{"error":"coin required"}') }
