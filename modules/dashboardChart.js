@@ -245,12 +245,14 @@ function renderSection () {
             // segment.borderColor green under 50 / red above (0bf8564 pattern).
             // Single dataset — split series hid short runs. Points show 1-sample buckets.
             const rsiRaw = toXY(data.rsiSeries || [])
+            // Green under 50 / red at or above 50. Always draw points so a short
+            // rsi_history window is still visible on a multi-day price chart.
             const rsiColor = (y) => (y < 50 ? '#22c55e' : '#ef4444')
             const rsiY = (ctx) => {
                 const p = ctx && ctx.p1
                 if (!p) return null
-                if (p.parsed && p.parsed.y != null) return p.parsed.y
-                if (p.raw && p.raw.y != null) return p.raw.y
+                if (p.parsed && Number.isFinite(p.parsed.y)) return p.parsed.y
+                if (p.raw && Number.isFinite(p.raw.y)) return p.raw.y
                 return null
             }
             const ds = [
@@ -260,12 +262,14 @@ function renderSection () {
                     data: rsiRaw,
                     type: 'line',
                     yAxisID: 'y1',
-                    borderWidth: 2,
-                    pointRadius: rsiRaw.length <= 2 ? 4 : 0,
+                    borderColor: rsiRaw.length ? rsiColor(rsiRaw[rsiRaw.length - 1].y) : '#9ca3af',
+                    borderWidth: 2.5,
+                    pointRadius: 3,
                     pointHoverRadius: 6,
                     pointBackgroundColor: rsiRaw.map(d => rsiColor(d.y)),
                     pointBorderColor: rsiRaw.map(d => rsiColor(d.y)),
                     tension: 0,
+                    spanGaps: false,
                     order: 2,
                     segment: {
                         borderColor: (ctx) => {
