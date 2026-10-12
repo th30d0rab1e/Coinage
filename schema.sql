@@ -1510,9 +1510,10 @@ AND s.historical_avg_change_percent > 0
 -- top-50%-by-priority cut (ba3e579); s is the vw_signal year row.
 -- 2026-10-11 (Theodore): reverted NULL-as-0.1; require priority > 0 again.
 AND s.priority > 0
--- 2026-10-11 (Theodore, voice): RSI no longer a hard gate (was stock.rsi < 35;
--- that ANDed with priority > 0 and blocked all buys). Soft boost only via
--- ORDER BY below: lower Wilder RSI(14) ranks higher after priority.
+-- 2026-10-11 (Theodore, voice): also require oversold Wilder RSI(14) on stock (< 35)
+-- (price_aggregate day closes). NULL rsi fails the < 30 test (no buy until
+-- enough day history exists and RSI prints below 35).
+AND stock.rsi < 35
 AND d.current_change_percent < d.historical_avg_change_percent
 AND stock.trading_disabled IS NOT TRUE
 -- 2026-10-07: never open a position in a stablecoin (stock.is_stablecoin,
@@ -1564,14 +1565,11 @@ AND plan.shares > 0
 AND plan.shares >= COALESCE(stock.min_shares, 0)
 AND eff.cost_usd >= COALESCE(stock.min_price, 0)
 -- 2026-10-07 (Theodore: buys "should be sorted by priority desc only"):
--- highest priority wins. (Was: bid-heavy book first, then imbalance DESC,
--- then priority; briefly + stock_id tiebreak.)
+-- highest priority wins, nothing else in the sort. (Was: bid-heavy book
+-- first, then imbalance DESC, then priority; briefly + stock_id tiebreak.)
 -- 2026-10-11 (Theodore): reverted NULL-as-0.1; NULLs sink again (NULLS LAST).
--- 2026-10-11 (Theodore, voice): secondary sort by stock.rsi ASC so oversold
--- coins rank higher when priority ties / after priority; NULL RSI sinks.
 ORDER BY
-    s.priority DESC NULLS LAST,
-    stock.rsi ASC NULLS LAST
+    s.priority DESC NULLS LAST
 LIMIT 1;
 
 -- Buy again if current price has dropped below the MOST RECENT
@@ -1836,8 +1834,8 @@ FROM (
     AND st.name LIKE '%-USD'
     -- 2026-10-11 (Theodore): reverted NULL-as-0.1; require priority > 0 again.
     AND st.priority > 0
-    -- 2026-10-11 (Theodore, voice): RSI soft only — see WINDOW ORDER BY below
-    -- (was hard AND st.rsi < 35; it blocked all buys with priority > 0).
+    -- 2026-10-11 (Theodore, voice): oversold RSI(14) gate, same as initial buy.
+    AND st.rsi < 35
     AND st.trading_disabled IS NOT TRUE
     AND st.is_stablecoin IS NOT TRUE
     AND st.price > 0
@@ -1859,9 +1857,8 @@ FROM (
     AND NOT EXISTS (SELECT 1 FROM position o
                     WHERE o.stock_id = st.stock_id
                     AND o.buy_filled_price IS NULL)
-    -- 2026-10-11 (Theodore): reverted NULL-as-0.1; priority DESC NULLS LAST.
-    -- 2026-10-11 (Theodore, voice): secondary RSI ASC NULLS LAST (soft oversold boost).
-    WINDOW w AS (ORDER BY st.priority DESC NULLS LAST, st.rsi ASC NULLS LAST, st.stock_id ROWS UNBOUNDED PRECEDING)
+    -- 2026-10-11 (Theodore): reverted NULL-as-0.1; plain DESC (NULLs first in PG window).
+    WINDOW w AS (ORDER BY st.priority DESC, st.stock_id ROWS UNBOUNDED PRECEDING)
 ) c
 WHERE c.rn <= v_dip_buy_max_open
               - (SELECT COUNT(*) FROM position d
