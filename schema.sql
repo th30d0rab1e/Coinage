@@ -4612,3 +4612,54 @@ ALTER TABLE ONLY public.etf_buy
 
 \unrestrict TiUyUGuPbDeuUah9ehdpfsTUJhHsbdexfWOynDOBI7faB9eSXyOGrKkwhA0Zxpa
 
+
+
+-- 2026-10-11 (Theodore, voice): time series of stock.rsi for charting / logging.
+-- Wilder RSI(14) itself still lives on stock and is computed in aggregate();
+-- this table only snapshots that value on a regular interval (5-minute buckets).
+CREATE TABLE IF NOT EXISTS public.rsi_history (
+    rsi_history_id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    stock_id       integer NOT NULL REFERENCES public.stock (stock_id),
+    rsi            numeric NOT NULL,
+    captured_at    timestamptz NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS rsi_history_stock_captured_uidx
+    ON public.rsi_history (stock_id, captured_at);
+
+CREATE INDEX IF NOT EXISTS rsi_history_captured_idx
+    ON public.rsi_history (captured_at DESC);
+
+COMMENT ON TABLE public.rsi_history IS
+    'Snapshots of stock.rsi (Wilder 14) for history/charting. One row per stock per 5-minute bucket. Buy logic does not read this table.';
+COMMENT ON COLUMN public.rsi_history.rsi IS
+    'Copy of stock.rsi at captured_at (5-minute floor of NOW()).';
+COMMENT ON COLUMN public.rsi_history.captured_at IS
+    'Bucket start: date_trunc(''minute'', now()) floored to 5 minutes (America/Chicago box clock / timestamptz).';
+
+-- 2026-10-11 (Theodore, voice): snapshot stock.rsi into rsi_history.
+-- 5-minute buckets so a once-a-minute bot run does not explode the table.
+-- Skips NULL rsi. ON CONFLICT skips duplicate bucket. No buy-logic side effects.
+CREATE OR REPLACE FUNCTION public.fn_capture_rsi_history()
+RETURNS integer
+LANGUAGE plpgsql
+AS $fn$
+DECLARE
+    v_bucket timestamptz :=
+        to_timestamp(floor(extract(epoch FROM clock_timestamp()) / 300) * 300);
+    v_n integer;
+BEGIN
+    INSERT INTO public.rsi_history (stock_id, rsi, captured_at)
+    SELECT s.stock_id, s.rsi, v_bucket
+    FROM public.stock s
+    WHERE s.rsi IS NOT NULL
+    ON CONFLICT (stock_id, captured_at) DO NOTHING;
+
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+    RETURN v_n;
+END;
+$fn$;
+
+COMMENT ON FUNCTION public.fn_capture_rsi_history() IS
+    'Inserts current non-NULL stock.rsi into rsi_history for the current 5-minute bucket. Returns rows inserted. Called from aggregate() after stock.rsi refresh.';
+

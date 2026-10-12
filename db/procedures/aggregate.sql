@@ -207,4 +207,9 @@ FROM (
 WHERE s.stock_id = r.stock_id
 AND s.rsi IS DISTINCT FROM r.out_rsi;
 
+-- 2026-10-11 (Theodore, voice): log stock.rsi into rsi_history (5-min buckets)
+-- for charting later. Buy logic does not read rsi_history.
+-- aggregate() is LANGUAGE sql, so SELECT the capture function (not PERFORM).
+SELECT public.fn_capture_rsi_history();
+
 $$;
