@@ -264,10 +264,11 @@ function renderSection () {
                     yAxisID: 'y1',
                     borderColor: rsiRaw.length ? rsiColor(rsiRaw[rsiRaw.length - 1].y) : '#9ca3af',
                     borderWidth: 2.5,
-                    pointRadius: 3,
-                    pointHoverRadius: 6,
-                    pointBackgroundColor: rsiRaw.map(d => rsiColor(d.y)),
-                    pointBorderColor: rsiRaw.map(d => rsiColor(d.y)),
+                    // 2026-10-11 (Theodore, voice): no point markers — red dots
+                    // looked like sell fills. Line + segment colors only.
+                    pointRadius: 0,
+                    pointHoverRadius: 4,
+                    pointHitRadius: 8,
                     tension: 0,
                     spanGaps: false,
                     order: 2,
