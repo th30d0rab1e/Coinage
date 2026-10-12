@@ -1065,6 +1065,10 @@ AND s.historical_avg_change_percent > 0
 -- top-50%-by-priority cut (ba3e579); s is the vw_signal year row.
 -- 2026-10-11 (Theodore): reverted NULL-as-0.1; require priority > 0 again.
 AND s.priority > 0
+-- 2026-10-11 (Theodore, voice): also require oversold Wilder RSI(14) on stock
+-- (price_aggregate day closes). NULL rsi fails the < 30 test (no buy until
+-- enough day history exists and RSI prints below 30).
+AND stock.rsi < 30
 AND d.current_change_percent < d.historical_avg_change_percent
 AND stock.trading_disabled IS NOT TRUE
 -- 2026-10-07: never open a position in a stablecoin (stock.is_stablecoin,
@@ -1385,6 +1389,8 @@ FROM (
     AND st.name LIKE '%-USD'
     -- 2026-10-11 (Theodore): reverted NULL-as-0.1; require priority > 0 again.
     AND st.priority > 0
+    -- 2026-10-11 (Theodore, voice): oversold RSI(14) gate, same as initial buy.
+    AND st.rsi < 30
     AND st.trading_disabled IS NOT TRUE
     AND st.is_stablecoin IS NOT TRUE
     AND st.price > 0
