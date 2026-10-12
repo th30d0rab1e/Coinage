@@ -272,6 +272,8 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
 <meta charset="utf-8">
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
+<!-- 2026-10-12 (Theodore): reload the whole page every 60s so prices/tables stay current -->
+<meta http-equiv="refresh" content="60">
 <title>Coinbase Bot Dashboard</title>
 <style>
     body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #111; color: #ddd; margin: 0; padding: 24px; }
