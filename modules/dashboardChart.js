@@ -161,6 +161,20 @@ async function chartData (coin, range) {
         side: r.column_name === 'sell_remade_price' ? 'sell_remake' : 'buy_remake',
     })).filter(d => Number.isFinite(d.t) && Number.isFinite(d.p))
 
+    // 2026-10-11 (Theodore, voice): RSI line from rsi_history (5-min snapshots).
+    // Buy logic does not read this; chart-only. Aligned to the selected range.
+    const rsiRes = await db.query(`
+        SELECT rh.captured_at AS t, rh.rsi AS p
+        FROM rsi_history rh
+        JOIN stock s ON s.stock_id = rh.stock_id
+        WHERE s.name = $1
+          AND rh.captured_at >= $2
+        ORDER BY rh.captured_at`, [coin, since])
+    const rsiSeries = rsiRes.rows.map(r => ({
+        t: new Date(r.t).getTime(),
+        p: Number(r.p),
+    })).filter(d => Number.isFinite(d.t) && Number.isFinite(d.p))
+
     return {
         coin, range, source,
         prices,
@@ -170,6 +184,7 @@ async function chartData (coin, range) {
         remakes,
         buy_remakes: remakes.filter(r => r.side === 'buy_remake'),
         sell_remakes: remakes.filter(r => r.side === 'sell_remake'),
+        rsiSeries,
     }
 }
 
@@ -200,6 +215,7 @@ function renderSection () {
         Polls sells every 1 minute while this tab is open. Leave the browser window open on this machine to keep watching.
         <span class="buy-tag">● buy fill</span> <span class="sell-tag">● sell fill</span>
         <span style="color:#22c55e">✕ buy remake</span> <span style="color:#ef4444">✕ sell remake</span>
+        <span style="color:#22c55e">··· RSI&lt;50</span> <span style="color:#ef4444">··· RSI&gt;50</span>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
@@ -225,8 +241,39 @@ function renderSection () {
         })).filter(d => Number.isFinite(d.x) && Number.isFinite(d.y))
 
         function draw (data) {
+            // 2026-10-11 (Theodore, voice): one RSI series on right y1 (0–100),
+            // segment.borderColor green under 50 / red above (0bf8564 pattern).
+            // Single dataset — split series hid short runs. Points show 1-sample buckets.
+            const rsiRaw = toXY(data.rsiSeries || [])
+            const rsiColor = (y) => (y < 50 ? '#22c55e' : '#ef4444')
+            const rsiY = (ctx) => {
+                const p = ctx && ctx.p1
+                if (!p) return null
+                if (p.parsed && p.parsed.y != null) return p.parsed.y
+                if (p.raw && p.raw.y != null) return p.raw.y
+                return null
+            }
             const ds = [
                 { label: data.coin + ' price', data: toXY(data.prices), type: 'line', yAxisID: 'y', borderColor: '#60a5fa', borderWidth: 1.5, pointRadius: 0, tension: 0, order: 3 },
+                {
+                    label: 'RSI(14)',
+                    data: rsiRaw,
+                    type: 'line',
+                    yAxisID: 'y1',
+                    borderWidth: 2,
+                    pointRadius: rsiRaw.length <= 2 ? 4 : 0,
+                    pointHoverRadius: 6,
+                    pointBackgroundColor: rsiRaw.map(d => rsiColor(d.y)),
+                    pointBorderColor: rsiRaw.map(d => rsiColor(d.y)),
+                    tension: 0,
+                    order: 2,
+                    segment: {
+                        borderColor: (ctx) => {
+                            const y = rsiY(ctx)
+                            return y == null ? '#9ca3af' : rsiColor(y)
+                        },
+                    },
+                },
                 { label: 'Buy fills', data: toXY(data.buys), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#22c55e', borderColor: '#bbf7d0', pointBackgroundColor: '#22c55e', pointBorderColor: '#bbf7d0', pointRadius: 6, pointHoverRadius: 9, order: 1 },
                 { label: 'Sell fills', data: toXY(data.sells), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#ef4444', borderColor: '#fecaca', pointBackgroundColor: '#ef4444', pointBorderColor: '#fecaca', pointRadius: 6, pointHoverRadius: 9, order: 1 },
                 // 2026-10-11 (Theodore, voice): remake cancels as X by side —
@@ -244,12 +291,20 @@ function renderSection () {
                     scales: {
                         x: { type: 'time', ticks: { color: '#888' }, grid: { color: '#222' } },
                         y: { type: 'linear', position: 'left', ticks: { color: '#888' }, grid: { color: '#222' } },
+                        y1: {
+                            type: 'linear', position: 'right', min: 0, max: 100,
+                            grid: { drawOnChartArea: false },
+                            ticks: { color: '#9ca3af', callback: v => v },
+                            title: { display: true, text: 'RSI', color: '#9ca3af' },
+                        },
                     },
                     elements: { point: { pointStyle: 'circle' } },
                     plugins: {
                         legend: { labels: { color: '#ccc', usePointStyle: true } },
                         tooltip: { callbacks: { label: c => {
-                            const d = c.raw, base = c.dataset.label + ': $' + d.y
+                            const d = c.raw
+                            if (c.dataset.yAxisID === 'y1') return c.dataset.label + ': ' + Number(d.y).toFixed(2)
+                            const base = c.dataset.label + ': $' + d.y
                             return d.size != null ? base + '  size ' + d.size + '  fee $' + Number(d.fee).toFixed(4) : base
                         } } },
                         zoom: { pan: { enabled: true, mode: 'x' }, zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' } },
@@ -286,7 +341,8 @@ function renderSection () {
                 draw(data)
                 const nBuyRem = (data.buy_remakes && data.buy_remakes.length) || ((data.remakes || []).filter(r => r.side === 'buy_remake').length)
                 const nSellRem = (data.sell_remakes && data.sell_remakes.length) || ((data.remakes || []).filter(r => r.side === 'sell_remake').length)
-                status.textContent = (note ? note + ' · ' : '') + data.prices.length + ' price points · ' + data.buys.length + ' buys · ' + data.sells.length + ' sells · ' + nBuyRem + ' buy remakes · ' + nSellRem + ' sell remakes · ' + data.source
+                const nRsi = (data.rsiSeries && data.rsiSeries.length) || 0
+                status.textContent = (note ? note + ' · ' : '') + data.prices.length + ' price points · ' + data.buys.length + ' buys · ' + data.sells.length + ' sells · ' + nBuyRem + ' buy remakes · ' + nSellRem + ' sell remakes · ' + nRsi + ' RSI · ' + data.source
             } catch (e) { status.textContent = 'Error: ' + e.message }
             finally { loading = false }
         }
