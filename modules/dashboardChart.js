@@ -246,7 +246,7 @@ function renderSection () {
         <span class="rsi-os">··· RSI&lt;30</span>
         <span style="color:#fff">- - RSI 30–70</span>
         <span class="rsi-ob">··· RSI&gt;70</span>
-        <span class="dim">(RSI on right axis 0–100)</span>
+        <span class="dim">(RSI right axis; dots colored per day)</span>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
@@ -284,29 +284,39 @@ function renderSection () {
 
         function draw (data) {
             const priceXY = toXY(data.prices)
-            // RSI stays on its own 0–100 right axis (yRsi). Scaling onto the price
-            // axis made a 0–100 series look like noise near zero vs BTC~$80k — or
-            // vanish depending on zoom. Keep three-color dotted/dashed segments.
+            // One RSI series on yRsi (0–100). Color EACH segment/point by that
+            // point's RSI — splitting into 3 datasets hid short <30/>70 runs
+            // (often a single day) because Chart.js needs 2+ points to draw a
+            // line segment. Points make one-day extremes visible.
             const rsiRaw = (data.rsiSeries || []).map(d => ({ x: Number(d.t), y: Number(d.p) }))
                 .filter(d => Number.isFinite(d.x) && Number.isFinite(d.y))
-            function zoneRsi (pred) {
-                const out = []
-                for (let i = 0; i < rsiRaw.length; i++) {
-                    const ok = pred(rsiRaw[i].y)
-                    const prevOk = i > 0 && pred(rsiRaw[i - 1].y)
-                    if (ok || prevOk) out.push({ x: rsiRaw[i].x, y: rsiRaw[i].y })
-                    else out.push({ x: rsiRaw[i].x, y: null })
-                }
-                return out
-            }
-            const rsiOs = zoneRsi(y => y < 30)            // green dotted
-            const rsiMid = zoneRsi(y => y >= 30 && y <= 70) // white dashed
-            const rsiOb = zoneRsi(y => y > 70)            // red dotted
+            const rsiColor = (y) => (y < 30 ? '#22c55e' : y > 70 ? '#ef4444' : '#ffffff')
+            const rsiDash = (y) => (y >= 30 && y <= 70 ? [6, 4] : [2, 4])
             const ds = [
                 { label: data.coin + ' price', data: priceXY, type: 'line', yAxisID: 'y', borderColor: '#60a5fa', borderWidth: 1.5, pointRadius: 0, tension: 0, order: 3 },
-                { label: 'RSI <30', data: rsiOs, type: 'line', yAxisID: 'yRsi', borderColor: '#22c55e', borderWidth: 2, borderDash: [2, 4], pointRadius: 0, tension: 0, spanGaps: false, order: 2 },
-                { label: 'RSI 30–70', data: rsiMid, type: 'line', yAxisID: 'yRsi', borderColor: '#ffffff', borderWidth: 2, borderDash: [6, 4], pointRadius: 0, tension: 0, spanGaps: false, order: 2 },
-                { label: 'RSI >70', data: rsiOb, type: 'line', yAxisID: 'yRsi', borderColor: '#ef4444', borderWidth: 2, borderDash: [2, 4], pointRadius: 0, tension: 0, spanGaps: false, order: 2 },
+                {
+                    label: 'RSI(14)',
+                    data: rsiRaw,
+                    type: 'line',
+                    yAxisID: 'yRsi',
+                    borderWidth: 2,
+                    pointRadius: 4,
+                    pointHoverRadius: 6,
+                    pointBackgroundColor: rsiRaw.map(d => rsiColor(d.y)),
+                    pointBorderColor: rsiRaw.map(d => rsiColor(d.y)),
+                    tension: 0,
+                    order: 2,
+                    segment: {
+                        borderColor: (ctx) => {
+                            const y = ctx.p1.parsed.y
+                            return (y == null ? '#ffffff' : rsiColor(y))
+                        },
+                        borderDash: (ctx) => {
+                            const y = ctx.p1.parsed.y
+                            return (y == null ? [6, 4] : rsiDash(y))
+                        },
+                    },
+                },
                 { label: 'Buy fills', data: toXY(data.buys), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#22c55e', borderColor: '#bbf7d0', pointBackgroundColor: '#22c55e', pointBorderColor: '#bbf7d0', pointRadius: 6, pointHoverRadius: 9, order: 1 },
                 { label: 'Sell fills', data: toXY(data.sells), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#ef4444', borderColor: '#fecaca', pointBackgroundColor: '#ef4444', pointBorderColor: '#fecaca', pointRadius: 6, pointHoverRadius: 9, order: 1 },
                 { label: 'Cancelled remake', data: toXY(data.remakes || []), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#9ca3af', borderColor: '#6b7280', pointBackgroundColor: '#9ca3af', pointBorderColor: '#e5e7eb', pointStyle: 'crossRot', pointRadius: 7, pointHoverRadius: 10, borderWidth: 2, order: 0 },
