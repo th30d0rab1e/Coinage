@@ -119,10 +119,13 @@ async function chartData (coin, range) {
         JOIN stock s ON s.stock_id = pa.stock_id
         WHERE s.name = $1 AND pa.period_type = 'day' AND pa.close IS NOT NULL
         ORDER BY pa.period_date`, [coin])
-    const rsiSeries = wilderRsiSeries(dayCloses.rows.map(r => ({
+    const rsiSeriesAll = wilderRsiSeries(dayCloses.rows.map(r => ({
         t: new Date(r.d).getTime(),
         c: Number(r.c),
     })), 14)
+    // Same visible window as the price chart (since = range start).
+    const sinceMs = since.getTime()
+    const rsiSeries = rsiSeriesAll.filter(p => p.t >= sinceMs)
     const nowSec = Math.floor(Date.now() / 1000)
     const since = new Date((nowSec - back) * 1000)
     let prices = []
@@ -158,6 +161,45 @@ async function chartData (coin, range) {
         ORDER BY trade_time`, [coin, since])
 
     const mapFill = f => ({ t: new Date(f.t).getTime(), p: Number(f.p), size: Number(f.size), fee: Number(f.fee), order_id: f.order_id })
+    // Cancelled remake orders: each successful remake cancels the old live
+    // order then places a new one. We stamp buy_remade_price / sell_remade_price
+    // at that moment (live market), and position_audit records it — plot those
+    // as gray X markers, distinct from green buys / red sells.
+    const remakeRes = await db.query(`
+        SELECT pa.changed_at AS t,
+               pa.new_value::numeric AS p,
+               pa.column_name,
+               COALESCE(
+                   p.name,
+                   (SELECT i.new_value::jsonb->>'name'
+                    FROM position_audit i
+                    WHERE i.position_id = pa.position_id
+                      AND i.operation = 'INSERT'
+                    ORDER BY i.audit_id
+                    LIMIT 1)
+               ) AS name
+        FROM position_audit pa
+        LEFT JOIN position p ON p.position_id = pa.position_id
+        WHERE pa.column_name IN ('buy_remade_price', 'sell_remade_price')
+          AND pa.operation = 'UPDATE'
+          AND pa.changed_at >= $2
+          AND pa.new_value ~ '^[0-9.]+$'
+          AND COALESCE(
+                  p.name,
+                  (SELECT i.new_value::jsonb->>'name'
+                   FROM position_audit i
+                   WHERE i.position_id = pa.position_id
+                     AND i.operation = 'INSERT'
+                   ORDER BY i.audit_id
+                   LIMIT 1)
+              ) = $1
+        ORDER BY pa.changed_at`, [coin, since])
+    const remakes = remakeRes.rows.map(r => ({
+        t: new Date(r.t).getTime(),
+        p: Number(r.p),
+        side: r.column_name === 'sell_remade_price' ? 'sell_remake' : 'buy_remake',
+    })).filter(d => Number.isFinite(d.t) && Number.isFinite(d.p))
+
     return {
         coin, range, source,
         rsi: coinRsi == null ? null : Number(coinRsi),
@@ -165,6 +207,7 @@ async function chartData (coin, range) {
         prices,
         buys: fills.filter(f => f.side === 'BUY').map(mapFill),
         sells: fills.filter(f => f.side === 'SELL').map(mapFill),
+        remakes,
     }
 }
 
@@ -201,7 +244,7 @@ function renderSection () {
       <canvas id="pf-rsi-chart"></canvas>
     </div>
     <div class="dim" style="font-size:12px;margin-top:2px">
-      RSI(14) pane from day closes (same Wilder math as stock.rsi).
+      Separate RSI(14) panel (not overlaid on price) from day closes; same window as the price chart.
       <span class="rsi-os">● &lt;30 oversold</span>
       <span class="rsi-mid">● 30–70</span>
       <span class="rsi-ob">● &gt;70 overbought</span>
@@ -210,6 +253,7 @@ function renderSection () {
     <div class="dim" style="font-size:12px;margin-top:4px">
         Polls sells every 1 minute while this tab is open. Leave the browser window open on this machine to keep watching.
         <span class="buy-tag">● buy fill</span> <span class="sell-tag">● sell fill</span>
+        <span style="color:#9ca3af">✕ cancelled remake</span>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
@@ -250,6 +294,8 @@ function renderSection () {
                 { label: data.coin + ' price', data: toXY(data.prices), type: 'line', yAxisID: 'y', borderColor: '#60a5fa', borderWidth: 1.5, pointRadius: 0, tension: 0, order: 3 },
                 { label: 'Buy fills', data: toXY(data.buys), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#22c55e', borderColor: '#bbf7d0', pointBackgroundColor: '#22c55e', pointBorderColor: '#bbf7d0', pointRadius: 6, pointHoverRadius: 9, order: 1 },
                 { label: 'Sell fills', data: toXY(data.sells), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#ef4444', borderColor: '#fecaca', pointBackgroundColor: '#ef4444', pointBorderColor: '#fecaca', pointRadius: 6, pointHoverRadius: 9, order: 1 },
+                // Cancelled remake (old order cancelled, then replaced): gray cross
+                { label: 'Cancelled remake', data: toXY(data.remakes || []), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#9ca3af', borderColor: '#6b7280', pointBackgroundColor: '#9ca3af', pointBorderColor: '#e5e7eb', pointStyle: 'crossRot', pointRadius: 7, pointHoverRadius: 10, borderWidth: 2, order: 0 },
             ]
             if (chart) chart.destroy()
             chart = new Chart(document.getElementById('pf-chart'), {
@@ -289,14 +335,28 @@ function renderSection () {
             const canvas = document.getElementById('pf-rsi-chart')
             if (!canvas) return
             const series = toXY(data.rsiSeries || [])
-            // Color the line by last RSI zone; thresholds as dashed refs.
+            // Segment-color by zone: <30 green, >70 red, else gray (own panel, not overlay).
+            function zoneSeries (pred) {
+                const out = []
+                for (let i = 0; i < series.length; i++) {
+                    const y = series[i].y
+                    const ok = pred(y)
+                    const prevOk = i > 0 && pred(series[i - 1].y)
+                    // include boundary point so segments connect
+                    if (ok || prevOk) out.push({ x: series[i].x, y: series[i].y })
+                    else out.push({ x: series[i].x, y: null })
+                }
+                return out
+            }
+            const os = zoneSeries(y => y < 30)
+            const mid = zoneSeries(y => y >= 30 && y <= 70)
+            const ob = zoneSeries(y => y > 70)
+            const band30 = series.map(d => ({ x: d.x, y: 30 }))
+            const band70 = series.map(d => ({ x: d.x, y: 70 }))
             const last = series.length ? series[series.length - 1].y : (data.rsi != null ? Number(data.rsi) : null)
             const lineColor = (last != null && Number.isFinite(last))
                 ? (last < 30 ? '#22c55e' : last > 70 ? '#ef4444' : '#9ca3af')
                 : '#9ca3af'
-            const band30 = series.map(d => ({ x: d.x, y: 30 }))
-            const band70 = series.map(d => ({ x: d.x, y: 70 }))
-            // Flat current stock.rsi marker across the pane when we have points
             const cur = (data.rsi != null && Number.isFinite(Number(data.rsi)) && series.length)
                 ? series.map(d => ({ x: d.x, y: Number(data.rsi) }))
                 : []
@@ -305,10 +365,12 @@ function renderSection () {
                 type: 'line',
                 data: {
                     datasets: [
-                        { label: 'RSI 70', data: band70, borderColor: 'rgba(239,68,68,0.45)', borderWidth: 1, borderDash: [4,4], pointRadius: 0, tension: 0, order: 3 },
-                        { label: 'RSI 30', data: band30, borderColor: 'rgba(34,197,94,0.45)', borderWidth: 1, borderDash: [4,4], pointRadius: 0, tension: 0, order: 3 },
-                        { label: 'stock.rsi', data: cur, borderColor: lineColor, borderWidth: 1, borderDash: [2,2], pointRadius: 0, tension: 0, order: 2 },
-                        { label: 'RSI(14)', data: series, borderColor: lineColor, borderWidth: 1.5, pointRadius: 0, tension: 0, order: 1 },
+                        { label: 'RSI 70', data: band70, borderColor: 'rgba(239,68,68,0.45)', borderWidth: 1, borderDash: [4,4], pointRadius: 0, tension: 0, order: 4, spanGaps: false },
+                        { label: 'RSI 30', data: band30, borderColor: 'rgba(34,197,94,0.45)', borderWidth: 1, borderDash: [4,4], pointRadius: 0, tension: 0, order: 4, spanGaps: false },
+                        { label: 'stock.rsi', data: cur, borderColor: lineColor, borderWidth: 1, borderDash: [2,2], pointRadius: 0, tension: 0, order: 3 },
+                        { label: 'RSI oversold', data: os, borderColor: '#22c55e', borderWidth: 1.5, pointRadius: 0, tension: 0, order: 1, spanGaps: false },
+                        { label: 'RSI neutral', data: mid, borderColor: '#9ca3af', borderWidth: 1.5, pointRadius: 0, tension: 0, order: 1, spanGaps: false },
+                        { label: 'RSI overbought', data: ob, borderColor: '#ef4444', borderWidth: 1.5, pointRadius: 0, tension: 0, order: 1, spanGaps: false },
                     ]
                 },
                 options: {
