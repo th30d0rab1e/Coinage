@@ -72,11 +72,57 @@ async function coinbaseCandles (coin, startSec, endSec, gran) {
     return out.sort((a, b) => a.t - b.t)
 }
 
+
+// Wilder RSI series for the chart pane (period default 14). Input: [{t,c}, ...]
+// ordered by time. First `period` changes seed SMA; then Wilder smooth.
+// Returns [{t, p}] (p = RSI). Skips until enough history.
+function wilderRsiSeries (closes, period = 14) {
+    const out = []
+    if (!closes || closes.length < period + 1) return out
+    let prev = closes[0].c
+    let sumGain = 0, sumLoss = 0, avgGain = 0, avgLoss = 0, n = 0
+    for (let i = 1; i < closes.length; i++) {
+        const change = closes[i].c - prev
+        prev = closes[i].c
+        n++
+        const gain = Math.max(change, 0)
+        const loss = Math.max(-change, 0)
+        if (n <= period) {
+            sumGain += gain
+            sumLoss += loss
+            if (n < period) continue
+            avgGain = sumGain / period
+            avgLoss = sumLoss / period
+        } else {
+            avgGain = (avgGain * (period - 1) + gain) / period
+            avgLoss = (avgLoss * (period - 1) + loss) / period
+        }
+        let rsi
+        if (avgLoss === 0 && avgGain === 0) rsi = 50
+        else if (avgLoss === 0) rsi = 100
+        else rsi = 100 - 100 / (1 + avgGain / avgLoss)
+        out.push({ t: closes[i].t, p: Math.round(rsi * 10000) / 10000 })
+    }
+    return out
+}
+
 async function chartData (coin, range) {
     const [back, gran] = RANGES[range] || RANGES['7d']
-    // 2026-10-11 (Theodore, voice): stock.rsi for selected-coin detail.
+    // 2026-10-11 (Theodore, voice): stock.rsi (current) + day-close RSI series for the pane.
+    // Series is Wilder(14) over price_aggregate day closes — same math as fn_stock_rsi;
+    // latest point should match stock.rsi when day history is what aggregate() used.
     const rsiRes = await db.query(`SELECT rsi FROM stock WHERE name = $1`, [coin])
     const coinRsi = rsiRes.rows[0] ? rsiRes.rows[0].rsi : null
+    const dayCloses = await db.query(`
+        SELECT pa.period_date AS d, pa.close::float8 AS c
+        FROM price_aggregate pa
+        JOIN stock s ON s.stock_id = pa.stock_id
+        WHERE s.name = $1 AND pa.period_type = 'day' AND pa.close IS NOT NULL
+        ORDER BY pa.period_date`, [coin])
+    const rsiSeries = wilderRsiSeries(dayCloses.rows.map(r => ({
+        t: new Date(r.d).getTime(),
+        c: Number(r.c),
+    })), 14)
     const nowSec = Math.floor(Date.now() / 1000)
     const since = new Date((nowSec - back) * 1000)
     let prices = []
@@ -115,6 +161,7 @@ async function chartData (coin, range) {
     return {
         coin, range, source,
         rsi: coinRsi == null ? null : Number(coinRsi),
+        rsiSeries,
         prices,
         buys: fills.filter(f => f.side === 'BUY').map(mapFill),
         sells: fills.filter(f => f.side === 'SELL').map(mapFill),
@@ -150,6 +197,16 @@ function renderSection () {
         <span id="pf-status" class="dim"></span>
     </div>
     <div style="position:relative;height:420px;background:#151515;border-radius:8px;padding:8px"><canvas id="pf-chart"></canvas></div>
+    <div style="position:relative;height:160px;background:#151515;border-radius:8px;padding:8px;margin-top:8px">
+      <canvas id="pf-rsi-chart"></canvas>
+    </div>
+    <div class="dim" style="font-size:12px;margin-top:2px">
+      RSI(14) pane from day closes (same Wilder math as stock.rsi).
+      <span class="rsi-os">● &lt;30 oversold</span>
+      <span class="rsi-mid">● 30–70</span>
+      <span class="rsi-ob">● &gt;70 overbought</span>
+      — dashed lines at 30 / 70
+    </div>
     <div class="dim" style="font-size:12px;margin-top:4px">
         Polls sells every 1 minute while this tab is open. Leave the browser window open on this machine to keep watching.
         <span class="buy-tag">● buy fill</span> <span class="sell-tag">● sell fill</span>
@@ -175,7 +232,7 @@ function renderSection () {
             const cls = n < 30 ? 'rsi-os' : n > 70 ? 'rsi-ob' : 'rsi-mid'
             rsiBadge.innerHTML = 'RSI <span class="' + cls + '">' + n.toFixed(2) + '</span>'
         }
-        let chart = null, current = null, lastSellKey = null, loading = false
+        let chart = null, rsiChart = null, current = null, lastSellKey = null, loading = false
         const POLL_MS = 60000
         // Coerce numbers: node/JSON can leave price as string; Chart.js then
         // mis-scales scatter datasets vs the time/line series (markers pin to
@@ -227,6 +284,58 @@ function renderSection () {
             }
         }
 
+
+        function drawRsi (data) {
+            const canvas = document.getElementById('pf-rsi-chart')
+            if (!canvas) return
+            const series = toXY(data.rsiSeries || [])
+            // Color the line by last RSI zone; thresholds as dashed refs.
+            const last = series.length ? series[series.length - 1].y : (data.rsi != null ? Number(data.rsi) : null)
+            const lineColor = (last != null && Number.isFinite(last))
+                ? (last < 30 ? '#22c55e' : last > 70 ? '#ef4444' : '#9ca3af')
+                : '#9ca3af'
+            const band30 = series.map(d => ({ x: d.x, y: 30 }))
+            const band70 = series.map(d => ({ x: d.x, y: 70 }))
+            // Flat current stock.rsi marker across the pane when we have points
+            const cur = (data.rsi != null && Number.isFinite(Number(data.rsi)) && series.length)
+                ? series.map(d => ({ x: d.x, y: Number(data.rsi) }))
+                : []
+            if (rsiChart) rsiChart.destroy()
+            rsiChart = new Chart(canvas, {
+                type: 'line',
+                data: {
+                    datasets: [
+                        { label: 'RSI 70', data: band70, borderColor: 'rgba(239,68,68,0.45)', borderWidth: 1, borderDash: [4,4], pointRadius: 0, tension: 0, order: 3 },
+                        { label: 'RSI 30', data: band30, borderColor: 'rgba(34,197,94,0.45)', borderWidth: 1, borderDash: [4,4], pointRadius: 0, tension: 0, order: 3 },
+                        { label: 'stock.rsi', data: cur, borderColor: lineColor, borderWidth: 1, borderDash: [2,2], pointRadius: 0, tension: 0, order: 2 },
+                        { label: 'RSI(14)', data: series, borderColor: lineColor, borderWidth: 1.5, pointRadius: 0, tension: 0, order: 1 },
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false, animation: false, parsing: false,
+                    interaction: { mode: 'nearest', intersect: false },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: (ctx) => {
+                                    const y = ctx.parsed.y
+                                    if (y == null) return ctx.dataset.label
+                                    const zone = y < 30 ? 'oversold' : y > 70 ? 'overbought' : 'neutral'
+                                    return ctx.dataset.label + ': ' + Number(y).toFixed(2) + ' (' + zone + ')'
+                                }
+                            }
+                        },
+                        zoom: { pan: { enabled: true, mode: 'x' }, zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' } },
+                    },
+                    scales: {
+                        x: { type: 'time', time: { tooltipFormat: 'MMM d, yyyy' }, grid: { color: '#222' }, ticks: { color: '#888', maxRotation: 0 } },
+                        y: { min: 0, max: 100, grid: { color: '#222' }, ticks: { color: '#888', stepSize: 10 }, title: { display: true, text: 'RSI', color: '#888' } },
+                    },
+                },
+            })
+        }
+
         async function load (coin, note) {
             if (!coin || loading) return
             loading = true
@@ -242,6 +351,7 @@ function renderSection () {
                 const data = await r.json()
                 if (data.error) throw new Error(data.error)
                 draw(data)
+                drawRsi(data)
                 const coinMeta = allCoins.find(x => x.name === coin)
                 const rsiVal = (coinMeta && coinMeta.rsi != null && coinMeta.rsi !== '')
                     ? Number(coinMeta.rsi)
@@ -288,7 +398,10 @@ function renderSection () {
         })
         rangeSel.addEventListener('change', () => { if (current) load(current) })
         autoFollow.addEventListener('change', () => { if (autoFollow.checked) pollLatestSell() })
-        document.getElementById('pf-reset').addEventListener('click', () => chart && chart.resetZoom())
+        document.getElementById('pf-reset').addEventListener('click', () => {
+            if (chart) chart.resetZoom()
+            if (rsiChart) rsiChart.resetZoom()
+        })
 
         const searchBox = document.getElementById('pf-coin-search')
         let allCoins = []
