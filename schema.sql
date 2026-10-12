@@ -30,6 +30,12 @@ CREATE PROCEDURE public.aggregate()
 DELETE FROM price_history
 WHERE date_created < NOW() - INTERVAL '25 hours';
 
+-- 2026-10-11 (Theodore, voice): rsi_history retention — drop snapshots older
+-- than 30 days. Same minute-ly aggregate() cycle as price_history cleanup.
+-- Capture interval stays 5 minutes; buy logic unchanged.
+DELETE FROM rsi_history
+WHERE captured_at < NOW() - INTERVAL '30 days';
+
 DELETE FROM price_aggregate
 WHERE period_date < NOW() - INTERVAL '31 days'
 AND period_type = 'day';

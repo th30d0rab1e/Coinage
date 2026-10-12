@@ -15,7 +15,7 @@ CREATE INDEX IF NOT EXISTS rsi_history_captured_idx
     ON public.rsi_history (captured_at DESC);
 
 COMMENT ON TABLE public.rsi_history IS
-    'Snapshots of stock.rsi (Wilder 14) for history/charting. One row per stock per 5-minute bucket. Buy logic does not read this table.';
+    'Snapshots of stock.rsi (Wilder 14) for history/charting. One row per stock per 5-minute bucket. Rows older than 30 days are deleted in aggregate(). Buy logic does not read this table.';
 COMMENT ON COLUMN public.rsi_history.rsi IS
     'Copy of stock.rsi at captured_at (5-minute floor of NOW()).';
 COMMENT ON COLUMN public.rsi_history.captured_at IS
