@@ -25,17 +25,20 @@ const PROFIT_HISTORY_24H_QUERY = `
     SELECT ph.name, ph.period_type,
         (pa.old_value::jsonb ->> 'buy_filled_price') AS buy_price,
         (pa.old_value::jsonb ->> 'sell_filled_price') AS sell_price,
-        ph.buy_fee, ph.sell_fee, ph.profit, ph.date_created
+        ph.buy_fee, ph.sell_fee, ph.profit, ph.date_created,
+        s.rsi
     FROM profit_history ph
     LEFT JOIN position_audit pa ON pa.operation = 'DELETE'
         AND (pa.old_value::jsonb ->> 'buy_coinbase_order_id') = ph.buy_coinbase_order_id
         AND (pa.old_value::jsonb ->> 'sell_coinbase_order_id') = ph.sell_fills_id
+    LEFT JOIN stock s ON s.name = ph.name
     WHERE ph.date_created > NOW() - INTERVAL '24 hours'
     ORDER BY ph.date_created DESC
 `
 
 const OPEN_BUY_ORDERS_QUERY = `
     SELECT p.name, p.shares, p.buy_price, p.buy_stop_price, s.price AS current_price,
+        s.rsi,
         ROUND(((p.buy_stop_price - s.price) / NULLIF(s.price, 0) * 100)::numeric, 4) AS pct_to_trigger,
         p.error_message, p.date_created
     FROM position p
@@ -47,7 +50,7 @@ const OPEN_BUY_ORDERS_QUERY = `
 
 const OPEN_POSITIONS_QUERY = `
     SELECT p.name, p.shares,
-        p.buy_filled_price, s.price AS current_price, p.sell_price AS sell_target,
+        p.buy_filled_price, s.price AS current_price, s.rsi, p.sell_price AS sell_target,
         p.sell_stop_price,
         ROUND(((p.sell_stop_price::numeric - s.price::numeric) / NULLIF(s.price::numeric, 0) * 100)::numeric, 4) AS sell_pct_to_trigger,
         p.sell_coinbase_order_id IS NOT NULL AND p.sell_coinbase_order_id != '' AS has_live_sell,
@@ -79,6 +82,7 @@ const SOLD_POSITIONS_QUERY = `
            p.sell_filled_price AS sell_fill_price,
            p.sell_price AS sell_target,
            p.sell_stop_price,
+           s.rsi,
            (
                (p.sell_filled_price::numeric * p.shares::numeric - COALESCE(p.sell_fee::numeric, 0))
                - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0))
@@ -86,6 +90,7 @@ const SOLD_POSITIONS_QUERY = `
            p.date_created AS closed_at,
            p.error_message
     FROM position p
+    LEFT JOIN stock s ON s.stock_id = p.stock_id
     WHERE p.sell_filled_price IS NOT NULL
     ORDER BY p.date_created DESC
 `
@@ -95,17 +100,29 @@ const RECENT_FILLS_QUERY = `
     -- when a position closes, so closed coins like ABT-USD vanished from
     -- "Last 100 Fills" even though the trades still exist in fills.
     -- 2026-10-11: also show size (shares) and fee — both live on fills.
-    SELECT product_id AS name,
-           side AS fill_type,
-           price,
-           size,
-           fee,
-           trade_time AS changed_at
-    FROM fills
-    ORDER BY trade_time DESC
+    -- 2026-10-11 (Theodore, voice): RSI from stock.rsi (Wilder 14).
+    SELECT f.product_id AS name,
+           f.side AS fill_type,
+           f.price,
+           f.size,
+           f.fee,
+           f.trade_time AS changed_at,
+           s.rsi
+    FROM fills f
+    LEFT JOIN stock s ON s.name = f.product_id
+    ORDER BY f.trade_time DESC
     LIMIT 100
 `
 
+function rsiFmt (v) {
+    // 2026-10-11 (Theodore, voice): stock.rsi Wilder 14 — color by zone.
+    // < 30 oversold (green), > 70 overbought (red), else neutral (dim).
+    if (v == null || v === '') return '—'
+    const n = Number(v)
+    if (!Number.isFinite(n)) return '—'
+    const cls = n < 30 ? 'rsi-os' : n > 70 ? 'rsi-ob' : 'rsi-mid'
+    return `<span class="${cls}">${n.toFixed(2)}</span>`
+}
 function money (value) {
     if (value === null || value === undefined || value === '') return '—'
     const n = parseFloat(value)
@@ -148,6 +165,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     const historyRows = profitHistory24h.map(r => `
         <tr data-coin="${esc(r.name)}">
             <td>${esc(r.name)}</td>
+            <td>${rsiFmt(r.rsi)}</td>
             <td>${esc(r.period_type)}</td>
             <td>${num(r.buy_price)}</td>
             <td>${num(r.sell_price)}</td>
@@ -169,6 +187,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
         <tr data-coin="${esc(r.name)}">
             <td class="buy-l"><span class="kind-buying">buying</span></td>
             <td class="buy-m">${esc(r.name)}</td>
+            <td class="buy-m">${rsiFmt(r.rsi)}</td>
             <td class="buy-m">${num(r.shares)}</td>
             <td class="buy-m dim">—</td>
             <td class="buy-m">${money(buyCost)}</td>
@@ -193,6 +212,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
         <tr data-coin="${esc(r.name)}">
             <td class="buy-l"><span class="${kindClass}">${kind}</span></td>
             <td class="buy-m">${esc(r.name)}</td>
+            <td class="buy-m">${rsiFmt(r.rsi)}</td>
             <td class="buy-m">${num(r.shares)}</td>
             <td class="buy-m">${num(r.buy_filled_price)}</td>
             <td class="buy-m">${money(buyCost)}</td>
@@ -215,6 +235,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
         <tr data-coin="${esc(r.name)}">
             <td class="buy-l"><span class="kind-sold">sold</span></td>
             <td class="buy-m">${esc(r.name)}</td>
+            <td class="buy-m">${rsiFmt(r.rsi)}</td>
             <td class="buy-m">${num(r.shares)}</td>
             <td class="buy-m">${num(r.buy_filled_price)}</td>
             <td class="buy-m">${money(buyCost)}</td>
@@ -239,6 +260,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     const fillRows = recentFills.map(r => `
         <tr data-coin="${esc(r.name)}">
             <td>${esc(r.name)}</td>
+            <td>${rsiFmt(r.rsi)}</td>
             <td class="${r.fill_type === 'BUY' ? 'buy-tag' : 'sell-tag'}">${r.fill_type}</td>
             <td>${num(r.price)}</td>
             <td>${num(r.size)}</td>
@@ -272,6 +294,9 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     .kind-bought { color: #4ade80; }
     .kind-selling { color: #fbbf24; }
     .kind-sold { color: #a78bfa; }
+    .rsi-os { color: #22c55e; font-weight: 600; }   /* RSI < 30 oversold */
+    .rsi-ob { color: #ef4444; font-weight: 600; }   /* RSI > 70 overbought */
+    .rsi-mid { color: #9ca3af; }                    /* 30–70 neutral */
     /* Square outlines (border-radius: 0) around buy / sell column blocks */
     table.coin-filter { border-collapse: separate; border-spacing: 0; }
     th.buy-l, td.buy-l { border-left: 2px solid #22c55e !important; }
@@ -317,20 +342,20 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     ${pfChart.renderSection()}
 
     <h2 id="h-positions">Position (${positionTotal})</h2>
-    <table class="coin-filter" data-title="Position" data-total="${positionTotal}" data-colspan="16">
+    <table class="coin-filter" data-title="Position" data-total="${positionTotal}" data-colspan="17">
         <tr>
-            <th class="buy-l">Kind</th><th class="buy-m">Coin</th><th class="buy-m">Shares</th><th class="buy-m">Bought @</th><th class="buy-m">Value</th><th class="buy-m">Buy Limit</th><th class="buy-m">Buy Stop</th><th class="buy-r">Buy % to Trigger</th>
+            <th class="buy-l">Kind</th><th class="buy-m">Coin</th><th class="buy-m">RSI</th><th class="buy-m">Shares</th><th class="buy-m">Bought @</th><th class="buy-m">Value</th><th class="buy-m">Buy Limit</th><th class="buy-m">Buy Stop</th><th class="buy-r">Buy % to Trigger</th>
             <th>Current</th>
             <th class="sell-l">Limit Price</th><th class="sell-m">Stop Price</th><th class="sell-m">Sell % to Trigger</th><th class="sell-m">Sell Order</th><th class="sell-m">Current Profit</th><th class="sell-r">Target Profit</th>
             <th>Error</th>
         </tr>
-        ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="16">No buying / bought / selling / sold rows</td></tr>'}
+        ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="17">No buying / bought / selling / sold rows</td></tr>'}
     </table>
 
     <h2 id="h-fills">Last 100 Fills</h2>
-    <table class="coin-filter" data-title="Last 100 Fills" data-total="${recentFills.length}" data-colspan="6">
-        <tr><th>Coin</th><th>Type</th><th>Price</th><th>Shares</th><th>Fee</th><th>When</th></tr>
-        ${fillRows || '<tr class="coin-filter-empty"><td class="empty" colspan="6">No fills recorded</td></tr>'}
+    <table class="coin-filter" data-title="Last 100 Fills" data-total="${recentFills.length}" data-colspan="7">
+        <tr><th>Coin</th><th>RSI</th><th>Type</th><th>Price</th><th>Shares</th><th>Fee</th><th>When</th></tr>
+        ${fillRows || '<tr class="coin-filter-empty"><td class="empty" colspan="7">No fills recorded</td></tr>'}
     </table>
 
     <h2>Profit Summary</h2>
@@ -345,9 +370,9 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     </table>
 
     <h2 id="h-history">Profit History — Last 24 Hours (${profitHistory24h.length})</h2>
-    <table class="coin-filter" data-title="Profit History — Last 24 Hours" data-total="${profitHistory24h.length}" data-colspan="8">
+    <table class="coin-filter" data-title="Profit History — Last 24 Hours" data-total="${profitHistory24h.length}" data-colspan="9">
         <tr>
-            <th>Coin</th><th>Period</th><th>Buy Price</th><th>Sell Price</th>
+            <th>Coin</th><th>RSI</th><th>Period</th><th>Buy Price</th><th>Sell Price</th>
             <th>Buy Fee</th><th>Sell Fee</th><th>Profit</th><th>When</th>
         </tr>
         ${historyRows || '<tr class="coin-filter-empty"><td class="empty" colspan="8">No trades in the last 24 hours</td></tr>'}

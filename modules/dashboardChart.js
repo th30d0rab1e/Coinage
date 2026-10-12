@@ -23,6 +23,7 @@ const RANGES = {
 async function listCoins () {
     const { rows } = await db.query(`
         SELECT name,
+               rsi,
                0::int AS fill_count,
                NULL::timestamptz AS last_fill
         FROM stock
@@ -73,6 +74,9 @@ async function coinbaseCandles (coin, startSec, endSec, gran) {
 
 async function chartData (coin, range) {
     const [back, gran] = RANGES[range] || RANGES['7d']
+    // 2026-10-11 (Theodore, voice): stock.rsi for selected-coin detail.
+    const rsiRes = await db.query(`SELECT rsi FROM stock WHERE name = $1`, [coin])
+    const coinRsi = rsiRes.rows[0] ? rsiRes.rows[0].rsi : null
     const nowSec = Math.floor(Date.now() / 1000)
     const since = new Date((nowSec - back) * 1000)
     let prices = []
@@ -110,6 +114,7 @@ async function chartData (coin, range) {
     const mapFill = f => ({ t: new Date(f.t).getTime(), p: Number(f.p), size: Number(f.size), fee: Number(f.fee), order_id: f.order_id })
     return {
         coin, range, source,
+        rsi: coinRsi == null ? null : Number(coinRsi),
         prices,
         buys: fills.filter(f => f.side === 'BUY').map(mapFill),
         sells: fills.filter(f => f.side === 'SELL').map(mapFill),
@@ -121,6 +126,11 @@ function renderSection () {
     // 2026-10-11: auto-follow the coin of the latest SELL fill (poll /api/latest-sell).
     // Dropdown remains a manual override; a newer sell jumps the chart again.
     return `
+    <style>
+      .rsi-os { color: #22c55e; font-weight: 600; }
+      .rsi-ob { color: #ef4444; font-weight: 600; }
+      .rsi-mid { color: #9ca3af; }
+    </style>
     <h2>Price &amp; Fills Chart</h2>
     <div id="pf-controls" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;font-size:13px">
         <label for="pf-coin-search" class="dim">Search</label>
@@ -136,6 +146,7 @@ function renderSection () {
         </label>
         <select id="pf-range" style="background:#1a1a1a;color:#ddd;border:1px solid #333;border-radius:6px;padding:6px">${ranges}</select>
         <button id="pf-reset" style="background:#333;color:#ddd;border:0;border-radius:6px;padding:6px 10px">Reset zoom</button>
+        <span id="pf-rsi" class="dim" title="Wilder RSI(14) from stock.rsi"></span>
         <span id="pf-status" class="dim"></span>
     </div>
     <div style="position:relative;height:420px;background:#151515;border-radius:8px;padding:8px"><canvas id="pf-chart"></canvas></div>
@@ -153,6 +164,17 @@ function renderSection () {
         const rangeSel = document.getElementById('pf-range')
         const autoFollow = document.getElementById('pf-autofollow')
         const status = document.getElementById('pf-status')
+        const rsiBadge = document.getElementById('pf-rsi')
+        function paintRsi (v) {
+            if (!rsiBadge) return
+            if (v == null || v === '' || !Number.isFinite(Number(v))) {
+                rsiBadge.innerHTML = ''
+                return
+            }
+            const n = Number(v)
+            const cls = n < 30 ? 'rsi-os' : n > 70 ? 'rsi-ob' : 'rsi-mid'
+            rsiBadge.innerHTML = 'RSI <span class="' + cls + '">' + n.toFixed(2) + '</span>'
+        }
         let chart = null, current = null, lastSellKey = null, loading = false
         const POLL_MS = 60000
         // Coerce numbers: node/JSON can leave price as string; Chart.js then
@@ -220,7 +242,15 @@ function renderSection () {
                 const data = await r.json()
                 if (data.error) throw new Error(data.error)
                 draw(data)
-                status.textContent = (note ? note + ' · ' : '') + data.prices.length + ' price points · ' + data.buys.length + ' buys · ' + data.sells.length + ' sells · ' + data.source
+                const coinMeta = allCoins.find(x => x.name === coin)
+                const rsiVal = (coinMeta && coinMeta.rsi != null && coinMeta.rsi !== '')
+                    ? Number(coinMeta.rsi)
+                    : (data.rsi != null ? Number(data.rsi) : null)
+                const rsiHtml = (rsiVal != null && Number.isFinite(rsiVal))
+                    ? (' · RSI <span class="' + (rsiVal < 30 ? 'rsi-os' : rsiVal > 70 ? 'rsi-ob' : 'rsi-mid') + '">' + rsiVal.toFixed(2) + '</span>')
+                    : ''
+                paintRsi(rsiVal)
+                status.innerHTML = (note ? note + ' · ' : '') + data.prices.length + ' price points · ' + data.buys.length + ' buys · ' + data.sells.length + ' sells · ' + data.source + rsiHtml
             } catch (e) { status.textContent = 'Error: ' + e.message }
             finally { loading = false }
         }
@@ -230,6 +260,7 @@ function renderSection () {
             coinSel.value = ''
             if (chart) { chart.destroy(); chart = null }
             emitFilter(null)
+            paintRsi(null)
             status.textContent = (note ? note + ' · ' : '') + 'All coins — tables unfiltered'
         }
 
@@ -271,7 +302,8 @@ function renderSection () {
             })).sort((a, b) => a.name.localeCompare(b.name))
             // All always first, then coins A-Z.
             coinSel.innerHTML = '<option value="">All</option>' + matched.map(c => {
-                const label = c.fill_count ? (c.name + ' (' + c.fill_count + ' fills)') : c.name
+                const rsiBit = (c.rsi == null || c.rsi === '') ? '' : (' · RSI ' + Number(c.rsi).toFixed(2))
+                const label = c.name + rsiBit
                 return '<option value="' + c.name + '">' + label + '</option>'
             }).join('')
             // Keep selection if still in the filtered list; else stay on All.
