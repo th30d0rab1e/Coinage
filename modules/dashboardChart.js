@@ -246,7 +246,7 @@ function renderSection () {
         <span class="rsi-os">··· RSI&lt;30</span>
         <span style="color:#fff">- - RSI 30–70</span>
         <span class="rsi-ob">··· RSI&gt;70</span>
-        <span class="dim">(RSI right axis; dots colored per day)</span>
+        <span class="dim">(RSI right axis; guides at 70 / 50 / 30)</span>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
@@ -292,6 +292,10 @@ function renderSection () {
                 .filter(d => Number.isFinite(d.x) && Number.isFinite(d.y))
             const rsiColor = (y) => (y < 30 ? '#22c55e' : y > 70 ? '#ef4444' : '#ffffff')
             const rsiDash = (y) => (y >= 30 && y <= 70 ? [6, 4] : [2, 4])
+            const xSpan = [...priceXY.map(d => d.x), ...rsiRaw.map(d => d.x)].filter(Number.isFinite)
+            const xMin = xSpan.length ? Math.min(...xSpan) : null
+            const xMax = xSpan.length ? Math.max(...xSpan) : null
+            const rsiGuide = (level) => (xMin == null ? [] : [{ x: xMin, y: level }, { x: xMax, y: level }])
             const ds = [
                 { label: data.coin + ' price', data: priceXY, type: 'line', yAxisID: 'y', borderColor: '#60a5fa', borderWidth: 1.5, pointRadius: 0, tension: 0, order: 3 },
                 {
@@ -317,6 +321,10 @@ function renderSection () {
                         },
                     },
                 },
+                // Fixed RSI threshold guides on yRsi (full visible X span).
+                { label: 'RSI 70', data: rsiGuide(70), type: 'line', yAxisID: 'yRsi', borderColor: '#ef4444', borderWidth: 1.5, borderDash: [6, 4], pointRadius: 0, tension: 0, order: 4 },
+                { label: 'RSI 50', data: rsiGuide(50), type: 'line', yAxisID: 'yRsi', borderColor: '#ffffff', borderWidth: 1.25, borderDash: [4, 4], pointRadius: 0, tension: 0, order: 4 },
+                { label: 'RSI 30', data: rsiGuide(30), type: 'line', yAxisID: 'yRsi', borderColor: '#22c55e', borderWidth: 1.5, borderDash: [6, 4], pointRadius: 0, tension: 0, order: 4 },
                 { label: 'Buy fills', data: toXY(data.buys), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#22c55e', borderColor: '#bbf7d0', pointBackgroundColor: '#22c55e', pointBorderColor: '#bbf7d0', pointRadius: 6, pointHoverRadius: 9, order: 1 },
                 { label: 'Sell fills', data: toXY(data.sells), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#ef4444', borderColor: '#fecaca', pointBackgroundColor: '#ef4444', pointBorderColor: '#fecaca', pointRadius: 6, pointHoverRadius: 9, order: 1 },
                 { label: 'Cancelled remake', data: toXY(data.remakes || []), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#9ca3af', borderColor: '#6b7280', pointBackgroundColor: '#9ca3af', pointBorderColor: '#e5e7eb', pointStyle: 'crossRot', pointRadius: 7, pointHoverRadius: 10, borderWidth: 2, order: 0 },
