@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict Y8YQJFfcChyX9t5oBpTK0LfGZB2OCdDCUpjWUrcedpKOfr6lHaoQwmQD4q7FEJZ
+\restrict TiUyUGuPbDeuUah9ehdpfsTUJhHsbdexfWOynDOBI7faB9eSXyOGrKkwhA0Zxpa
 
 -- Dumped from database version 17.9 (Homebrew)
 -- Dumped by pg_dump version 17.9 (Homebrew)
@@ -218,17 +218,19 @@ FROM (
 WHERE pat.stock_id = x.stock_id
 AND pat.period_type = x.period_type;
 
--- 2026-10-11: RSI(14) on price_aggregate (Wilder, from close; see
--- db/procedures/fn_price_aggregate_rsi.sql). Runs after the day/month/year
--- closes above are refreshed. Writes rows still NULL (new rows, or rows that
--- just reached 15 closes) and the current day/month/year row, whose close
--- moves every minute. Closed periods keep the value they were given.
-UPDATE price_aggregate pa
+-- 2026-10-11: stock.rsi = Wilder RSI(14) from price_aggregate DAY closes
+-- (see db/procedures/fn_stock_rsi.sql). Runs after the day closes above are
+-- refreshed, so the current day's close counts. price_aggregate is input only;
+-- nothing here writes RSI to it. Stocks with under 15 day closes go to NULL.
+UPDATE stock s
 SET rsi = r.out_rsi
-FROM fn_price_aggregate_rsi(14) r
-WHERE pa.price_aggregate_id = r.out_price_aggregate_id
-AND (pa.rsi IS NULL OR pa.period_date = DATE_TRUNC(pa.period_type, NOW())::DATE)
-AND pa.rsi IS DISTINCT FROM r.out_rsi;
+FROM (
+    SELECT st.stock_id, fr.out_rsi
+    FROM stock st
+    LEFT JOIN fn_stock_rsi(14) fr ON fr.out_stock_id = st.stock_id
+) r
+WHERE s.stock_id = r.stock_id
+AND s.rsi IS DISTINCT FROM r.out_rsi;
 
 $$;
 
@@ -263,32 +265,44 @@ COMMENT ON FUNCTION public.fn_buy_below_paid(p_stop numeric, p_limit numeric, p_
 
 
 --
--- Name: fn_price_aggregate_rsi(integer); Type: FUNCTION; Schema: public; Owner: -
+-- Name: fn_stock_rsi(integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.fn_price_aggregate_rsi(p_period integer DEFAULT 14) RETURNS TABLE(out_price_aggregate_id integer, out_rsi numeric)
+CREATE FUNCTION public.fn_stock_rsi(p_period integer DEFAULT 14) RETURNS TABLE(out_stock_id integer, out_rsi numeric)
     LANGUAGE plpgsql STABLE
     AS $$
 DECLARE
     r          record;
-    series_key text;
+    cur_stock  integer;
     prev_close double precision;
-    n          integer;           -- changes seen so far in this series
+    n          integer;           -- changes seen so far for cur_stock
     sum_gain   double precision;
     sum_loss   double precision;
     avg_gain   double precision;
     avg_loss   double precision;
     change     double precision;
+
 BEGIN
     FOR r IN
-        SELECT pa.price_aggregate_id, pa.stock_id, pa.period_type, pa.close
+        SELECT pa.stock_id, pa.close
         FROM price_aggregate pa
-        WHERE pa.close IS NOT NULL
-        ORDER BY pa.stock_id, pa.period_type, pa.period_date
+        WHERE pa.period_type = 'day'
+        AND pa.close IS NOT NULL
+        ORDER BY pa.stock_id, pa.period_date
     LOOP
-        -- New series: first close is only the baseline for the next change.
-        IF series_key IS DISTINCT FROM r.stock_id || '|' || r.period_type THEN
-            series_key := r.stock_id || '|' || r.period_type;
+        IF cur_stock IS DISTINCT FROM r.stock_id THEN
+            -- Finish the previous stock: its last computed RSI is the latest.
+            IF cur_stock IS NOT NULL AND n >= p_period THEN
+                out_stock_id := cur_stock;
+                out_rsi := CASE
+                    WHEN avg_loss = 0 AND avg_gain = 0 THEN 50
+                    WHEN avg_loss = 0 THEN 100
+                    ELSE ROUND((100 - 100 / (1 + avg_gain / avg_loss))::numeric, 4)
+                END;
+                RETURN NEXT;
+            END IF;
+            -- New stock: first close is only the baseline for the next change.
+            cur_stock := r.stock_id;
             prev_close := r.close;
             n := 0; sum_gain := 0; sum_loss := 0;
             CONTINUE;
@@ -299,35 +313,39 @@ BEGIN
         n := n + 1;
 
         IF n <= p_period THEN
-            -- Seed window: accumulate, first RSI lands on change #p_period.
+            -- Seed window: accumulate, first averages land on change #p_period.
             sum_gain := sum_gain + GREATEST(change, 0);
             sum_loss := sum_loss + GREATEST(-change, 0);
-            IF n < p_period THEN CONTINUE; END IF;
-            avg_gain := sum_gain / p_period;
-            avg_loss := sum_loss / p_period;
+            IF n = p_period THEN
+                avg_gain := sum_gain / p_period;
+                avg_loss := sum_loss / p_period;
+            END IF;
         ELSE
             -- Wilder smoothing.
             avg_gain := (avg_gain * (p_period - 1) + GREATEST(change, 0)) / p_period;
             avg_loss := (avg_loss * (p_period - 1) + GREATEST(-change, 0)) / p_period;
         END IF;
+    END LOOP;
 
-        out_price_aggregate_id := r.price_aggregate_id;
+    -- Last stock in the scan.
+    IF cur_stock IS NOT NULL AND n >= p_period THEN
+        out_stock_id := cur_stock;
         out_rsi := CASE
             WHEN avg_loss = 0 AND avg_gain = 0 THEN 50
             WHEN avg_loss = 0 THEN 100
             ELSE ROUND((100 - 100 / (1 + avg_gain / avg_loss))::numeric, 4)
         END;
         RETURN NEXT;
-    END LOOP;
+    END IF;
 END
 $$;
 
 
 --
--- Name: FUNCTION fn_price_aggregate_rsi(p_period integer); Type: COMMENT; Schema: public; Owner: -
+-- Name: FUNCTION fn_stock_rsi(p_period integer); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.fn_price_aggregate_rsi(p_period integer) IS 'Wilder RSI(p_period, default 14) for every price_aggregate row with p_period prior changes in its (stock_id, period_type) series ordered by period_date, from close. Used by aggregate() to fill price_aggregate.rsi.';
+COMMENT ON FUNCTION public.fn_stock_rsi(p_period integer) IS 'Wilder RSI(p_period, default 14) per stock_id as of its latest price_aggregate day close (period_type=''day'', ordered by period_date). Reads price_aggregate only. One row per stock with at least p_period+1 day closes. Used by aggregate() to fill stock.rsi.';
 
 
 --
@@ -2356,7 +2374,8 @@ CREATE TABLE public.stock (
     share_rounding integer,
     price_rounding integer,
     trading_disabled boolean,
-    is_stablecoin boolean DEFAULT false NOT NULL
+    is_stablecoin boolean DEFAULT false NOT NULL,
+    rsi numeric
 );
 
 
@@ -2365,6 +2384,13 @@ CREATE TABLE public.stock (
 --
 
 COMMENT ON COLUMN public.stock.is_stablecoin IS 'TRUE = behaves like a $1 stablecoin (price within config.stablecoin_price_band_pct of $1 and 24h high-low range under config.stablecoin_max_range_pct of price, from the Coinbase products feed). Set by thee_procedure, sticky (never auto-cleared). Every buy INSERT in thee_procedure skips these coins.';
+
+
+--
+-- Name: COLUMN stock.rsi; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.stock.rsi IS 'Wilder RSI(14) from price_aggregate day closes (period_type=''day'', ordered by period_date), as of the latest day. NULL until the stock has 15 day closes. Filled by aggregate() via fn_stock_rsi(14).';
 
 
 --
@@ -3262,16 +3288,8 @@ CREATE TABLE public.price_aggregate (
     close double precision,
     high double precision,
     low double precision,
-    avg_price double precision,
-    rsi numeric
+    avg_price double precision
 );
-
-
---
--- Name: COLUMN price_aggregate.rsi; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.price_aggregate.rsi IS 'Wilder RSI(14) from close, per (stock_id, period_type) series ordered by period_date. NULL until 15 closes exist in the series. Filled by aggregate() via fn_price_aggregate_rsi(14).';
 
 
 --
@@ -4586,5 +4604,5 @@ ALTER TABLE ONLY public.etf_buy
 -- PostgreSQL database dump complete
 --
 
-\unrestrict Y8YQJFfcChyX9t5oBpTK0LfGZB2OCdDCUpjWUrcedpKOfr6lHaoQwmQD4q7FEJZ
+\unrestrict TiUyUGuPbDeuUah9ehdpfsTUJhHsbdexfWOynDOBI7faB9eSXyOGrKkwhA0Zxpa
 

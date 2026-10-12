@@ -193,16 +193,18 @@ FROM (
 WHERE pat.stock_id = x.stock_id
 AND pat.period_type = x.period_type;
 
--- 2026-10-11: RSI(14) on price_aggregate (Wilder, from close; see
--- db/procedures/fn_price_aggregate_rsi.sql). Runs after the day/month/year
--- closes above are refreshed. Writes rows still NULL (new rows, or rows that
--- just reached 15 closes) and the current day/month/year row, whose close
--- moves every minute. Closed periods keep the value they were given.
-UPDATE price_aggregate pa
+-- 2026-10-11: stock.rsi = Wilder RSI(14) from price_aggregate DAY closes
+-- (see db/procedures/fn_stock_rsi.sql). Runs after the day closes above are
+-- refreshed, so the current day's close counts. price_aggregate is input only;
+-- nothing here writes RSI to it. Stocks with under 15 day closes go to NULL.
+UPDATE stock s
 SET rsi = r.out_rsi
-FROM fn_price_aggregate_rsi(14) r
-WHERE pa.price_aggregate_id = r.out_price_aggregate_id
-AND (pa.rsi IS NULL OR pa.period_date = DATE_TRUNC(pa.period_type, NOW())::DATE)
-AND pa.rsi IS DISTINCT FROM r.out_rsi;
+FROM (
+    SELECT st.stock_id, fr.out_rsi
+    FROM stock st
+    LEFT JOIN fn_stock_rsi(14) fr ON fr.out_stock_id = st.stock_id
+) r
+WHERE s.stock_id = r.stock_id
+AND s.rsi IS DISTINCT FROM r.out_rsi;
 
 $$;
