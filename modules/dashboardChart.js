@@ -221,8 +221,8 @@ function renderSection () {
       .rsi-mid { color: #9ca3af; }
     </style>
     <h2>Price &amp; Fills Chart</h2>
-    <!-- dash-build:69b12fc -->
-    <script>window.__DASH_BUILD__='69b12fc'</script>
+    <!-- dash-build:a60f28b -->
+    <script>window.__DASH_BUILD__='a60f28b'</script>
     <div id="pf-controls" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;font-size:13px">
         <label for="pf-coin-search" class="dim">Search</label>
         <input id="pf-coin-search" type="search" placeholder="Type to filter…" autocomplete="off"
