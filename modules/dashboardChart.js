@@ -111,8 +111,8 @@ async function chartData (coin, range) {
     const mapFill = f => ({ t: new Date(f.t).getTime(), p: Number(f.p), size: Number(f.size), fee: Number(f.fee), order_id: f.order_id })
     // Cancelled remake orders: each successful remake cancels the old live
     // order then places a new one. We stamp buy_remade_price / sell_remade_price
-    // at that moment (live market), and position_audit records it — plot those
-    // as gray X markers, distinct from green buys / red sells.
+    // at that moment (live market), and position_audit records it — plot as
+    // green X (buy remake) / red X (sell remake), distinct from solid fill dots.
     const remakeRes = await db.query(`
         SELECT pa.changed_at AS t,
                pa.new_value::numeric AS p,
@@ -153,7 +153,10 @@ async function chartData (coin, range) {
         prices,
         buys: fills.filter(f => f.side === 'BUY').map(mapFill),
         sells: fills.filter(f => f.side === 'SELL').map(mapFill),
+        // Split by side so the chart can color buy remakes green and sell remakes red.
         remakes,
+        buy_remakes: remakes.filter(r => r.side === 'buy_remake'),
+        sell_remakes: remakes.filter(r => r.side === 'sell_remake'),
     }
 }
 
@@ -183,7 +186,7 @@ function renderSection () {
     <div class="dim" style="font-size:12px;margin-top:4px">
         Polls sells every 1 minute while this tab is open. Leave the browser window open on this machine to keep watching.
         <span class="buy-tag">● buy fill</span> <span class="sell-tag">● sell fill</span>
-        <span style="color:#9ca3af">✕ cancelled remake</span>
+        <span style="color:#22c55e">✕ buy remake</span> <span style="color:#ef4444">✕ sell remake</span>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
@@ -213,9 +216,10 @@ function renderSection () {
                 { label: data.coin + ' price', data: toXY(data.prices), type: 'line', yAxisID: 'y', borderColor: '#60a5fa', borderWidth: 1.5, pointRadius: 0, tension: 0, order: 3 },
                 { label: 'Buy fills', data: toXY(data.buys), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#22c55e', borderColor: '#bbf7d0', pointBackgroundColor: '#22c55e', pointBorderColor: '#bbf7d0', pointRadius: 6, pointHoverRadius: 9, order: 1 },
                 { label: 'Sell fills', data: toXY(data.sells), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#ef4444', borderColor: '#fecaca', pointBackgroundColor: '#ef4444', pointBorderColor: '#fecaca', pointRadius: 6, pointHoverRadius: 9, order: 1 },
-                // 2026-10-11: remakes as scatter crosses ON TOP of the price line
-                // (order low = behind; after RSI cleanup they were easy to miss).
-                { label: 'Cancelled remake', data: toXY(data.remakes || []), type: 'scatter', yAxisID: 'y', backgroundColor: '#d1d5db', borderColor: '#f9fafb', pointBackgroundColor: '#9ca3af', pointBorderColor: '#f3f4f6', pointStyle: 'crossRot', radius: 8, hoverRadius: 11, borderWidth: 2, order: 10 },
+                // 2026-10-11 (Theodore, voice): remake cancels as X by side —
+                // green X = buy remake, red X = sell remake (fills stay solid dots).
+                { label: 'Buy remake', data: toXY(data.buy_remakes || (data.remakes || []).filter(r => r.side === 'buy_remake')), type: 'scatter', yAxisID: 'y', backgroundColor: '#22c55e', borderColor: '#bbf7d0', pointBackgroundColor: '#22c55e', pointBorderColor: '#86efac', pointStyle: 'crossRot', radius: 8, hoverRadius: 11, borderWidth: 2, order: 10 },
+                { label: 'Sell remake', data: toXY(data.sell_remakes || (data.remakes || []).filter(r => r.side === 'sell_remake')), type: 'scatter', yAxisID: 'y', backgroundColor: '#ef4444', borderColor: '#fecaca', pointBackgroundColor: '#ef4444', pointBorderColor: '#fca5a5', pointStyle: 'crossRot', radius: 8, hoverRadius: 11, borderWidth: 2, order: 10 },
             ]
             if (chart) chart.destroy()
             chart = new Chart(document.getElementById('pf-chart'), {
@@ -267,8 +271,9 @@ function renderSection () {
                 const data = await r.json()
                 if (data.error) throw new Error(data.error)
                 draw(data)
-                const nRem = (data.remakes && data.remakes.length) || 0
-                status.textContent = (note ? note + ' · ' : '') + data.prices.length + ' price points · ' + data.buys.length + ' buys · ' + data.sells.length + ' sells · ' + nRem + ' remake cancels · ' + data.source
+                const nBuyRem = (data.buy_remakes && data.buy_remakes.length) || ((data.remakes || []).filter(r => r.side === 'buy_remake').length)
+                const nSellRem = (data.sell_remakes && data.sell_remakes.length) || ((data.remakes || []).filter(r => r.side === 'sell_remake').length)
+                status.textContent = (note ? note + ' · ' : '') + data.prices.length + ' price points · ' + data.buys.length + ' buys · ' + data.sells.length + ' sells · ' + nBuyRem + ' buy remakes · ' + nSellRem + ' sell remakes · ' + data.source
             } catch (e) { status.textContent = 'Error: ' + e.message }
             finally { loading = false }
         }
