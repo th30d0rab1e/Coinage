@@ -121,7 +121,13 @@ async function latestEvent () {
     if (remake) ev.push({ ...remake, kind: 'remake', key: 'remake|' + remake.audit_id + '|' + remake.t })
     if (!ev.length) return null
     ev.sort((a, b) => b.t - a.t)
-    return { ...ev[0], latest: { sell, buy, remake } }
+    // 2026-10-12 (Theodore): sells win. A buy or remake only takes the chart
+    // if it is more than SELL_HOLD_MS after the latest sell; otherwise the
+    // chart stays on (or jumps to) the latest sell.
+    const SELL_HOLD_MS = 5 * 60 * 1000
+    const sellEv = ev.find(e => e.kind === 'sell')
+    const pick = (sellEv && ev[0].kind !== 'sell' && ev[0].t - sellEv.t <= SELL_HOLD_MS) ? sellEv : ev[0]
+    return { ...pick, latest: { sell, buy, remake } }
 }
 
 async function coinbaseCandles (coin, startSec, endSec, gran) {
