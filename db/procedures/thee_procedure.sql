@@ -1021,13 +1021,9 @@ CROSS JOIN LATERAL (
         plan.shares * fin.limit_price         AS cost_usd,
         plan.shares * fin.limit_price * 1.012 AS cost_with_fee
 ) eff
--- Day row of vw_signal: today's close-vs-yesterday % vs this coin's
--- average historical day-over-day %. Keeps the year-basis priority pick
--- (s.period_type = 'year') but blocks chase entries on hot days (e.g.
--- MSOL up hard today while year signal still says BUY).
-JOIN vw_signal d
-  ON d.stock_id = s.stock_id
- AND d.period_type = 'day'
+-- 2026-10-11 (Theodore): dropped day-signal JOIN / current-vs-average
+-- dip gate (was d.current_change_percent < d.historical_avg_change_percent).
+-- New buys no longer require today to be weaker than the coin's usual day.
 -- 2026-10-07: crypto buys stay USD ONLY on purpose. USDC (vw_balance
 -- name = 'USDC') is never cash here: it is profit parked by the USDC sweep
 -- and the pot USDC-capable ETFs buy with (index.js fundAttemptsByCurrency).
@@ -1069,7 +1065,6 @@ AND s.priority > 0
 -- 2026-10-11 (Theodore, voice): raised from < 35 to < 50. NULL rsi fails
 -- the < 50 test (no buy until enough day history and RSI prints below 50).
 AND stock.rsi < 50
-AND d.current_change_percent < d.historical_avg_change_percent
 AND stock.trading_disabled IS NOT TRUE
 -- 2026-10-07: never open a position in a stablecoin (stock.is_stablecoin,
 -- price-behavior flag set near the top of this procedure). stock., not s.:
@@ -1486,17 +1481,13 @@ SET sell_stop_price = GREATEST(
     )
 FROM stock
 JOIN price_aggregate_total pat ON stock.stock_id = pat.stock_id
-JOIN vw_signal d
-  ON d.stock_id = stock.stock_id
- AND d.period_type = 'day'
 WHERE position.stock_id = stock.stock_id
 AND pat.period_type = position.period_type
 AND position.buy_filled_price IS NOT NULL
 AND position.sell_price IS NULL
--- Sell stays unpriced until today is stronger than this coin's usual day,
--- the mirror of the buy dip filter (current day change below the day
--- average). The sell price is still written only once.
-AND d.current_change_percent > d.historical_avg_change_percent
+-- 2026-10-11 (Theodore): dropped current-vs-average day gate
+-- (was d.current_change_percent > d.historical_avg_change_percent).
+-- Sell is still written only once when other gates pass.
 -- 2026-10-11 (Theodore, voice): only price a sell when Wilder RSI(14) is
 -- above 50 (mirror of the buy rsi < 50 gate). NULL rsi fails > 50.
 AND stock.rsi > 50
