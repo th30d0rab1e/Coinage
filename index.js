@@ -931,11 +931,12 @@ async function buildEtfPlan() {
         // catch-up sizing, pending/resting skips, cash/USDC funding) is
         // unchanged.
         `SELECT e.ticker, e.product_id, e.usdc_product_id,
-                COALESCE(v.buy_usd, e.quote_usd) AS quote_usd
+                e.quote_usd
          FROM etf e
-         LEFT JOIN vw_etf_buy_usd v ON v.ticker = e.ticker
          WHERE e.enabled
-         ORDER BY random()`
+         ORDER BY e.ticker`
+        // 2026-10-12 (Theodore): ETFs are no longer special. Plain etf.quote_usd
+        // sizing (no catch-up view), alphabetical order (no random rotation).
     )
     const rows = listed?.rows || []
     const book = await equity.equitySnapshot()
@@ -943,7 +944,10 @@ async function buildEtfPlan() {
         notes.push(`ETF plan skipped: Default USD unreadable (${book.reason})`)
         return { attempts: [], reserve: 0, notes }
     }
-    const stepPct = await configNumber('etf_limit_step_pct', 0.10)
+    // 2026-10-12 (Theodore): one simple limit buy per ETF at current
+    // price * (1 - etf_dip_pct/100), default 1%. No daily market buy, no
+    // last-fill ladder.
+    const stepPct = await configNumber('etf_dip_pct', 1)
     // 2026-10-11 (all-session trading): which session this plan is for.
     // NORMAL = daily market buy + fractional ~$1 limit (unchanged).
     // PRE_MARKET / AFTER_HOURS / OVERNIGHT / MULTI_SESSION = Coinbase takes
@@ -1008,7 +1012,8 @@ async function buildEtfPlan() {
             notes.push(`ETF skip ${t}: today's market buy might still fill`)
             continue
         }
-        if (!marketDone.has(t) && !wholeShares) {
+        if (false && !marketDone.has(t) && !wholeShares) {
+            // 2026-10-12: daily market buy retired (ETFs not special).
             // The ladder waits for this fill; it steps from it next minute.
             // NORMAL only (wholeShares false). Outside NORMAL the market buy
             // is impossible, so fall through and ladder a whole-share limit;
@@ -1045,9 +1050,8 @@ async function buildEtfPlan() {
             continue
         }
         let basis = null
-        const last = await latestBuyFill([row.product_id, row.usdc_product_id])
-        if (last) basis = { price: last.price, source: 'last_fill' }
-        else basis = await bidBasis(row, product)
+        // 2026-10-12: basis is the current market bid, never the last fill.
+        basis = await bidBasis(row, product)
         if (!basis) {
             notes.push(`ETF skip ${t}: no fill and no bid to price a limit from`)
             continue
