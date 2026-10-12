@@ -527,8 +527,8 @@ WITH RECURSIVE cand AS (
            (p.shares * p.buy_price)::numeric * 1.012 AS cost,
            -- 2026-10-08: DIP-BUY rows are funded LAST (after every other
            -- planned row), then by priority as before.
-           -- 2026-10-10 (Theodore): NULL stock.priority ranks as 0.1 (was NULLS LAST).
-           ROW_NUMBER() OVER (ORDER BY (p.buy_source = 'dip_buy') IS TRUE, COALESCE(s.priority, 0.1) DESC, p.position_id) AS rn
+           -- 2026-10-11 (Theodore): reverted NULL-as-0.1; NULLs sink again (NULLS LAST).
+           ROW_NUMBER() OVER (ORDER BY (p.buy_source = 'dip_buy') IS TRUE, s.priority DESC NULLS LAST, p.position_id) AS rn
     FROM position p
     JOIN stock s ON s.stock_id = p.stock_id
     WHERE p.buy_coinbase_order_id IS NULL
@@ -1063,10 +1063,8 @@ AND p.buy_order_id IS NULL
 AND s.historical_avg_change_percent > 0
 -- 2026-10-08 (Theodore): positive year-basis priority only. Replaces the
 -- top-50%-by-priority cut (ba3e579); s is the vw_signal year row.
--- 2026-10-10 (Theodore): NULL priority is treated as 0.1 (COALESCE(priority, 0.1)),
--- so new/short-history coins are not excluded or sunk solely for lacking a
--- year-row priority snapshot.
-AND COALESCE(s.priority, 0.1) > 0
+-- 2026-10-11 (Theodore): reverted NULL-as-0.1; require priority > 0 again.
+AND s.priority > 0
 AND d.current_change_percent < d.historical_avg_change_percent
 AND stock.trading_disabled IS NOT TRUE
 -- 2026-10-07: never open a position in a stablecoin (stock.is_stablecoin,
@@ -1120,11 +1118,9 @@ AND eff.cost_usd >= COALESCE(stock.min_price, 0)
 -- 2026-10-07 (Theodore: buys "should be sorted by priority desc only"):
 -- highest priority wins, nothing else in the sort. (Was: bid-heavy book
 -- first, then imbalance DESC, then priority; briefly + stock_id tiebreak.)
--- 2026-10-10 (Theodore): NULL priority is treated as 0.1 (COALESCE(priority, 0.1)),
--- so new/short-history coins are not excluded or sunk solely for lacking a
--- year-row priority snapshot.
+-- 2026-10-11 (Theodore): reverted NULL-as-0.1; NULLs sink again (NULLS LAST).
 ORDER BY
-    COALESCE(s.priority, 0.1) DESC
+    s.priority DESC NULLS LAST
 LIMIT 1;
 
 -- Buy again if current price has dropped below the MOST RECENT
@@ -1294,11 +1290,9 @@ AND plan.shares >= COALESCE(s.min_shares, 0)
 AND eff.cost_usd >= COALESCE(s.min_price, 0)
 -- 2026-10-07: priority DESC only (s = stock here). Was: bid-heavy book
 -- first, then imbalance DESC, then priority.
--- 2026-10-10 (Theodore): NULL priority is treated as 0.1 (COALESCE(priority, 0.1)),
--- so new/short-history coins are not excluded or sunk solely for lacking a
--- year-row priority snapshot.
+-- 2026-10-11 (Theodore): reverted NULL-as-0.1; NULLs sink again (NULLS LAST).
 ORDER BY
-    COALESCE(s.priority, 0.1) DESC
+    s.priority DESC NULLS LAST
 LIMIT 1;
 
 -- =====================================================================
@@ -1389,9 +1383,8 @@ FROM (
     WHERE v_dip_buy_enabled
     AND v_pause_buys = 'false'
     AND st.name LIKE '%-USD'
-    -- 2026-10-10 (Theodore): NULL stock.priority counts as 0.1, so coins with
-    -- no year-row priority snapshot are not excluded for that alone.
-    AND COALESCE(st.priority, 0.1) > 0
+    -- 2026-10-11 (Theodore): reverted NULL-as-0.1; require priority > 0 again.
+    AND st.priority > 0
     AND st.trading_disabled IS NOT TRUE
     AND st.is_stablecoin IS NOT TRUE
     AND st.price > 0
@@ -1413,8 +1406,8 @@ FROM (
     AND NOT EXISTS (SELECT 1 FROM position o
                     WHERE o.stock_id = st.stock_id
                     AND o.buy_filled_price IS NULL)
-    -- 2026-10-10: NULL priority ranks as 0.1 (plain DESC put NULLs FIRST).
-    WINDOW w AS (ORDER BY COALESCE(st.priority, 0.1) DESC, st.stock_id ROWS UNBOUNDED PRECEDING)
+    -- 2026-10-11 (Theodore): reverted NULL-as-0.1; plain DESC (NULLs first in PG window).
+    WINDOW w AS (ORDER BY st.priority DESC, st.stock_id ROWS UNBOUNDED PRECEDING)
 ) c
 WHERE c.rn <= v_dip_buy_max_open
               - (SELECT COUNT(*) FROM position d
