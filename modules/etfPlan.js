@@ -93,23 +93,16 @@ function fundAttempts(chosen, available) {
     return { attempts, reserve, notes }
 }
 
-// 2026-10-07 (Theodore): ETFs Coinbase also lists in USDC buy with USDC,
-// the rest with USD. Same walk as fundAttempts, but with two separate pots:
-//   - row.usdcProductId set (etf.usdc_product_id) -> pay from the USDC pot
-//     and send the order to the USDC product id.
-//   - USDC pot too small -> if fallbackUsd (config.etf_usdc_fallback_usd,
-//     default true) pay from the USD pot on the USD product id instead, so
-//     ETF buying does not stall while USDC is near $0; else skip this minute.
-//   - row.usdcProductId NULL (TOPW) -> USD pot, USD product id, as before.
-// Each funded row gets quoteCurrency ('USD' | 'USDC') and orderProductId.
-// reserve is USD ONLY: it becomes config.etf_usd_reserve, which
-// thee_procedure subtracts from free USD for crypto. USDC-funded rows must
-// not hold back USD. usdcPlanned is the USDC total, for the log only.
+// 2026-10-12 (Theodore): ETF buys always pay with USD on the USD product.
+// USDC is profit parking only (sweepProfitToUsdc); never the ETF buy pot.
+// Same walk as fundAttempts: keep only rows Default USD can cover.
+// quoteCurrency is always 'USD', orderProductId is always etf.product_id.
+// row.usdcProductId / pots.usdc / fallbackUsd are ignored (signature kept
+// so index.js call sites stay stable). reserve = USD total for
+// config.etf_usd_reserve; usdcPlanned is always 0.
 function fundAttemptsByCurrency(chosen, pots, fallbackUsd) {
     let usd = Number(pots?.usd)
-    let usdc = Number(pots?.usdc)
     if (!Number.isFinite(usd)) usd = 0
-    if (!Number.isFinite(usdc)) usdc = 0
     const attempts = []
     const notes = []
     for (const row of chosen) {
@@ -119,25 +112,6 @@ function fundAttemptsByCurrency(chosen, pots, fallbackUsd) {
             notes.push(`ETF skip ${row.ticker}: bad notional ${costText} (not reserved)`)
             continue
         }
-        if (row.usdcProductId) {
-            if (usdc >= cost) {
-                attempts.push({ ...row, quoteCurrency: 'USDC', orderProductId: row.usdcProductId })
-                usdc -= cost
-                continue
-            }
-            if (!fallbackUsd) {
-                notes.push(`ETF skip ${row.ticker}: needs ${costText} USDC, have ${usdc.toFixed(2)} USDC (USD fallback off, not reserved)`)
-                continue
-            }
-            if (usd >= cost) {
-                notes.push(`ETF ${row.ticker}: USDC short (${usdc.toFixed(2)} < ${costText}), falling back to USD`)
-                attempts.push({ ...row, quoteCurrency: 'USD', orderProductId: row.product_id })
-                usd -= cost
-                continue
-            }
-            notes.push(`ETF skip ${row.ticker}: needs $${costText}, have ${usdc.toFixed(2)} USDC and $${usd.toFixed(2)} Default USD (not reserved)`)
-            continue
-        }
         if (usd >= cost) {
             attempts.push({ ...row, quoteCurrency: 'USD', orderProductId: row.product_id })
             usd -= cost
@@ -145,10 +119,8 @@ function fundAttemptsByCurrency(chosen, pots, fallbackUsd) {
         }
         notes.push(`ETF skip ${row.ticker}: limit needs $${costText} Default USD, have $${usd.toFixed(2)} (not reserved)`)
     }
-    const sum = (cur) => attempts
-        .filter((row) => row.quoteCurrency === cur)
-        .reduce((total, row) => total + Number(row.notional), 0)
-    return { attempts, reserve: sum('USD'), usdcPlanned: sum('USDC'), notes }
+    const reserve = attempts.reduce((total, row) => total + Number(row.notional), 0)
+    return { attempts, reserve, usdcPlanned: 0, notes }
 }
 
 module.exports = {

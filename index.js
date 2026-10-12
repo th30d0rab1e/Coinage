@@ -1089,19 +1089,17 @@ async function buildEtfPlan() {
     // USD pot only.
     const sweepReserve = await usdcSweepReserve()
     if (sweepReserve > 0) notes.push(`ETF cash minus $${sweepReserve.toFixed(2)} profit queued for USDC`)
-    // 2026-10-07 (Theodore): USDC-capable ETFs pay with USDC. Spendable USDC
-    // = Default portfolio USDC available_to_trade (held USDC excluded). No
-    // sweep state holds USDC back: the sweep only spends USD and adds USDC,
-    // and its unconverted profit is already reserved on the USD side above,
-    // so nothing is double-counted.
+    // 2026-10-12 (Theodore): ETF buys always fund from USD on the USD
+    // product. USDC pot / etf_usdc_fallback_usd / usdcProductId are ignored
+    // by fundAttemptsByCurrency (kept in the call for signature stability).
+    // USDC remains profit parking only (sweepProfitToUsdc).
     const usdcPot = Math.max(0, Number(book.usdcAvailable) || 0)
     const fallbackUsd = await configBool('etf_usdc_fallback_usd', true)
-    if (book.usdcReason) notes.push(`ETF USDC unreadable (${book.usdcReason}); treating USDC as 0`)
-    notes.push(`ETF pots: $${Math.max(0, book.available - sweepReserve).toFixed(2)} USD, ${usdcPot.toFixed(2)} USDC (USD fallback ${fallbackUsd ? 'on' : 'off'})`)
+    notes.push(`ETF pots: $${Math.max(0, book.available - sweepReserve).toFixed(2)} USD (USDC buy path off; parked USDC ${usdcPot.toFixed(2)})`)
     const funded = etfPlan.fundAttemptsByCurrency(chosen, { usd: Math.max(0, book.available - sweepReserve), usdc: usdcPot }, fallbackUsd)
-    for (const c of chosen) notes.push(`ETF plan ${c.ticker}: ${c.kind} — ${c.reason}${c.kind === 'limit' ? ` → ${c.baseSize} @ ${c.limitPrice}` : ''}${c.usdcProductId ? ' [USDC-capable]' : ' [USD only]'}`)
-    // Remember the fallback setting on each attempt for the send step.
-    for (const a of funded.attempts) a.fallbackUsd = fallbackUsd
+    for (const c of chosen) notes.push(`ETF plan ${c.ticker}: ${c.kind} — ${c.reason}${c.kind === 'limit' ? ` → ${c.baseSize} @ ${c.limitPrice}` : ''} [USD]`)
+    // leftover field; USDC buy path is off, so send-step never needs fallback.
+    for (const a of funded.attempts) a.fallbackUsd = false
     notes.push(...funded.notes)
     return { attempts: funded.attempts, reserve: funded.reserve, usdcPlanned: funded.usdcPlanned, notes }
 }

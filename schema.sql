@@ -2825,7 +2825,7 @@ COMMENT ON COLUMN public.etf.is_special IS 'True for every ETF row (BLOX, CHPY, 
 -- Name: COLUMN etf.usdc_product_id; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.etf.usdc_product_id IS 'USDC-quoted EQUITY product id for this ticker (its alias = product_id). When set, index.js buys on this id and pays with USDC (falls back to product_id / USD when USDC is short and config.etf_usdc_fallback_usd = true). NULL = Coinbase has no USDC version; buy with USD.';
+COMMENT ON COLUMN public.etf.usdc_product_id IS 'USDC-quoted EQUITY product id for this ticker (its alias = product_id). 2026-10-12: ETF buys always use product_id / USD; this column is kept for reference / future use and is ignored by fundAttemptsByCurrency. NULL = Coinbase has no USDC version.';
 
 
 --
