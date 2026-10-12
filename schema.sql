@@ -1516,10 +1516,10 @@ AND s.historical_avg_change_percent > 0
 -- top-50%-by-priority cut (ba3e579); s is the vw_signal year row.
 -- 2026-10-11 (Theodore): reverted NULL-as-0.1; require priority > 0 again.
 AND s.priority > 0
--- 2026-10-11 (Theodore, voice): also require oversold Wilder RSI(14) on stock (< 35)
--- (price_aggregate day closes). NULL rsi fails the < 30 test (no buy until
--- enough day history exists and RSI prints below 35).
-AND stock.rsi < 35
+-- 2026-10-11 (Theodore, voice): oversold Wilder RSI(14) gate on stock.
+-- 2026-10-11 (Theodore, voice): raised from < 35 to < 50. NULL rsi fails
+-- the < 50 test (no buy until enough day history and RSI prints below 50).
+AND stock.rsi < 50
 AND d.current_change_percent < d.historical_avg_change_percent
 AND stock.trading_disabled IS NOT TRUE
 -- 2026-10-07: never open a position in a stablecoin (stock.is_stablecoin,
@@ -1840,8 +1840,8 @@ FROM (
     AND st.name LIKE '%-USD'
     -- 2026-10-11 (Theodore): reverted NULL-as-0.1; require priority > 0 again.
     AND st.priority > 0
-    -- 2026-10-11 (Theodore, voice): oversold RSI(14) gate, same as initial buy.
-    AND st.rsi < 35
+    -- 2026-10-11 (Theodore, voice): oversold RSI(14) gate, same as initial buy (< 50).
+    AND st.rsi < 50
     AND st.trading_disabled IS NOT TRUE
     AND st.is_stablecoin IS NOT TRUE
     AND st.price > 0
@@ -1948,6 +1948,9 @@ AND position.sell_price IS NULL
 -- the mirror of the buy dip filter (current day change below the day
 -- average). The sell price is still written only once.
 AND d.current_change_percent > d.historical_avg_change_percent
+-- 2026-10-11 (Theodore, voice): only price a sell when Wilder RSI(14) is
+-- above 50 (mirror of the buy rsi < 50 gate). NULL rsi fails > 50.
+AND stock.rsi > 50
 -- Estimated profit, from buy_filled_price and buy_fee alone: at the
 -- fee-adjusted floor price (same CEIL(...) breakeven formula as above),
 -- proceeds after an estimated sell fee (same buy-side fee rate, falling
@@ -2008,6 +2011,8 @@ AND position.period_type = 'listing'
 AND position.buy_filled_price IS NOT NULL
 AND position.sell_price IS NULL
 AND stock.price_rounding IS NOT NULL
+-- 2026-10-11 (Theodore, voice): same RSI > 50 gate as normal sell pricing.
+AND stock.rsi > 50
 -- Same profit check as the UPDATE above: at the rounded fee breakeven,
 -- proceeds after an estimated sell fee (same buy-side fee rate) must exceed
 -- total cost (buy_filled_price * shares + buy_fee).
