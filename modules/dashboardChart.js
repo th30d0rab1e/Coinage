@@ -109,14 +109,27 @@ async function chartData (coin, range) {
         ORDER BY trade_time`, [coin, since])
 
     const mapFill = f => ({ t: new Date(f.t).getTime(), p: Number(f.p), size: Number(f.size), fee: Number(f.fee), order_id: f.order_id })
-    // Cancelled remake orders: each successful remake cancels the old live
-    // order then places a new one. We stamp buy_remade_price / sell_remade_price
-    // at that moment (live market), and position_audit records it — plot as
-    // green X (buy remake) / red X (sell remake), distinct from solid fill dots.
+    // Cancelled remake orders: stamp buy_remade_price / sell_remade_price at
+    // remake time (market). Chart Y is the NEW stop/trigger from the same
+    // audit moment (buy_stop_price / sell_stop_price) — Theodore 2026-10-11
+    // voice: green/red X at stop, not market.
     const remakeRes = await db.query(`
         SELECT pa.changed_at AS t,
-               pa.new_value::numeric AS p,
                pa.column_name,
+               (
+                   SELECT a.new_value::numeric
+                   FROM position_audit a
+                   WHERE a.position_id = pa.position_id
+                     AND a.operation = 'UPDATE'
+                     AND a.changed_at = pa.changed_at
+                     AND a.column_name = CASE
+                         WHEN pa.column_name = 'buy_remade_price' THEN 'buy_stop_price'
+                         ELSE 'sell_stop_price'
+                     END
+                     AND a.new_value ~ '^[0-9.]+$'
+                   ORDER BY a.audit_id
+                   LIMIT 1
+               ) AS p,
                COALESCE(
                    p.name,
                    (SELECT i.new_value::jsonb->>'name'
