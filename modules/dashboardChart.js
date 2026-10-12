@@ -245,6 +245,30 @@ async function chartData (coin, range) {
         p: Number(r.p),
     })).filter(d => Number.isFinite(d.t) && Number.isFinite(d.p))
 
+    // 2026-10-12: open (resting) orders as hollow circles. Y = stop/trigger
+    // (same convention as remake X), falling back to limit. Chart-only.
+    const openRes = await db.query(`
+        SELECT position_id,
+               CASE WHEN buy_filled_price IS NULL THEN 'buy' ELSE 'sell' END AS side,
+               CASE WHEN buy_filled_price IS NULL THEN COALESCE(buy_stop_price, buy_price)
+                    ELSE COALESCE(sell_stop_price, sell_price) END AS p,
+               CASE WHEN buy_filled_price IS NULL THEN COALESCE(buy_price, buy_stop_price)
+                    ELSE COALESCE(sell_price, sell_stop_price) END AS lim,
+               CASE WHEN buy_filled_price IS NULL
+                    THEN COALESCE(last_remade_at, buy_placed_at, date_created)
+                    ELSE COALESCE(last_remade_at, buy_filled_date, date_created) END AS t
+        FROM position
+        WHERE name = $1
+          AND (
+              (buy_filled_price IS NULL AND COALESCE(buy_stop_price, buy_price) IS NOT NULL)
+              OR (buy_filled_price IS NOT NULL AND sell_filled_price IS NULL
+                  AND COALESCE(sell_stop_price, sell_price) IS NOT NULL)
+          )`, [coin])
+    const openOrders = openRes.rows.map(r => ({
+        t: Math.max(new Date(r.t).getTime(), since.getTime()),
+        p: Number(r.p), limit: Number(r.lim), side: r.side, position_id: r.position_id,
+    })).filter(d => Number.isFinite(d.t) && Number.isFinite(d.p) && d.p > 0)
+
     return {
         coin, range, source,
         prices,
@@ -255,6 +279,8 @@ async function chartData (coin, range) {
         buy_remakes: remakes.filter(r => r.side === 'buy_remake'),
         sell_remakes: remakes.filter(r => r.side === 'sell_remake'),
         rsiSeries,
+        open_buys: openOrders.filter(o => o.side === 'buy'),
+        open_sells: openOrders.filter(o => o.side === 'sell'),
     }
 }
 
@@ -286,6 +312,7 @@ function renderSection () {
         Polls buys, sells and remakes every 1 minute while this tab is open. Leave the browser window open on this machine to keep watching.
         <span class="buy-tag">● buy fill</span> <span class="sell-tag">● sell fill</span>
         <span style="color:#22c55e">✕ buy remake</span> <span style="color:#ef4444">✕ sell remake</span>
+        <span style="color:#22c55e">○ open buy</span> <span style="color:#ef4444">○ open sell</span>
         <span style="color:#22c55e">··· RSI&lt;50</span> <span style="color:#ef4444">··· RSI&gt;50</span>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
@@ -356,6 +383,8 @@ function renderSection () {
                 // green X = buy remake, red X = sell remake (fills stay solid dots).
                 { label: 'Buy remake', data: toXY(data.buy_remakes || (data.remakes || []).filter(r => r.side === 'buy_remake')), type: 'scatter', yAxisID: 'y', backgroundColor: '#22c55e', borderColor: '#bbf7d0', pointBackgroundColor: '#22c55e', pointBorderColor: '#86efac', pointStyle: 'crossRot', radius: 8, hoverRadius: 11, borderWidth: 2, order: 10 },
                 { label: 'Sell remake', data: toXY(data.sell_remakes || (data.remakes || []).filter(r => r.side === 'sell_remake')), type: 'scatter', yAxisID: 'y', backgroundColor: '#ef4444', borderColor: '#fecaca', pointBackgroundColor: '#ef4444', pointBorderColor: '#fca5a5', pointStyle: 'crossRot', radius: 8, hoverRadius: 11, borderWidth: 2, order: 10 },
+                { label: 'Open buy', data: toXY(data.open_buys || []), type: 'scatter', yAxisID: 'y', pointStyle: 'circle', backgroundColor: 'rgba(0,0,0,0)', pointBackgroundColor: 'rgba(0,0,0,0)', borderColor: '#22c55e', pointBorderColor: '#22c55e', pointBorderWidth: 2, borderWidth: 2, radius: 6, hoverRadius: 9, order: 9 },
+                { label: 'Open sell', data: toXY(data.open_sells || []), type: 'scatter', yAxisID: 'y', pointStyle: 'circle', backgroundColor: 'rgba(0,0,0,0)', pointBackgroundColor: 'rgba(0,0,0,0)', borderColor: '#ef4444', pointBorderColor: '#ef4444', pointBorderWidth: 2, borderWidth: 2, radius: 6, hoverRadius: 9, order: 9 },
             ]
             if (chart) chart.destroy()
             chart = new Chart(document.getElementById('pf-chart'), {
