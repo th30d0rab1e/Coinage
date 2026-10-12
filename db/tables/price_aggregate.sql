@@ -7,5 +7,9 @@ CREATE TABLE IF NOT EXISTS public.price_aggregate (
     close              double precision,
     high               double precision,
     low                double precision,
-    avg_price          double precision
+    avg_price          double precision,
+    -- 2026-10-11: Wilder RSI(14) from close per (stock_id, period_type),
+    -- NULL until 15 closes exist. Filled by aggregate().
+    -- See db/migrations/2026-10-11_price_aggregate_rsi.sql.
+    rsi                numeric
 );

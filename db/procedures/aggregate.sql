@@ -193,4 +193,16 @@ FROM (
 WHERE pat.stock_id = x.stock_id
 AND pat.period_type = x.period_type;
 
+-- 2026-10-11: RSI(14) on price_aggregate (Wilder, from close; see
+-- db/procedures/fn_price_aggregate_rsi.sql). Runs after the day/month/year
+-- closes above are refreshed. Writes rows still NULL (new rows, or rows that
+-- just reached 15 closes) and the current day/month/year row, whose close
+-- moves every minute. Closed periods keep the value they were given.
+UPDATE price_aggregate pa
+SET rsi = r.out_rsi
+FROM fn_price_aggregate_rsi(14) r
+WHERE pa.price_aggregate_id = r.out_price_aggregate_id
+AND (pa.rsi IS NULL OR pa.period_date = DATE_TRUNC(pa.period_type, NOW())::DATE)
+AND pa.rsi IS DISTINCT FROM r.out_rsi;
+
 $$;

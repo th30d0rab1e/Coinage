@@ -218,6 +218,18 @@ FROM (
 WHERE pat.stock_id = x.stock_id
 AND pat.period_type = x.period_type;
 
+-- 2026-10-11: RSI(14) on price_aggregate (Wilder, from close; see
+-- db/procedures/fn_price_aggregate_rsi.sql). Runs after the day/month/year
+-- closes above are refreshed. Writes rows still NULL (new rows, or rows that
+-- just reached 15 closes) and the current day/month/year row, whose close
+-- moves every minute. Closed periods keep the value they were given.
+UPDATE price_aggregate pa
+SET rsi = r.out_rsi
+FROM fn_price_aggregate_rsi(14) r
+WHERE pa.price_aggregate_id = r.out_price_aggregate_id
+AND (pa.rsi IS NULL OR pa.period_date = DATE_TRUNC(pa.period_type, NOW())::DATE)
+AND pa.rsi IS DISTINCT FROM r.out_rsi;
+
 $$;
 
 
@@ -248,6 +260,74 @@ $$;
 --
 
 COMMENT ON FUNCTION public.fn_buy_below_paid(p_stop numeric, p_limit numeric, p_min_paid numeric, p_rounding integer) IS 'Below-lowest-paid rule for crypto buys: if limit >= lowest open-bag buy_filled_price, limit = largest tick below it and stop = limit/1.01 rounded down; else unchanged. Used by thee_procedure and vw_edit_orders.';
+
+
+--
+-- Name: fn_price_aggregate_rsi(integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_price_aggregate_rsi(p_period integer DEFAULT 14) RETURNS TABLE(out_price_aggregate_id integer, out_rsi numeric)
+    LANGUAGE plpgsql STABLE
+    AS $$
+DECLARE
+    r          record;
+    series_key text;
+    prev_close double precision;
+    n          integer;           -- changes seen so far in this series
+    sum_gain   double precision;
+    sum_loss   double precision;
+    avg_gain   double precision;
+    avg_loss   double precision;
+    change     double precision;
+BEGIN
+    FOR r IN
+        SELECT pa.price_aggregate_id, pa.stock_id, pa.period_type, pa.close
+        FROM price_aggregate pa
+        WHERE pa.close IS NOT NULL
+        ORDER BY pa.stock_id, pa.period_type, pa.period_date
+    LOOP
+        -- New series: first close is only the baseline for the next change.
+        IF series_key IS DISTINCT FROM r.stock_id || '|' || r.period_type THEN
+            series_key := r.stock_id || '|' || r.period_type;
+            prev_close := r.close;
+            n := 0; sum_gain := 0; sum_loss := 0;
+            CONTINUE;
+        END IF;
+
+        change := r.close - prev_close;
+        prev_close := r.close;
+        n := n + 1;
+
+        IF n <= p_period THEN
+            -- Seed window: accumulate, first RSI lands on change #p_period.
+            sum_gain := sum_gain + GREATEST(change, 0);
+            sum_loss := sum_loss + GREATEST(-change, 0);
+            IF n < p_period THEN CONTINUE; END IF;
+            avg_gain := sum_gain / p_period;
+            avg_loss := sum_loss / p_period;
+        ELSE
+            -- Wilder smoothing.
+            avg_gain := (avg_gain * (p_period - 1) + GREATEST(change, 0)) / p_period;
+            avg_loss := (avg_loss * (p_period - 1) + GREATEST(-change, 0)) / p_period;
+        END IF;
+
+        out_price_aggregate_id := r.price_aggregate_id;
+        out_rsi := CASE
+            WHEN avg_loss = 0 AND avg_gain = 0 THEN 50
+            WHEN avg_loss = 0 THEN 100
+            ELSE ROUND((100 - 100 / (1 + avg_gain / avg_loss))::numeric, 4)
+        END;
+        RETURN NEXT;
+    END LOOP;
+END
+$$;
+
+
+--
+-- Name: FUNCTION fn_price_aggregate_rsi(p_period integer); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.fn_price_aggregate_rsi(p_period integer) IS 'Wilder RSI(p_period, default 14) for every price_aggregate row with p_period prior changes in its (stock_id, period_type) series ordered by period_date, from close. Used by aggregate() to fill price_aggregate.rsi.';
 
 
 --
@@ -3182,8 +3262,16 @@ CREATE TABLE public.price_aggregate (
     close double precision,
     high double precision,
     low double precision,
-    avg_price double precision
+    avg_price double precision,
+    rsi numeric
 );
+
+
+--
+-- Name: COLUMN price_aggregate.rsi; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.price_aggregate.rsi IS 'Wilder RSI(14) from close, per (stock_id, period_type) series ordered by period_date. NULL until 15 closes exist in the series. Filled by aggregate() via fn_price_aggregate_rsi(14).';
 
 
 --
@@ -3355,6 +3443,20 @@ COMMENT ON COLUMN public.profit_history.buy_quote_currency IS 'Copied from posit
 --
 
 COMMENT ON COLUMN public.profit_history.buy_source IS 'Copied from position.buy_source when the closed position is recorded (''dip_buy'' or NULL).';
+
+
+--
+-- Name: COLUMN profit_history.usd_balance; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.profit_history.usd_balance IS 'USD total (available + hold) from vw_balance at the moment this close was recorded. NULL on rows written before 2026-10-11.';
+
+
+--
+-- Name: COLUMN profit_history.usdc_balance; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.profit_history.usdc_balance IS 'USDC total (available + hold) from vw_balance at the moment this close was recorded. NULL on rows written before 2026-10-11.';
 
 
 --
