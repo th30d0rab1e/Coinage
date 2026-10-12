@@ -270,6 +270,8 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
 <html>
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
 <title>Coinbase Bot Dashboard</title>
 <style>
     body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #111; color: #ddd; margin: 0; padding: 24px; }
@@ -321,7 +323,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
 <body>
     <h1>Coinbase Bot Dashboard</h1>
     <div class="meta">Generated ${new Date().toLocaleString()}</div>
-    <a class="refresh" href="/">Refresh</a>
+    <a class="refresh" href="/?v=${Date.now()}">Refresh</a>
 
     <div class="cash-bar">
         <div>

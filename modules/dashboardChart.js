@@ -221,6 +221,8 @@ function renderSection () {
       .rsi-mid { color: #9ca3af; }
     </style>
     <h2>Price &amp; Fills Chart</h2>
+    <!-- dash-build:69b12fc -->
+    <script>window.__DASH_BUILD__='69b12fc'</script>
     <div id="pf-controls" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;font-size:13px">
         <label for="pf-coin-search" class="dim">Search</label>
         <input id="pf-coin-search" type="search" placeholder="Type to filter…" autocomplete="off"
@@ -284,10 +286,7 @@ function renderSection () {
 
         function draw (data) {
             const priceXY = toXY(data.prices)
-            // One RSI series on y1 (0–100). Color EACH segment/point by that
-            // point's RSI — splitting into 3 datasets hid short <30/>70 runs
-            // (often a single day) because Chart.js needs 2+ points to draw a
-            // line segment. Points make one-day extremes visible.
+            // RSI values 0–100 (field p from rsiSeries). Must map via scales.y1 only.
             const rsiRaw = (data.rsiSeries || []).map(d => ({ x: Number(d.t), y: Number(d.p) }))
                 .filter(d => Number.isFinite(d.x) && Number.isFinite(d.y))
             const rsiColor = (y) => (y < 30 ? '#22c55e' : y > 70 ? '#ef4444' : '#ffffff')
@@ -298,30 +297,19 @@ function renderSection () {
             const rsiGuide = (level) => (xMin == null ? [] : [{ x: xMin, y: level }, { x: xMax, y: level }])
             const ds = [
                 { label: data.coin + ' price', data: priceXY, type: 'line', yAxisID: 'y', borderColor: '#60a5fa', borderWidth: 1.5, pointRadius: 0, tension: 0, order: 3 },
+                // Invisible RSI dataset: registers y1 scale + tooltips; pixels drawn by plugin.
                 {
                     label: 'RSI(14)',
                     data: rsiRaw,
                     type: 'line',
                     yAxisID: 'y1',
-                    borderWidth: 2,
-                    pointRadius: 4,
-                    pointHoverRadius: 6,
-                    pointBackgroundColor: rsiRaw.map(d => rsiColor(d.y)),
-                    pointBorderColor: rsiRaw.map(d => rsiColor(d.y)),
+                    borderColor: 'rgba(0,0,0,0)',
+                    backgroundColor: 'rgba(0,0,0,0)',
+                    borderWidth: 0,
+                    pointRadius: 0,
                     tension: 0,
                     order: 2,
-                    segment: {
-                        borderColor: (ctx) => {
-                            const y = ctx.p1.parsed.y
-                            return (y == null ? '#ffffff' : rsiColor(y))
-                        },
-                        borderDash: (ctx) => {
-                            const y = ctx.p1.parsed.y
-                            return (y == null ? [6, 4] : rsiDash(y))
-                        },
-                    },
                 },
-                // Fixed RSI threshold guides on y1 (full visible X span).
                 { label: 'RSI 70', data: rsiGuide(70), type: 'line', yAxisID: 'y1', borderColor: '#ef4444', borderWidth: 1.5, borderDash: [6, 4], pointRadius: 0, tension: 0, order: 4 },
                 { label: 'RSI 50', data: rsiGuide(50), type: 'line', yAxisID: 'y1', borderColor: '#ffffff', borderWidth: 1.25, borderDash: [4, 4], pointRadius: 0, tension: 0, order: 4 },
                 { label: 'RSI 30', data: rsiGuide(30), type: 'line', yAxisID: 'y1', borderColor: '#22c55e', borderWidth: 1.5, borderDash: [6, 4], pointRadius: 0, tension: 0, order: 4 },
@@ -334,23 +322,19 @@ function renderSection () {
                 type: 'line',
                 data: { datasets: ds },
                 options: {
-                    responsive: true, maintainAspectRatio: false, animation: false, parsing: false,
+                    responsive: true, maintainAspectRatio: false, animation: false,
+                    // parsing true (default): dual-axis y1 binding is reliable. toXY already coerces numbers.
                     interaction: { mode: 'nearest', intersect: false },
                     scales: {
                         x: { type: 'time', ticks: { color: '#888' }, grid: { color: '#222' } },
-                        // Price + fills + remake markers (left).
-                        y: { type: 'linear', position: 'left', stacked: false, ticks: { color: '#888' }, grid: { color: '#222' } },
-                        // RSI 0–100 on the right (Chart.js standard y1 dual-axis id).
-                        // A custom scale id failed to bind in the browser, so RSI 30–70
-                        // plotted on the LEFT price axis as dollar values and sat near
-                        // the bottom next to the green guide. y1 maps RSI to 0–100 only.
+                        y: {
+                            type: 'linear', position: 'left', display: true,
+                            ticks: { color: '#888' }, grid: { color: '#222' },
+                            title: { display: true, text: 'Price', color: '#888' },
+                        },
                         y1: {
-                            type: 'linear',
-                            position: 'right',
-                            display: true,
-                            min: 0,
-                            max: 100,
-                            beginAtZero: true,
+                            type: 'linear', position: 'right', display: true,
+                            min: 0, max: 100,
                             grid: { drawOnChartArea: false },
                             ticks: { color: '#9ca3af', stepSize: 10 },
                             title: { display: true, text: 'RSI', color: '#9ca3af' },
@@ -371,7 +355,56 @@ function renderSection () {
                         zoom: { pan: { enabled: true, mode: 'x' }, zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' } },
                     },
                 },
+                plugins: [{
+                    id: 'rsiPixels',
+                    // Draw RSI with explicit y1 pixel mapping so it cannot sit on the price axis.
+                    afterDatasetsDraw (c) {
+                        const xScale = c.scales.x
+                        const yRsi = c.scales.y1
+                        if (!xScale || !yRsi || !rsiRaw.length) return
+                        const ctx = c.ctx
+                        ctx.save()
+                        ctx.lineWidth = 2
+                        for (let i = 1; i < rsiRaw.length; i++) {
+                            const a = rsiRaw[i - 1], b = rsiRaw[i]
+                            const x0 = xScale.getPixelForValue(a.x)
+                            const x1 = xScale.getPixelForValue(b.x)
+                            const y0 = yRsi.getPixelForValue(a.y)
+                            const y1 = yRsi.getPixelForValue(b.y)
+                            if (![x0, x1, y0, y1].every(Number.isFinite)) continue
+                            ctx.strokeStyle = rsiColor(b.y)
+                            ctx.setLineDash(rsiDash(b.y))
+                            ctx.beginPath()
+                            ctx.moveTo(x0, y0)
+                            ctx.lineTo(x1, y1)
+                            ctx.stroke()
+                        }
+                        // Points
+                        for (const pt of rsiRaw) {
+                            const x = xScale.getPixelForValue(pt.x)
+                            const y = yRsi.getPixelForValue(pt.y)
+                            if (![x, y].every(Number.isFinite)) continue
+                            ctx.fillStyle = rsiColor(pt.y)
+                            ctx.setLineDash([])
+                            ctx.beginPath()
+                            ctx.arc(x, y, 3.5, 0, Math.PI * 2)
+                            ctx.fill()
+                        }
+                        ctx.restore()
+                    },
+                }],
             })
+            // Debug stamp in status-adjacent console for verify
+            if (chart && chart.scales && chart.scales.y1) {
+                const last = rsiRaw[rsiRaw.length - 1]
+                console.log('[dash ' + (window.__DASH_BUILD__ || '?') + '] y1', chart.scales.y1.min, chart.scales.y1.max,
+                    'priceY', chart.scales.y.min, chart.scales.y.max,
+                    'rsiN', rsiRaw.length, 'last', last && last.y,
+                    last ? ('px=' + chart.scales.y1.getPixelForValue(last.y) +
+                        ' g30=' + chart.scales.y1.getPixelForValue(30) +
+                        ' g50=' + chart.scales.y1.getPixelForValue(50) +
+                        ' g70=' + chart.scales.y1.getPixelForValue(70)) : '')
+            }
         }
 
         function emitFilter (coin) {
@@ -408,7 +441,7 @@ function renderSection () {
                     ? (' · RSI <span class="' + (rsiVal < 30 ? 'rsi-os' : rsiVal > 70 ? 'rsi-ob' : 'rsi-mid') + '">' + rsiVal.toFixed(2) + '</span>')
                     : ''
                 paintRsi(rsiVal)
-                status.innerHTML = (note ? note + ' · ' : '') + data.prices.length + ' price points · ' + data.buys.length + ' buys · ' + data.sells.length + ' sells · ' + data.source + rsiHtml
+                status.innerHTML = (note ? note + ' · ' : '') + data.prices.length + ' price points · ' + data.buys.length + ' buys · ' + data.sells.length + ' sells · ' + data.source + rsiHtml + ' · build ' + (window.__DASH_BUILD__ || '')
             } catch (e) { status.textContent = 'Error: ' + e.message }
             finally { loading = false }
         }
