@@ -246,7 +246,7 @@ function renderSection () {
         <span class="rsi-os">··· RSI&lt;30</span>
         <span style="color:#fff">- - RSI 30–70</span>
         <span class="rsi-ob">··· RSI&gt;70</span>
-        <span class="dim">(RSI dotted/dashed on price axis)</span>
+        <span class="dim">(RSI on right axis 0–100)</span>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
@@ -284,33 +284,29 @@ function renderSection () {
 
         function draw (data) {
             const priceXY = toXY(data.prices)
+            // RSI stays on its own 0–100 right axis (yRsi). Scaling onto the price
+            // axis made a 0–100 series look like noise near zero vs BTC~$80k — or
+            // vanish depending on zoom. Keep three-color dotted/dashed segments.
             const rsiRaw = (data.rsiSeries || []).map(d => ({ x: Number(d.t), y: Number(d.p) }))
                 .filter(d => Number.isFinite(d.x) && Number.isFinite(d.y))
-            // Scale RSI 0–100 onto the visible price range (overlay on price chart).
-            const priceYs = priceXY.map(d => d.y).filter(Number.isFinite)
-            let pMin = priceYs.length ? Math.min(...priceYs) : 0
-            let pMax = priceYs.length ? Math.max(...priceYs) : 1
-            if (pMax === pMin) { pMin -= 1; pMax += 1 }
-            const scaleRsi = (rsi) => pMin + (rsi / 100) * (pMax - pMin)
-            function zoneScaled (pred) {
+            function zoneRsi (pred) {
                 const out = []
                 for (let i = 0; i < rsiRaw.length; i++) {
                     const ok = pred(rsiRaw[i].y)
                     const prevOk = i > 0 && pred(rsiRaw[i - 1].y)
-                    if (ok || prevOk) out.push({ x: rsiRaw[i].x, y: scaleRsi(rsiRaw[i].y) })
+                    if (ok || prevOk) out.push({ x: rsiRaw[i].x, y: rsiRaw[i].y })
                     else out.push({ x: rsiRaw[i].x, y: null })
                 }
                 return out
             }
-            // <30 green dotted, 30–70 white dashed, >70 red dotted
-            const rsiOs = zoneScaled(y => y < 30)
-            const rsiMid = zoneScaled(y => y >= 30 && y <= 70)
-            const rsiOb = zoneScaled(y => y > 70)
+            const rsiOs = zoneRsi(y => y < 30)            // green dotted
+            const rsiMid = zoneRsi(y => y >= 30 && y <= 70) // white dashed
+            const rsiOb = zoneRsi(y => y > 70)            // red dotted
             const ds = [
                 { label: data.coin + ' price', data: priceXY, type: 'line', yAxisID: 'y', borderColor: '#60a5fa', borderWidth: 1.5, pointRadius: 0, tension: 0, order: 3 },
-                { label: 'RSI <30', data: rsiOs, type: 'line', yAxisID: 'y', borderColor: '#22c55e', borderWidth: 1.5, borderDash: [2, 4], pointRadius: 0, tension: 0, spanGaps: false, order: 2 },
-                { label: 'RSI 30–70', data: rsiMid, type: 'line', yAxisID: 'y', borderColor: '#ffffff', borderWidth: 1.5, borderDash: [6, 4], pointRadius: 0, tension: 0, spanGaps: false, order: 2 },
-                { label: 'RSI >70', data: rsiOb, type: 'line', yAxisID: 'y', borderColor: '#ef4444', borderWidth: 1.5, borderDash: [2, 4], pointRadius: 0, tension: 0, spanGaps: false, order: 2 },
+                { label: 'RSI <30', data: rsiOs, type: 'line', yAxisID: 'yRsi', borderColor: '#22c55e', borderWidth: 2, borderDash: [2, 4], pointRadius: 0, tension: 0, spanGaps: false, order: 2 },
+                { label: 'RSI 30–70', data: rsiMid, type: 'line', yAxisID: 'yRsi', borderColor: '#ffffff', borderWidth: 2, borderDash: [6, 4], pointRadius: 0, tension: 0, spanGaps: false, order: 2 },
+                { label: 'RSI >70', data: rsiOb, type: 'line', yAxisID: 'yRsi', borderColor: '#ef4444', borderWidth: 2, borderDash: [2, 4], pointRadius: 0, tension: 0, spanGaps: false, order: 2 },
                 { label: 'Buy fills', data: toXY(data.buys), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#22c55e', borderColor: '#bbf7d0', pointBackgroundColor: '#22c55e', pointBorderColor: '#bbf7d0', pointRadius: 6, pointHoverRadius: 9, order: 1 },
                 { label: 'Sell fills', data: toXY(data.sells), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#ef4444', borderColor: '#fecaca', pointBackgroundColor: '#ef4444', pointBorderColor: '#fecaca', pointRadius: 6, pointHoverRadius: 9, order: 1 },
                 { label: 'Cancelled remake', data: toXY(data.remakes || []), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#9ca3af', borderColor: '#6b7280', pointBackgroundColor: '#9ca3af', pointBorderColor: '#e5e7eb', pointStyle: 'crossRot', pointRadius: 7, pointHoverRadius: 10, borderWidth: 2, order: 0 },
@@ -324,13 +320,26 @@ function renderSection () {
                     interaction: { mode: 'nearest', intersect: false },
                     scales: {
                         x: { type: 'time', ticks: { color: '#888' }, grid: { color: '#222' } },
-                        // Explicit linear Y shared by price + fill markers (yAxisID: 'y').
+                        // Price + fills + remake markers (left).
                         y: { type: 'linear', position: 'left', stacked: false, ticks: { color: '#888' }, grid: { color: '#222' } },
+                        // RSI 0–100 on the right so the dotted line is visible (not crushed into $ prices).
+                        yRsi: {
+                            type: 'linear', position: 'right', min: 0, max: 100,
+                            grid: { drawOnChartArea: false },
+                            ticks: { color: '#9ca3af', stepSize: 10 },
+                            title: { display: true, text: 'RSI', color: '#9ca3af' },
+                        },
                     },
                     plugins: {
                         legend: { labels: { color: '#ccc' } },
                         tooltip: { callbacks: { label: c => {
-                            const d = c.raw, base = c.dataset.label + ': $' + d.y
+                            const d = c.raw
+                            if (!d || d.y == null) return c.dataset.label
+                            if (c.dataset.yAxisID === 'yRsi') {
+                                const zone = d.y < 30 ? 'oversold' : d.y > 70 ? 'overbought' : 'neutral'
+                                return c.dataset.label + ': ' + Number(d.y).toFixed(2) + ' (' + zone + ')'
+                            }
+                            const base = c.dataset.label + ': $' + d.y
                             return d.size != null ? base + '  size ' + d.size + '  fee $' + Number(d.fee).toFixed(4) : base
                         } } },
                         zoom: { pan: { enabled: true, mode: 'x' }, zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' } },
