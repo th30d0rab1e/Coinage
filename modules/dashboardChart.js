@@ -356,7 +356,7 @@ function renderSection () {
             const ds = [
                 { label: data.coin + ' price', data: toXY(data.prices), type: 'line', yAxisID: 'y', borderColor: '#60a5fa', borderWidth: 1.5, pointRadius: 0, tension: 0, order: 3 },
                 {
-                    label: 'RSI(14)',
+                    label: 'RSI(7)',
                     data: rsiRaw,
                     type: 'line',
                     yAxisID: 'y1',

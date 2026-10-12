@@ -20,8 +20,8 @@ CREATE TABLE IF NOT EXISTS public.stock (
     -- products feed, sticky (never auto-cleared); every buy INSERT skips it.
     -- See db/migrations/2026-10-07_stablecoin_flag.sql.
     is_stablecoin        boolean NOT NULL DEFAULT false,
-    -- 2026-10-11: Wilder RSI(14) from price_aggregate day closes (latest day).
+    -- 2026-10-11: Wilder RSI(7) from price_aggregate day closes (latest day).
     -- NULL until the stock has 15 day closes. Filled by aggregate() via
-    -- fn_stock_rsi(14). See db/migrations/2026-10-11_stock_rsi_from_aggregate_days.sql.
+    -- fn_stock_rsi(7). See db/migrations/2026-10-11_stock_rsi_from_aggregate_days.sql.
     rsi                  numeric
 );

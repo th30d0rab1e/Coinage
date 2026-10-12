@@ -1,5 +1,5 @@
 -- 2026-10-11 (Theodore, voice): time series of stock.rsi for charting / logging.
--- Wilder RSI(14) itself still lives on stock and is computed in aggregate();
+-- Wilder RSI(7) itself still lives on stock and is computed in aggregate();
 -- this table only snapshots that value on a regular interval (5-minute buckets).
 CREATE TABLE IF NOT EXISTS public.rsi_history (
     rsi_history_id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

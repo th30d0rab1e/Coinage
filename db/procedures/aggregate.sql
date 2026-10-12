@@ -199,16 +199,16 @@ FROM (
 WHERE pat.stock_id = x.stock_id
 AND pat.period_type = x.period_type;
 
--- 2026-10-11: stock.rsi = Wilder RSI(14) from price_aggregate DAY closes
+-- 2026-10-11: stock.rsi = Wilder RSI(7) from price_aggregate DAY closes
 -- (see db/procedures/fn_stock_rsi.sql). Runs after the day closes above are
 -- refreshed, so the current day's close counts. price_aggregate is input only;
--- nothing here writes RSI to it. Stocks with under 15 day closes go to NULL.
+-- nothing here writes RSI to it. Stocks with under 8 day closes go to NULL.
 UPDATE stock s
 SET rsi = r.out_rsi
 FROM (
     SELECT st.stock_id, fr.out_rsi
     FROM stock st
-    LEFT JOIN fn_stock_rsi(14) fr ON fr.out_stock_id = st.stock_id
+    LEFT JOIN fn_stock_rsi(7) fr ON fr.out_stock_id = st.stock_id
 ) r
 WHERE s.stock_id = r.stock_id
 AND s.rsi IS DISTINCT FROM r.out_rsi;

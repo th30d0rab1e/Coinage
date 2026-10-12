@@ -1,4 +1,4 @@
--- 2026-10-11 (Theodore, voice): seed rsi_history from day closes (Wilder 14),
+-- 2026-10-11 (Theodore, voice): seed rsi_history from day closes (Wilder 7; was 14 until 2026-10-12),
 -- one point per stock per day. Live capture remains 5-minute via aggregate().
 CREATE OR REPLACE FUNCTION public.fn_backfill_rsi_history_days(p_days integer DEFAULT 90)
 RETURNS integer
@@ -16,7 +16,7 @@ DECLARE
     change double precision;
     rsi numeric;
     v_n integer := 0;
-    p_period integer := 14;
+    p_period integer := 7;
     inserted integer;
 BEGIN
     FOR r IN
@@ -69,7 +69,7 @@ BEGIN
             rsi,
             ((r.period_date + 1) AT TIME ZONE 'America/Chicago') - interval '1 second'
         )
-        ON CONFLICT (stock_id, captured_at) DO NOTHING;
+        ON CONFLICT (stock_id, captured_at) DO UPDATE SET rsi = EXCLUDED.rsi;
         GET DIAGNOSTICS inserted = ROW_COUNT;
         v_n := v_n + inserted;
     END LOOP;
@@ -78,4 +78,4 @@ END;
 $fn$;
 
 COMMENT ON FUNCTION public.fn_backfill_rsi_history_days(integer) IS
-    'Inserts one Wilder RSI(14) point per stock per day into rsi_history for the last p_days. Idempotent via unique (stock_id, captured_at).';
+    'Upserts one Wilder RSI(7) point per stock per day into rsi_history for the last p_days. Idempotent; ON CONFLICT updates rsi for existing day buckets.';

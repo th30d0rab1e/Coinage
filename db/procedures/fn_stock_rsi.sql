@@ -9,8 +9,8 @@
 --   RSI        = 100 - 100 / (1 + avg_gain / avg_loss)
 --                avg_loss = 0 -> 100; flat (both 0) -> 50
 -- Returns ONE row per stock_id: the RSI as of its latest day close. A stock
--- needs p_period + 1 day closes (15 for RSI(14)); fewer -> no row (stock.rsi NULL).
-CREATE OR REPLACE FUNCTION public.fn_stock_rsi(p_period integer DEFAULT 14)
+-- needs p_period + 1 day closes (8 for RSI(7)); fewer -> no row (stock.rsi NULL).
+CREATE OR REPLACE FUNCTION public.fn_stock_rsi(p_period integer DEFAULT 7)
 RETURNS TABLE(out_stock_id integer, out_rsi numeric)
 LANGUAGE plpgsql STABLE
 AS $fn$
@@ -84,4 +84,4 @@ END
 $fn$;
 
 COMMENT ON FUNCTION public.fn_stock_rsi(integer) IS
-    'Wilder RSI(p_period, default 14) per stock_id as of its latest price_aggregate day close (period_type=''day'', ordered by period_date). Reads price_aggregate only. One row per stock with at least p_period+1 day closes. Used by aggregate() to fill stock.rsi.';
+    'Wilder RSI(p_period, default 7) per stock_id as of its latest price_aggregate day close (period_type=''day'', ordered by period_date). Reads price_aggregate only. One row per stock with at least p_period+1 day closes. Used by aggregate() to fill stock.rsi.';

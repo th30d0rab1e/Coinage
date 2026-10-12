@@ -1061,7 +1061,7 @@ AND s.historical_avg_change_percent > 0
 -- top-50%-by-priority cut (ba3e579); s is the vw_signal year row.
 -- 2026-10-11 (Theodore): reverted NULL-as-0.1; require priority > 0 again.
 AND s.priority > 0
--- 2026-10-11 (Theodore, voice): oversold Wilder RSI(14) gate on stock.
+-- 2026-10-11 (Theodore, voice): oversold Wilder RSI(7) gate on stock.
 -- 2026-10-11 (Theodore, voice): raised from < 35 to < 50. NULL rsi fails
 -- the < 50 test (no buy until enough day history and RSI prints below 50).
 AND stock.rsi < 50
@@ -1384,7 +1384,7 @@ FROM (
     AND st.name LIKE '%-USD'
     -- 2026-10-11 (Theodore): reverted NULL-as-0.1; require priority > 0 again.
     AND st.priority > 0
-    -- 2026-10-11 (Theodore, voice): oversold RSI(14) gate, same as initial buy (< 50).
+    -- 2026-10-11 (Theodore, voice): oversold RSI(7) gate, same as initial buy (< 50).
     AND st.rsi < 50
     AND st.trading_disabled IS NOT TRUE
     AND st.is_stablecoin IS NOT TRUE
@@ -1488,7 +1488,7 @@ AND position.sell_price IS NULL
 -- 2026-10-11 (Theodore): dropped current-vs-average day gate
 -- (was d.current_change_percent > d.historical_avg_change_percent).
 -- Sell is still written only once when other gates pass.
--- 2026-10-11 (Theodore, voice): only price a sell when Wilder RSI(14) is
+-- 2026-10-11 (Theodore, voice): only price a sell when Wilder RSI(7) is
 -- above 50 (mirror of the buy rsi < 50 gate). NULL rsi fails > 50.
 AND stock.rsi > 50
 -- Estimated profit, from buy_filled_price and buy_fee alone: at the
