@@ -213,7 +213,9 @@ function renderSection () {
                 { label: data.coin + ' price', data: toXY(data.prices), type: 'line', yAxisID: 'y', borderColor: '#60a5fa', borderWidth: 1.5, pointRadius: 0, tension: 0, order: 3 },
                 { label: 'Buy fills', data: toXY(data.buys), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#22c55e', borderColor: '#bbf7d0', pointBackgroundColor: '#22c55e', pointBorderColor: '#bbf7d0', pointRadius: 6, pointHoverRadius: 9, order: 1 },
                 { label: 'Sell fills', data: toXY(data.sells), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#ef4444', borderColor: '#fecaca', pointBackgroundColor: '#ef4444', pointBorderColor: '#fecaca', pointRadius: 6, pointHoverRadius: 9, order: 1 },
-                { label: 'Cancelled remake', data: toXY(data.remakes || []), type: 'line', yAxisID: 'y', showLine: false, backgroundColor: '#9ca3af', borderColor: '#6b7280', pointBackgroundColor: '#9ca3af', pointBorderColor: '#e5e7eb', pointStyle: 'crossRot', pointRadius: 7, pointHoverRadius: 10, borderWidth: 2, order: 0 },
+                // 2026-10-11: remakes as scatter crosses ON TOP of the price line
+                // (order low = behind; after RSI cleanup they were easy to miss).
+                { label: 'Cancelled remake', data: toXY(data.remakes || []), type: 'scatter', yAxisID: 'y', backgroundColor: '#d1d5db', borderColor: '#f9fafb', pointBackgroundColor: '#9ca3af', pointBorderColor: '#f3f4f6', pointStyle: 'crossRot', radius: 8, hoverRadius: 11, borderWidth: 2, order: 10 },
             ]
             if (chart) chart.destroy()
             chart = new Chart(document.getElementById('pf-chart'), {
@@ -226,8 +228,9 @@ function renderSection () {
                         x: { type: 'time', ticks: { color: '#888' }, grid: { color: '#222' } },
                         y: { type: 'linear', position: 'left', ticks: { color: '#888' }, grid: { color: '#222' } },
                     },
+                    elements: { point: { pointStyle: 'circle' } },
                     plugins: {
-                        legend: { labels: { color: '#ccc' } },
+                        legend: { labels: { color: '#ccc', usePointStyle: true } },
                         tooltip: { callbacks: { label: c => {
                             const d = c.raw, base = c.dataset.label + ': $' + d.y
                             return d.size != null ? base + '  size ' + d.size + '  fee $' + Number(d.fee).toFixed(4) : base
@@ -264,7 +267,8 @@ function renderSection () {
                 const data = await r.json()
                 if (data.error) throw new Error(data.error)
                 draw(data)
-                status.textContent = (note ? note + ' · ' : '') + data.prices.length + ' price points · ' + data.buys.length + ' buys · ' + data.sells.length + ' sells · ' + data.source
+                const nRem = (data.remakes && data.remakes.length) || 0
+                status.textContent = (note ? note + ' · ' : '') + data.prices.length + ' price points · ' + data.buys.length + ' buys · ' + data.sells.length + ' sells · ' + nRem + ' remake cancels · ' + data.source
             } catch (e) { status.textContent = 'Error: ' + e.message }
             finally { loading = false }
         }
