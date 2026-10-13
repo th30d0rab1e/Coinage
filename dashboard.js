@@ -39,10 +39,15 @@ const PROFIT_HISTORY_24H_QUERY = `
 const OPEN_BUY_ORDERS_QUERY = `
     SELECT p.name, p.shares, p.buy_price, p.buy_stop_price, s.price AS current_price,
         s.rsi,
+        -- 2026-10-12 (Theodore): score + priority (year basis, same row thee_procedure
+        -- copies into stock.priority) and the position buy/sell counters.
+        s.priority, vs.score, p.buy_counter, p.sell_counter,
         ROUND(((p.buy_stop_price - s.price) / NULLIF(s.price, 0) * 100)::numeric, 4) AS pct_to_trigger,
         p.error_message, p.date_created
     FROM position p
     JOIN stock s ON s.stock_id = p.stock_id
+    -- 2026-10-12 (Theodore): score lives only in vw_signal; use the 'year' row to match stock.priority
+    LEFT JOIN (SELECT stock_id, score FROM vw_signal WHERE period_type = 'year') vs ON vs.stock_id = p.stock_id
     WHERE p.buy_coinbase_order_id IS NOT NULL AND p.buy_coinbase_order_id != ''
     AND p.buy_filled_price IS NULL
     ORDER BY pct_to_trigger ASC
@@ -52,6 +57,9 @@ const OPEN_POSITIONS_QUERY = `
     SELECT p.name, p.shares,
         p.buy_filled_price, s.price AS current_price, s.rsi, p.sell_price AS sell_target,
         p.sell_stop_price,
+        -- 2026-10-12 (Theodore): score + priority (year basis, same row thee_procedure
+        -- copies into stock.priority) and the position buy/sell counters.
+        s.priority, vs.score, p.buy_counter, p.sell_counter,
         ROUND(((p.sell_stop_price::numeric - s.price::numeric) / NULLIF(s.price::numeric, 0) * 100)::numeric, 4) AS sell_pct_to_trigger,
         p.sell_coinbase_order_id IS NOT NULL AND p.sell_coinbase_order_id != '' AS has_live_sell,
         p.error_message,
@@ -67,6 +75,8 @@ const OPEN_POSITIONS_QUERY = `
         ) AS current_profit
     FROM position p
     JOIN stock s ON s.stock_id = p.stock_id
+    -- 2026-10-12 (Theodore): score lives only in vw_signal; use the 'year' row to match stock.priority
+    LEFT JOIN (SELECT stock_id, score FROM vw_signal WHERE period_type = 'year') vs ON vs.stock_id = p.stock_id
     WHERE p.buy_filled_price IS NOT NULL AND p.sell_filled_price IS NULL
     ORDER BY has_live_sell DESC, current_profit DESC
 `
@@ -83,6 +93,9 @@ const SOLD_POSITIONS_QUERY = `
            p.sell_price AS sell_target,
            p.sell_stop_price,
            s.rsi,
+           -- 2026-10-12 (Theodore): score + priority (year basis, same row thee_procedure
+           -- copies into stock.priority) and the position buy/sell counters.
+           s.priority, vs.score, p.buy_counter, p.sell_counter,
            (
                (p.sell_filled_price::numeric * p.shares::numeric - COALESCE(p.sell_fee::numeric, 0))
                - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0))
@@ -91,6 +104,8 @@ const SOLD_POSITIONS_QUERY = `
            p.error_message
     FROM position p
     LEFT JOIN stock s ON s.stock_id = p.stock_id
+    -- 2026-10-12 (Theodore): score lives only in vw_signal; use the 'year' row to match stock.priority
+    LEFT JOIN (SELECT stock_id, score FROM vw_signal WHERE period_type = 'year') vs ON vs.stock_id = p.stock_id
     WHERE p.sell_filled_price IS NOT NULL
     ORDER BY p.date_created DESC
 `
@@ -187,6 +202,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
         <tr data-coin="${esc(r.name)}">
             <td class="buy-l"><span class="kind-buying">buying</span></td>
             <td class="buy-m">${esc(r.name)}</td>
+            <td class="buy-m">${num(r.score, 2)}</td><td class="buy-m">${num(r.priority, 2)}</td><td class="buy-m">${esc(r.buy_counter)}</td><td class="buy-m">${esc(r.sell_counter)}</td>
             <td class="buy-m">${num(r.shares)}</td>
             <td class="buy-m dim">—</td>
             <td class="buy-m">${money(buyCost)}</td>
@@ -211,6 +227,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
         <tr data-coin="${esc(r.name)}">
             <td class="buy-l"><span class="${kindClass}">${kind}</span></td>
             <td class="buy-m">${esc(r.name)}</td>
+            <td class="buy-m">${num(r.score, 2)}</td><td class="buy-m">${num(r.priority, 2)}</td><td class="buy-m">${esc(r.buy_counter)}</td><td class="buy-m">${esc(r.sell_counter)}</td>
             <td class="buy-m">${num(r.shares)}</td>
             <td class="buy-m">${num(r.buy_filled_price)}</td>
             <td class="buy-m">${money(buyCost)}</td>
@@ -233,6 +250,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
         <tr data-coin="${esc(r.name)}">
             <td class="buy-l"><span class="kind-sold">sold</span></td>
             <td class="buy-m">${esc(r.name)}</td>
+            <td class="buy-m">${num(r.score, 2)}</td><td class="buy-m">${num(r.priority, 2)}</td><td class="buy-m">${esc(r.buy_counter)}</td><td class="buy-m">${esc(r.sell_counter)}</td>
             <td class="buy-m">${num(r.shares)}</td>
             <td class="buy-m">${num(r.buy_filled_price)}</td>
             <td class="buy-m">${money(buyCost)}</td>
@@ -345,7 +363,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     <h2 id="h-positions">Position (${positionTotal})</h2>
     <table class="coin-filter" data-title="Position" data-total="${positionTotal}" data-colspan="16">
         <tr>
-            <th class="buy-l">Kind</th><th class="buy-m">Coin</th><th class="buy-m">Shares</th><th class="buy-m">Bought @</th><th class="buy-m">Value</th><th class="buy-m">Buy Limit</th><th class="buy-m">Buy Stop</th><th class="buy-r">Buy % to Trigger</th>
+            <th class="buy-l">Kind</th><th class="buy-m">Coin</th><th class="buy-m">Score</th><th class="buy-m">Priority</th><th class="buy-m">Buy Counter</th><th class="buy-m">Sell Counter</th><th class="buy-m">Shares</th><th class="buy-m">Bought @</th><th class="buy-m">Value</th><th class="buy-m">Buy Limit</th><th class="buy-m">Buy Stop</th><th class="buy-r">Buy % to Trigger</th>
             <th>Current</th>
             <th class="sell-l">Limit Price</th><th class="sell-m">Stop Price</th><th class="sell-m">Sell % to Trigger</th><th class="sell-m">Sell Order</th><th class="sell-m">Current Profit</th><th class="sell-r">Target Profit</th>
             <th>Error</th>
