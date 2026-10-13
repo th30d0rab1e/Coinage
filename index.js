@@ -1100,16 +1100,16 @@ async function buildEtfPlan() {
     // USD pot only.
     const sweepReserve = await usdcSweepReserve()
     if (sweepReserve > 0) notes.push(`ETF cash minus $${sweepReserve.toFixed(2)} profit queued for USDC`)
-    // 2026-10-12 (Theodore): ETF buys always fund from USD on the USD
-    // product. USDC pot / etf_usdc_fallback_usd / usdcProductId are ignored
-    // by fundAttemptsByCurrency (kept in the call for signature stability).
-    // USDC remains profit parking only (sweepProfitToUsdc).
+    // 2026-10-13 (Theodore): ETFs buy with USDC only; TOPW stays USD.
+    // Rule is data-driven: etf.usdc_product_id set -> USDC pot / USDC
+    // product, no USD fallback; NULL (only TOPW) -> USD pot / USD product.
+    // USDC pot = Default portfolio USDC available_to_trade.
     const usdcPot = Math.max(0, Number(book.usdcAvailable) || 0)
-    const fallbackUsd = await configBool('etf_usdc_fallback_usd', true)
-    notes.push(`ETF pots: $${Math.max(0, book.available - sweepReserve).toFixed(2)} USD (USDC buy path off; parked USDC ${usdcPot.toFixed(2)})`)
-    const funded = etfPlan.fundAttemptsByCurrency(chosen, { usd: Math.max(0, book.available - sweepReserve), usdc: usdcPot }, fallbackUsd)
-    for (const c of chosen) notes.push(`ETF plan ${c.ticker}: ${c.kind} — ${c.reason}${c.kind === 'limit' ? ` → ${c.baseSize} @ ${c.limitPrice}` : ''} [USD]`)
-    // leftover field; USDC buy path is off, so send-step never needs fallback.
+    if (book.usdcReason) notes.push(`ETF USDC unreadable (${book.usdcReason}); treating USDC as 0`)
+    notes.push(`ETF pots: ${usdcPot.toFixed(2)} USDC (USDC-only ETFs), $${Math.max(0, book.available - sweepReserve).toFixed(2)} USD (TOPW only)`)
+    const funded = etfPlan.fundAttemptsByCurrency(chosen, { usd: Math.max(0, book.available - sweepReserve), usdc: usdcPot })
+    for (const c of chosen) notes.push(`ETF plan ${c.ticker}: ${c.kind} — ${c.reason}${c.kind === 'limit' ? ` → ${c.baseSize} @ ${c.limitPrice}` : ''} [${c.usdcProductId ? 'USDC' : 'USD'}]`)
+    // No USD fallback: the send step skips a USDC row if USDC is short.
     for (const a of funded.attempts) a.fallbackUsd = false
     notes.push(...funded.notes)
     return { attempts: funded.attempts, reserve: funded.reserve, usdcPlanned: funded.usdcPlanned, notes }

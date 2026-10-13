@@ -93,16 +93,18 @@ function fundAttempts(chosen, available) {
     return { attempts, reserve, notes }
 }
 
-// 2026-10-12 (Theodore): ETF buys always pay with USD on the USD product.
-// USDC is profit parking only (sweepProfitToUsdc); never the ETF buy pot.
-// Same walk as fundAttempts: keep only rows Default USD can cover.
-// quoteCurrency is always 'USD', orderProductId is always etf.product_id.
-// row.usdcProductId / pots.usdc / fallbackUsd are ignored (signature kept
-// so index.js call sites stay stable). reserve = USD total for
-// config.etf_usd_reserve; usdcPlanned is always 0.
-function fundAttemptsByCurrency(chosen, pots, fallbackUsd) {
+// 2026-10-13 (Theodore): ETFs buy with USDC only; TOPW stays USD.
+// Same walk as fundAttempts, two separate pots, NO cross-currency fallback:
+//   - row.usdcProductId set (etf.usdc_product_id) -> USDC pot, USDC product.
+//     USDC short -> skip this minute (never USD).
+//   - row.usdcProductId NULL (TOPW) -> USD pot, USD product id.
+// reserve is USD ONLY (TOPW) -> config.etf_usd_reserve / vw_etf_cash_reserve,
+// so USDC-funded ETFs never hold back crypto USD. usdcPlanned = USDC total.
+function fundAttemptsByCurrency(chosen, pots) {
     let usd = Number(pots?.usd)
+    let usdc = Number(pots?.usdc)
     if (!Number.isFinite(usd)) usd = 0
+    if (!Number.isFinite(usdc)) usdc = 0
     const attempts = []
     const notes = []
     for (const row of chosen) {
@@ -112,6 +114,15 @@ function fundAttemptsByCurrency(chosen, pots, fallbackUsd) {
             notes.push(`ETF skip ${row.ticker}: bad notional ${costText} (not reserved)`)
             continue
         }
+        if (row.usdcProductId) {
+            if (usdc >= cost) {
+                attempts.push({ ...row, quoteCurrency: 'USDC', orderProductId: row.usdcProductId })
+                usdc -= cost
+                continue
+            }
+            notes.push(`ETF skip ${row.ticker}: needs ${costText} USDC, have ${usdc.toFixed(2)} USDC (USDC only, not reserved)`)
+            continue
+        }
         if (usd >= cost) {
             attempts.push({ ...row, quoteCurrency: 'USD', orderProductId: row.product_id })
             usd -= cost
@@ -119,8 +130,10 @@ function fundAttemptsByCurrency(chosen, pots, fallbackUsd) {
         }
         notes.push(`ETF skip ${row.ticker}: limit needs $${costText} Default USD, have $${usd.toFixed(2)} (not reserved)`)
     }
-    const reserve = attempts.reduce((total, row) => total + Number(row.notional), 0)
-    return { attempts, reserve, usdcPlanned: 0, notes }
+    const sum = (cur) => attempts
+        .filter((row) => row.quoteCurrency === cur)
+        .reduce((total, row) => total + Number(row.notional), 0)
+    return { attempts, reserve: sum('USD'), usdcPlanned: sum('USDC'), notes }
 }
 
 module.exports = {
