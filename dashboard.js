@@ -41,13 +41,18 @@ const OPEN_BUY_ORDERS_QUERY = `
         s.rsi,
         -- 2026-10-12 (Theodore): score + priority (year basis, same row thee_procedure
         -- copies into stock.priority) and the position buy/sell counters.
-        s.priority, vs.score, p.buy_counter, p.sell_counter,
+        rk.priority_rank, s.priority, vs.score, p.buy_counter, p.sell_counter,
         ROUND(((p.buy_stop_price - s.price) / NULLIF(s.price, 0) * 100)::numeric, 4) AS pct_to_trigger,
         p.error_message, p.date_created
     FROM position p
     JOIN stock s ON s.stock_id = p.stock_id
     -- 2026-10-12 (Theodore): score lives only in vw_signal; use the 'year' row to match stock.priority
     LEFT JOIN (SELECT stock_id, score FROM vw_signal WHERE period_type = 'year') vs ON vs.stock_id = p.stock_id
+    -- 2026-10-12 (Theodore): rank by priority across ALL stocks with a priority
+    -- (same ORDER BY priority DESC thee_procedure buys by). Highest = 1; ties share a rank.
+    -- NULL priority -> no row here -> rank NULL (shown as —).
+    LEFT JOIN (SELECT stock_id, RANK() OVER (ORDER BY priority DESC) AS priority_rank
+               FROM stock WHERE priority IS NOT NULL) rk ON rk.stock_id = p.stock_id
     WHERE p.buy_coinbase_order_id IS NOT NULL AND p.buy_coinbase_order_id != ''
     AND p.buy_filled_price IS NULL
     ORDER BY pct_to_trigger ASC
@@ -59,7 +64,7 @@ const OPEN_POSITIONS_QUERY = `
         p.sell_stop_price,
         -- 2026-10-12 (Theodore): score + priority (year basis, same row thee_procedure
         -- copies into stock.priority) and the position buy/sell counters.
-        s.priority, vs.score, p.buy_counter, p.sell_counter,
+        rk.priority_rank, s.priority, vs.score, p.buy_counter, p.sell_counter,
         ROUND(((p.sell_stop_price::numeric - s.price::numeric) / NULLIF(s.price::numeric, 0) * 100)::numeric, 4) AS sell_pct_to_trigger,
         p.sell_coinbase_order_id IS NOT NULL AND p.sell_coinbase_order_id != '' AS has_live_sell,
         p.error_message,
@@ -77,6 +82,11 @@ const OPEN_POSITIONS_QUERY = `
     JOIN stock s ON s.stock_id = p.stock_id
     -- 2026-10-12 (Theodore): score lives only in vw_signal; use the 'year' row to match stock.priority
     LEFT JOIN (SELECT stock_id, score FROM vw_signal WHERE period_type = 'year') vs ON vs.stock_id = p.stock_id
+    -- 2026-10-12 (Theodore): rank by priority across ALL stocks with a priority
+    -- (same ORDER BY priority DESC thee_procedure buys by). Highest = 1; ties share a rank.
+    -- NULL priority -> no row here -> rank NULL (shown as —).
+    LEFT JOIN (SELECT stock_id, RANK() OVER (ORDER BY priority DESC) AS priority_rank
+               FROM stock WHERE priority IS NOT NULL) rk ON rk.stock_id = p.stock_id
     WHERE p.buy_filled_price IS NOT NULL AND p.sell_filled_price IS NULL
     ORDER BY has_live_sell DESC, current_profit DESC
 `
@@ -95,7 +105,7 @@ const SOLD_POSITIONS_QUERY = `
            s.rsi,
            -- 2026-10-12 (Theodore): score + priority (year basis, same row thee_procedure
            -- copies into stock.priority) and the position buy/sell counters.
-           s.priority, vs.score, p.buy_counter, p.sell_counter,
+           rk.priority_rank, s.priority, vs.score, p.buy_counter, p.sell_counter,
            (
                (p.sell_filled_price::numeric * p.shares::numeric - COALESCE(p.sell_fee::numeric, 0))
                - (p.buy_filled_price::numeric * p.shares::numeric + COALESCE(p.buy_fee::numeric, 0))
@@ -106,6 +116,11 @@ const SOLD_POSITIONS_QUERY = `
     LEFT JOIN stock s ON s.stock_id = p.stock_id
     -- 2026-10-12 (Theodore): score lives only in vw_signal; use the 'year' row to match stock.priority
     LEFT JOIN (SELECT stock_id, score FROM vw_signal WHERE period_type = 'year') vs ON vs.stock_id = p.stock_id
+    -- 2026-10-12 (Theodore): rank by priority across ALL stocks with a priority
+    -- (same ORDER BY priority DESC thee_procedure buys by). Highest = 1; ties share a rank.
+    -- NULL priority -> no row here -> rank NULL (shown as —).
+    LEFT JOIN (SELECT stock_id, RANK() OVER (ORDER BY priority DESC) AS priority_rank
+               FROM stock WHERE priority IS NOT NULL) rk ON rk.stock_id = p.stock_id
     WHERE p.sell_filled_price IS NOT NULL
     ORDER BY p.date_created DESC
 `
@@ -209,7 +224,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
             <td class="buy-m">${num(r.buy_price)}</td>
             <td class="buy-m">${num(r.buy_stop_price)}</td>
             <td class="buy-r">${r.pct_to_trigger}%</td>
-            <td class="mid-col">${num(r.score, 2)}</td><td class="mid-col">${num(r.priority, 2)}</td>
+            <td class="mid-col">${r.priority_rank == null ? '—' : esc(r.priority_rank)}</td><td class="mid-col">${num(r.score, 2)}</td><td class="mid-col">${num(r.priority, 2)}</td>
             <td>${num(r.current_price)}</td>
             <td class="sell-l">${esc(r.sell_counter)}</td>
             <td class="sell-m dim">—</td>
@@ -236,7 +251,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
             <td class="buy-m dim">—</td>
             <td class="buy-m dim">—</td>
             <td class="buy-r dim">—</td>
-            <td class="mid-col">${num(r.score, 2)}</td><td class="mid-col">${num(r.priority, 2)}</td>
+            <td class="mid-col">${r.priority_rank == null ? '—' : esc(r.priority_rank)}</td><td class="mid-col">${num(r.score, 2)}</td><td class="mid-col">${num(r.priority, 2)}</td>
             <td>${num(r.current_price)}</td>
             <td class="sell-l">${esc(r.sell_counter)}</td>
             <td class="sell-m">${num(r.sell_target)}</td>
@@ -261,7 +276,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
             <td class="buy-m dim">—</td>
             <td class="buy-m dim">—</td>
             <td class="buy-r dim">—</td>
-            <td class="mid-col">${num(r.score, 2)}</td><td class="mid-col">${num(r.priority, 2)}</td>
+            <td class="mid-col">${r.priority_rank == null ? '—' : esc(r.priority_rank)}</td><td class="mid-col">${num(r.score, 2)}</td><td class="mid-col">${num(r.priority, 2)}</td>
             <td class="dim">—</td>
             <td class="sell-l">${esc(r.sell_counter)}</td>
             <td class="sell-m">${num(r.sell_fill_price)}</td>
@@ -373,17 +388,17 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     ${pfChart.renderSection()}
 
     <h2 id="h-positions">Position (${positionTotal})</h2>
-    <table id="positions-table" class="coin-filter" data-title="Position" data-total="${positionTotal}" data-colspan="20">
+    <table id="positions-table" class="coin-filter" data-title="Position" data-total="${positionTotal}" data-colspan="21">
         <thead><tr>
             <th class="buy-l">Kind</th><th class="buy-m">Coin</th><th class="buy-m">Buy Counter</th><th class="buy-m">Shares</th><th class="buy-m">Bought @</th><th class="buy-m">Value</th><th class="buy-m">Buy Limit</th><th class="buy-m">Buy Stop</th><th class="buy-r">Buy % to Trigger</th>
             <!-- 2026-10-12 (Theodore): neutral middle section, not buy (green) or sell (red) -->
-            <th class="mid-col">Score</th><th class="mid-col">Priority</th>
+            <th class="mid-col">Rank</th><th class="mid-col">Score</th><th class="mid-col">Priority</th>
             <th>Current</th>
             <th class="sell-l">Sell Counter</th><th class="sell-m">Limit Price</th><th class="sell-m">Stop Price</th><th class="sell-m">Sell % to Trigger</th><th class="sell-m">Sell Order</th><th class="sell-m">Current Profit</th><th class="sell-r">Target Profit</th>
             <th>Error</th>
         </tr></thead>
         <tbody>
-        ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="20">No buying / bought / selling / sold rows</td></tr>'}
+        ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="21">No buying / bought / selling / sold rows</td></tr>'}
         </tbody>
     </table>
 
