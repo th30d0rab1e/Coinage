@@ -202,13 +202,14 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
         <tr data-coin="${esc(r.name)}">
             <td class="buy-l"><span class="kind-buying">buying</span></td>
             <td class="buy-m"><a href="#" class="pos-coin" data-coin="${esc(r.name)}">${esc(r.name)}</a></td>
-            <td class="buy-m">${num(r.score, 2)}</td><td class="buy-m">${num(r.priority, 2)}</td><td class="buy-m">${esc(r.buy_counter)}</td>
+            <td class="buy-m">${esc(r.buy_counter)}</td>
             <td class="buy-m">${num(r.shares)}</td>
             <td class="buy-m dim">—</td>
             <td class="buy-m">${money(buyCost)}</td>
             <td class="buy-m">${num(r.buy_price)}</td>
             <td class="buy-m">${num(r.buy_stop_price)}</td>
             <td class="buy-r">${r.pct_to_trigger}%</td>
+            <td class="mid-col">${num(r.score, 2)}</td><td class="mid-col">${num(r.priority, 2)}</td>
             <td>${num(r.current_price)}</td>
             <td class="sell-l">${esc(r.sell_counter)}</td>
             <td class="sell-m dim">—</td>
@@ -228,13 +229,14 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
         <tr data-coin="${esc(r.name)}">
             <td class="buy-l"><span class="${kindClass}">${kind}</span></td>
             <td class="buy-m"><a href="#" class="pos-coin" data-coin="${esc(r.name)}">${esc(r.name)}</a></td>
-            <td class="buy-m">${num(r.score, 2)}</td><td class="buy-m">${num(r.priority, 2)}</td><td class="buy-m">${esc(r.buy_counter)}</td>
+            <td class="buy-m">${esc(r.buy_counter)}</td>
             <td class="buy-m">${num(r.shares)}</td>
             <td class="buy-m">${num(r.buy_filled_price)}</td>
             <td class="buy-m">${money(buyCost)}</td>
             <td class="buy-m dim">—</td>
             <td class="buy-m dim">—</td>
             <td class="buy-r dim">—</td>
+            <td class="mid-col">${num(r.score, 2)}</td><td class="mid-col">${num(r.priority, 2)}</td>
             <td>${num(r.current_price)}</td>
             <td class="sell-l">${esc(r.sell_counter)}</td>
             <td class="sell-m">${num(r.sell_target)}</td>
@@ -252,13 +254,14 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
         <tr data-coin="${esc(r.name)}">
             <td class="buy-l"><span class="kind-sold">sold</span></td>
             <td class="buy-m"><a href="#" class="pos-coin" data-coin="${esc(r.name)}">${esc(r.name)}</a></td>
-            <td class="buy-m">${num(r.score, 2)}</td><td class="buy-m">${num(r.priority, 2)}</td><td class="buy-m">${esc(r.buy_counter)}</td>
+            <td class="buy-m">${esc(r.buy_counter)}</td>
             <td class="buy-m">${num(r.shares)}</td>
             <td class="buy-m">${num(r.buy_filled_price)}</td>
             <td class="buy-m">${money(buyCost)}</td>
             <td class="buy-m dim">—</td>
             <td class="buy-m dim">—</td>
             <td class="buy-r dim">—</td>
+            <td class="mid-col">${num(r.score, 2)}</td><td class="mid-col">${num(r.priority, 2)}</td>
             <td class="dim">—</td>
             <td class="sell-l">${esc(r.sell_counter)}</td>
             <td class="sell-m">${num(r.sell_fill_price)}</td>
@@ -339,6 +342,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     #positions-table th { cursor: pointer; user-select: none; }
     #positions-table th.sort-asc::after { content: " ▲"; }
     #positions-table th.sort-desc::after { content: " ▼"; }
+    th.mid-col, td.mid-col { color: #ddd; }   /* neutral middle: no green/red outline */
     a.pos-coin { color: #60a5fa; text-decoration: underline; cursor: pointer; }
     .coin-filter-note { font-size: 12px; color: #888; margin: -24px 0 8px; }
     .cash-bar { display:flex; gap:24px; flex-wrap:wrap; align-items:baseline; margin: 12px 0 8px;
@@ -369,14 +373,18 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     ${pfChart.renderSection()}
 
     <h2 id="h-positions">Position (${positionTotal})</h2>
-    <table id="positions-table" class="coin-filter" data-title="Position" data-total="${positionTotal}" data-colspan="16">
-        <tr>
-            <th class="buy-l">Kind</th><th class="buy-m">Coin</th><th class="buy-m">Score</th><th class="buy-m">Priority</th><th class="buy-m">Buy Counter</th><th class="buy-m">Shares</th><th class="buy-m">Bought @</th><th class="buy-m">Value</th><th class="buy-m">Buy Limit</th><th class="buy-m">Buy Stop</th><th class="buy-r">Buy % to Trigger</th>
+    <table id="positions-table" class="coin-filter" data-title="Position" data-total="${positionTotal}" data-colspan="20">
+        <thead><tr>
+            <th class="buy-l">Kind</th><th class="buy-m">Coin</th><th class="buy-m">Buy Counter</th><th class="buy-m">Shares</th><th class="buy-m">Bought @</th><th class="buy-m">Value</th><th class="buy-m">Buy Limit</th><th class="buy-m">Buy Stop</th><th class="buy-r">Buy % to Trigger</th>
+            <!-- 2026-10-12 (Theodore): neutral middle section, not buy (green) or sell (red) -->
+            <th class="mid-col">Score</th><th class="mid-col">Priority</th>
             <th>Current</th>
             <th class="sell-l">Sell Counter</th><th class="sell-m">Limit Price</th><th class="sell-m">Stop Price</th><th class="sell-m">Sell % to Trigger</th><th class="sell-m">Sell Order</th><th class="sell-m">Current Profit</th><th class="sell-r">Target Profit</th>
             <th>Error</th>
-        </tr>
-        ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="16">No buying / bought / selling / sold rows</td></tr>'}
+        </tr></thead>
+        <tbody>
+        ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="20">No buying / bought / selling / sold rows</td></tr>'}
+        </tbody>
     </table>
 
     <h2 id="h-fills">Last 100 Fills</h2>
@@ -475,7 +483,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
             const c = tr.cells[i]; if (!c) return null
             const t = c.textContent.trim()
             if (t === '' || t === '—') return null
-            const n = parseFloat(t.replace(/[$,%\s]/g, ''))
+            const n = parseFloat(t.replace(/[$,%\\s]/g, ''))  // \\s: escaped for the server template literal
             return Number.isNaN(n) ? t.toLowerCase() : n
         }
         function sortBy (i, dir) {
