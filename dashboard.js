@@ -358,6 +358,12 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     #positions-table th.sort-asc::after { content: " ▲"; }
     #positions-table th.sort-desc::after { content: " ▼"; }
     th.mid-col, td.mid-col { color: #ddd; }   /* neutral middle: no green/red outline */
+    /* 2026-10-12 (Theodore): responsive tables. Each table sits in .table-wrap, which
+       scrolls sideways when the table is wider than the window, so the page itself
+       never overflows; padding/font shrink on narrower windows. */
+    .table-wrap { width: 100%; max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    @media (max-width: 1100px) { body { padding: 14px; } table { font-size: 12px; } th, td { padding: 5px 7px; } }
+    @media (max-width: 700px)  { body { padding: 8px; }  table { font-size: 11px; } th, td { padding: 4px 5px; } }
     a.pos-coin { color: #60a5fa; text-decoration: underline; cursor: pointer; }
     .coin-filter-note { font-size: 12px; color: #888; margin: -24px 0 8px; }
     .cash-bar { display:flex; gap:24px; flex-wrap:wrap; align-items:baseline; margin: 12px 0 8px;
@@ -388,7 +394,7 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     ${pfChart.renderSection()}
 
     <h2 id="h-positions">Position (${positionTotal})</h2>
-    <table id="positions-table" class="coin-filter" data-title="Position" data-total="${positionTotal}" data-colspan="21">
+    <div class="table-wrap"><table id="positions-table" class="coin-filter" data-title="Position" data-total="${positionTotal}" data-colspan="21">
         <thead><tr>
             <th class="buy-l">Kind</th><th class="buy-m">Coin</th><th class="buy-m">Buy Counter</th><th class="buy-m">Shares</th><th class="buy-m">Bought @</th><th class="buy-m">Value</th><th class="buy-m">Buy Limit</th><th class="buy-m">Buy Stop</th><th class="buy-r">Buy % to Trigger</th>
             <!-- 2026-10-12 (Theodore): neutral middle section, not buy (green) or sell (red) -->
@@ -400,33 +406,33 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
         <tbody>
         ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="21">No buying / bought / selling / sold rows</td></tr>'}
         </tbody>
-    </table>
+    </table></div>
 
     <h2 id="h-fills">Last 100 Fills</h2>
-    <table class="coin-filter" data-title="Last 100 Fills" data-total="${recentFills.length}" data-colspan="7">
+    <div class="table-wrap"><table class="coin-filter" data-title="Last 100 Fills" data-total="${recentFills.length}" data-colspan="7">
         <tr><th>Coin</th><th>RSI</th><th>Type</th><th>Price</th><th>Shares</th><th>Fee</th><th>When</th></tr>
         ${fillRows || '<tr class="coin-filter-empty"><td class="empty" colspan="7">No fills recorded</td></tr>'}
-    </table>
+    </table></div>
 
     <h2>Profit Summary</h2>
     <p class="coin-filter-note">Portfolio-wide by period type — not filtered by the chart coin (no per-coin summary query yet).</p>
-    <table>
+    <div class="table-wrap"><table>
         <tr>
             <th>Period</th><th>Total Trades</th><th>All-Time Profit</th><th>All-Time Avg</th>
             <th>Today Trades</th><th>Today Profit</th><th>Today Avg</th>
             <th>Month Trades</th><th>Month Profit</th><th>Month Avg</th>
         </tr>
         ${summaryRows || '<tr><td class="empty" colspan="10">No data</td></tr>'}
-    </table>
+    </table></div>
 
     <h2 id="h-history">Profit History — Last 24 Hours (${profitHistory24h.length})</h2>
-    <table class="coin-filter" data-title="Profit History — Last 24 Hours" data-total="${profitHistory24h.length}" data-colspan="9">
+    <div class="table-wrap"><table class="coin-filter" data-title="Profit History — Last 24 Hours" data-total="${profitHistory24h.length}" data-colspan="9">
         <tr>
             <th>Coin</th><th>RSI</th><th>Period</th><th>Buy Price</th><th>Sell Price</th>
             <th>Buy Fee</th><th>Sell Fee</th><th>Profit</th><th>When</th>
         </tr>
         ${historyRows || '<tr class="coin-filter-empty"><td class="empty" colspan="8">No trades in the last 24 hours</td></tr>'}
-    </table>
+    </table></div>
     <script>
     // 2026-10-11: filter coin-tagged tables from the Price & Fills dropdown
     // (CustomEvent pf-coin-filter from modules/dashboardChart.js).

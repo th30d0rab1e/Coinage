@@ -275,8 +275,44 @@ async function chartData (coin, range) {
         p: Number(r.p), limit: Number(r.lim), side: r.side, position_id: r.position_id,
     })).filter(d => Number.isFinite(d.t) && Number.isFinite(d.p) && d.p > 0)
 
+    // 2026-10-13 (Theodore): buy->sell pairs for the dotted pairing lines.
+    // Closed trades: profit_history links buy_coinbase_order_id -> sell_fills_id
+    // (both are fills.order_id). Positions still on the table with a filled sell
+    // link buy_coinbase_order_id -> sell_coinbase_order_id. Each end = that order's
+    // FIRST fill (same dot plotted on the chart). Both ends must be inside the range.
+    const pairRes = await db.query(`
+        WITH links AS (
+            SELECT buy_coinbase_order_id AS buy_oid, sell_fills_id AS sell_oid
+            FROM profit_history WHERE name = $1
+            UNION
+            SELECT buy_coinbase_order_id, sell_coinbase_order_id
+            FROM position WHERE name = $1 AND sell_filled_price IS NOT NULL
+        ),
+        first_fill AS (   -- earliest fill per order in range
+            SELECT DISTINCT ON (order_id) order_id, trade_time AS t, price AS p
+            FROM fills WHERE product_id = $1 AND trade_time >= $2
+            ORDER BY order_id, trade_time
+        )
+        SELECT b.t AS bt, b.p AS bp, s.t AS st, s.p AS sp
+        FROM links l
+        JOIN first_fill b ON b.order_id = l.buy_oid
+        JOIN first_fill s ON s.order_id = l.sell_oid`, [coin, since])
+    // Open bags: filled buy -> its resting sell order (the hollow red circle).
+    const openPairRes = await db.query(`
+        SELECT DISTINCT ON (p.position_id) p.position_id, f.trade_time AS bt, f.price AS bp
+        FROM position p
+        JOIN fills f ON f.order_id = p.buy_coinbase_order_id AND f.trade_time >= $2
+        WHERE p.name = $1 AND p.buy_filled_price IS NOT NULL AND p.sell_filled_price IS NULL
+        ORDER BY p.position_id, f.trade_time`, [coin, since])
+    const pairs = pairRes.rows.map(r => ({ bt: new Date(r.bt).getTime(), bp: Number(r.bp), st: new Date(r.st).getTime(), sp: Number(r.sp), open: false }))
+    for (const r of openPairRes.rows) {
+        const o = openOrders.find(x => x.side === 'sell' && x.position_id === r.position_id)
+        if (o) pairs.push({ bt: new Date(r.bt).getTime(), bp: Number(r.bp), st: o.t, sp: o.p, open: true })
+    }
+
     return {
         coin, range, source,
+        pairs: pairs.filter(x => [x.bt, x.bp, x.st, x.sp].every(Number.isFinite)),
         prices,
         buys: fills.filter(f => f.side === 'BUY').map(mapFill),
         sells: fills.filter(f => f.side === 'SELL').map(mapFill),
@@ -394,9 +430,32 @@ function renderSection () {
                 { label: 'Open buy', data: toXY(data.open_buys || []), type: 'scatter', yAxisID: 'y', pointStyle: 'circle', backgroundColor: 'rgba(0,0,0,0)', pointBackgroundColor: 'rgba(0,0,0,0)', borderColor: '#22c55e', pointBorderColor: '#22c55e', pointBorderWidth: 2, borderWidth: 2, radius: 6, hoverRadius: 9, order: 9 },
                 { label: 'Open sell', data: toXY(data.open_sells || []), type: 'scatter', yAxisID: 'y', pointStyle: 'circle', backgroundColor: 'rgba(0,0,0,0)', pointBackgroundColor: 'rgba(0,0,0,0)', borderColor: '#ef4444', pointBorderColor: '#ef4444', pointBorderWidth: 2, borderWidth: 2, radius: 6, hoverRadius: 9, order: 9 },
             ]
+            // 2026-10-13 (Theodore): dotted gray line from each buy fill to its paired
+            // sell (filled sell dot, or resting sell = hollow red circle). Drawn by a
+            // tiny per-chart plugin under the markers: no datasets, legend or tooltips.
+            const pairs = data.pairs || []
+            const pairLines = {
+                id: 'pairLines',
+                beforeDatasetsDraw (c) {
+                    const { ctx, chartArea: a, scales: { x, y } } = c
+                    ctx.save()
+                    ctx.beginPath(); ctx.rect(a.left, a.top, a.right - a.left, a.bottom - a.top); ctx.clip()
+                    ctx.setLineDash([4, 4]); ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(200,200,200,0.55)'
+                    let drawn = 0
+                    for (const pr of pairs) {
+                        ctx.beginPath()
+                        ctx.moveTo(x.getPixelForValue(pr.bt), y.getPixelForValue(pr.bp))
+                        ctx.lineTo(x.getPixelForValue(pr.st), y.getPixelForValue(pr.sp))
+                        ctx.stroke(); drawn++
+                    }
+                    ctx.restore()
+                    c.$pairLinesDrawn = drawn   // exposed for testing
+                },
+            }
             if (chart) chart.destroy()
             chart = new Chart(document.getElementById('pf-chart'), {
                 type: 'line',
+                plugins: [pairLines],
                 data: { datasets: ds },
                 options: {
                     responsive: true, maintainAspectRatio: false, animation: false, parsing: false,
