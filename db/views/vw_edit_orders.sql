@@ -198,11 +198,13 @@ FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
 CROSS JOIN gap g
 CROSS JOIN cfg  -- one-row "variables" (see WITH at the top)
+-- 2026-10-13 (Theodore): scale buy-remake gap by stock RSI(7): RSI 50+ = full gap, lower RSI = stop closer to price. Floor still applies.
 CROSS JOIN LATERAL (
     SELECT GREATEST(
                1 + cfg.buy_remake_floor_pct / 100,
-               1 + g.gap - p.buy_counter::numeric
-                   * cfg.buy_remake_step_pct / 100
+               1 + (g.gap - p.buy_counter::numeric
+                   * cfg.buy_remake_step_pct / 100)
+                   * LEAST(1, COALESCE(s.rsi, 50) / 50)
            ) AS stop_mult
 ) bal
 -- Lowest price paid among this coin's open filled bags (NULL = not held).
