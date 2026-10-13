@@ -2825,7 +2825,7 @@ COMMENT ON COLUMN public.etf.is_special IS 'True for every ETF row (BLOX, CHPY, 
 -- Name: COLUMN etf.usdc_product_id; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.etf.usdc_product_id IS 'USDC-quoted EQUITY product id for this ticker. 2026-10-13 (Theodore): ETFs buy with USDC only; TOPW stays USD. Set = buy on this id with USDC, no USD fallback. NULL (TOPW) = buy product_id with USD.';
+COMMENT ON COLUMN public.etf.usdc_product_id IS 'USDC-quoted EQUITY product id. 2026-10-13 (Theodore): all ETFs buy with USDC only (no USD). Set = buy on this id with USDC. NULL (e.g. TOPW) = not bought.';
 
 
 --

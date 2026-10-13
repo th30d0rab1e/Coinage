@@ -93,17 +93,14 @@ function fundAttempts(chosen, available) {
     return { attempts, reserve, notes }
 }
 
-// 2026-10-13 (Theodore): ETFs buy with USDC only; TOPW stays USD.
-// Same walk as fundAttempts, two separate pots, NO cross-currency fallback:
+// 2026-10-13 (Theodore): all ETFs buy with USDC only (no USD).
 //   - row.usdcProductId set (etf.usdc_product_id) -> USDC pot, USDC product.
 //     USDC short -> skip this minute (never USD).
-//   - row.usdcProductId NULL (TOPW) -> USD pot, USD product id.
-// reserve is USD ONLY (TOPW) -> config.etf_usd_reserve / vw_etf_cash_reserve,
-// so USDC-funded ETFs never hold back crypto USD. usdcPlanned = USDC total.
+//   - row.usdcProductId NULL (no USDC product, e.g. TOPW) -> never bought.
+// reserve (config.etf_usd_reserve / vw_etf_cash_reserve) is always 0, so
+// ETFs never hold back crypto USD. usdcPlanned = USDC total.
 function fundAttemptsByCurrency(chosen, pots) {
-    let usd = Number(pots?.usd)
     let usdc = Number(pots?.usdc)
-    if (!Number.isFinite(usd)) usd = 0
     if (!Number.isFinite(usdc)) usdc = 0
     const attempts = []
     const notes = []
@@ -123,17 +120,12 @@ function fundAttemptsByCurrency(chosen, pots) {
             notes.push(`ETF skip ${row.ticker}: needs ${costText} USDC, have ${usdc.toFixed(2)} USDC (USDC only, not reserved)`)
             continue
         }
-        if (usd >= cost) {
-            attempts.push({ ...row, quoteCurrency: 'USD', orderProductId: row.product_id })
-            usd -= cost
-            continue
-        }
-        notes.push(`ETF skip ${row.ticker}: limit needs $${costText} Default USD, have $${usd.toFixed(2)} (not reserved)`)
+        notes.push(`ETF skip ${row.ticker}: no USDC product on Coinbase (USDC only, not bought)`)
     }
     const sum = (cur) => attempts
         .filter((row) => row.quoteCurrency === cur)
         .reduce((total, row) => total + Number(row.notional), 0)
-    return { attempts, reserve: sum('USD'), usdcPlanned: sum('USDC'), notes }
+    return { attempts, reserve: 0, usdcPlanned: sum('USDC'), notes }
 }
 
 module.exports = {

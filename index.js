@@ -1100,15 +1100,15 @@ async function buildEtfPlan() {
     // USD pot only.
     const sweepReserve = await usdcSweepReserve()
     if (sweepReserve > 0) notes.push(`ETF cash minus $${sweepReserve.toFixed(2)} profit queued for USDC`)
-    // 2026-10-13 (Theodore): ETFs buy with USDC only; TOPW stays USD.
-    // Rule is data-driven: etf.usdc_product_id set -> USDC pot / USDC
-    // product, no USD fallback; NULL (only TOPW) -> USD pot / USD product.
+    // 2026-10-13 (Theodore): all ETFs buy with USDC only (no USD).
+    // etf.usdc_product_id set -> USDC pot / USDC product, no USD fallback;
+    // NULL (TOPW today) -> not bought. USD reserve for ETFs is always 0.
     // USDC pot = Default portfolio USDC available_to_trade.
     const usdcPot = Math.max(0, Number(book.usdcAvailable) || 0)
     if (book.usdcReason) notes.push(`ETF USDC unreadable (${book.usdcReason}); treating USDC as 0`)
-    notes.push(`ETF pots: ${usdcPot.toFixed(2)} USDC (USDC-only ETFs), $${Math.max(0, book.available - sweepReserve).toFixed(2)} USD (TOPW only)`)
+    notes.push(`ETF pots: ${usdcPot.toFixed(2)} USDC (all ETFs USDC only; USD not used)`)
     const funded = etfPlan.fundAttemptsByCurrency(chosen, { usd: Math.max(0, book.available - sweepReserve), usdc: usdcPot })
-    for (const c of chosen) notes.push(`ETF plan ${c.ticker}: ${c.kind} — ${c.reason}${c.kind === 'limit' ? ` → ${c.baseSize} @ ${c.limitPrice}` : ''} [${c.usdcProductId ? 'USDC' : 'USD'}]`)
+    for (const c of chosen) notes.push(`ETF plan ${c.ticker}: ${c.kind} — ${c.reason}${c.kind === 'limit' ? ` → ${c.baseSize} @ ${c.limitPrice}` : ''} [${c.usdcProductId ? 'USDC' : 'no USDC product - not bought'}]`)
     // No USD fallback: the send step skips a USDC row if USDC is short.
     for (const a of funded.attempts) a.fallbackUsd = false
     notes.push(...funded.notes)
