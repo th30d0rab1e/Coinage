@@ -311,6 +311,8 @@ function renderSection () {
         </label>
         <select id="pf-range" style="background:#1a1a1a;color:#ddd;border:1px solid #333;border-radius:6px;padding:6px">${ranges}</select>
         <button id="pf-reset" style="background:#333;color:#ddd;border:0;border-radius:6px;padding:6px 10px">Reset zoom</button>
+        <!-- 2026-10-12 (Theodore): shown while rotation is paused by a manual pick -->
+        <button id="pf-resume" style="display:none;background:#2563eb;color:#fff;border:0;border-radius:6px;padding:6px 10px">Resume cycling</button>
         <span id="pf-status" class="dim"></span>
     </div>
     <div style="position:relative;height:420px;background:#151515;border-radius:8px;padding:8px"><canvas id="pf-chart"></canvas></div>
@@ -483,12 +485,18 @@ function renderSection () {
                     return
                 }
                 await load(data.coin, label + ' ' + data.coin)
+                // Trade event interrupts rotation: hold this coin one full slot, then resume.
+                scheduleRotate(ROTATE_MS)
             } catch (e) { /* keep last chart; next poll retries */ }
         }
 
         // Manual override: All clears filter; a coin loads chart + filters tables.
         // Auto-follow still jumps on the next sell (and refilters).
+        // 2026-10-12: only real user picks (and coin-link clicks, which dispatch
+        // 'change') land here — rotation calls load() directly and setting
+        // coinSel.value in code never fires 'change' — so this = manual pause.
         coinSel.addEventListener('change', () => {
+            pauseRotation()
             if (!coinSel.value) showAll('Manual')
             else load(coinSel.value, 'Manual')
         })
@@ -532,6 +540,47 @@ function renderSection () {
                 else if (!current) emitFilter(null)
             })
         }).catch(e => { coinSel.innerHTML = '<option value="">All</option>'; status.textContent = 'Error: ' + e.message })
+
+        // 2026-10-12 (Theodore): rotate through the Positions coins every 20s.
+        // List = buying/bought/selling rows (sold skipped), deduped, in the table's
+        // CURRENT DOM order (re-read every step, so re-sorting changes the order).
+        const ROTATE_MS = window.PF_ROTATE_MS || 20000
+        const resumeBtn = document.getElementById('pf-resume')
+        let rotateTimer = null, paused = false, lastRotCoin = null
+        function rotationCoins () {
+            const out = []
+            document.querySelectorAll('#positions-table tbody tr[data-coin]').forEach(tr => {
+                if (tr.querySelector('.kind-sold')) return
+                const c = tr.getAttribute('data-coin')
+                if (c && !out.includes(c)) out.push(c)
+            })
+            return out
+        }
+        function scheduleRotate (ms) {
+            clearTimeout(rotateTimer)
+            if (!paused) rotateTimer = setTimeout(rotateStep, ms)
+        }
+        function rotateStep () {
+            const list = rotationCoins()
+            if (list.length) {
+                // Continue after the last coin rotation showed (wraps around).
+                const next = list[(list.indexOf(lastRotCoin) + 1) % list.length]
+                lastRotCoin = next
+                load(next, 'Cycling ' + (list.indexOf(next) + 1) + '/' + list.length)
+            }
+            scheduleRotate(ROTATE_MS)
+        }
+        function pauseRotation () {
+            paused = true
+            clearTimeout(rotateTimer)
+            resumeBtn.style.display = ''
+        }
+        resumeBtn.addEventListener('click', () => {
+            paused = false
+            resumeBtn.style.display = 'none'
+            rotateStep()   // pick up right where rotation left off
+        })
+        scheduleRotate(ROTATE_MS)
 
         setInterval(pollLatestEvent, POLL_MS)
         document.addEventListener('visibilitychange', () => { if (!document.hidden) pollLatestEvent() })

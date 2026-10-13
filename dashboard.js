@@ -296,8 +296,8 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
 <meta charset="utf-8">
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
-<!-- 2026-10-12 (Theodore): reload the whole page every 60s so prices/tables stay current -->
-<meta http-equiv="refresh" content="60">
+<!-- 2026-10-12 (Theodore): meta refresh removed — tables now refresh in place every 60s
+     (see refreshTablesInPlace script at the bottom) so the chart/rotation keep running. -->
 <title>Coinbase Bot Dashboard</title>
 <style>
     body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #111; color: #ddd; margin: 0; padding: 24px; }
@@ -504,7 +504,10 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
             sortBy(i, dir)
             localStorage.setItem(KEY, JSON.stringify({ i, dir }))
         }))
-        try { const s = JSON.parse(localStorage.getItem(KEY)); if (s && ths[s.i]) sortBy(s.i, s.dir) } catch (e) {}
+        // Reapply the saved sort; exposed so the in-place refresh can call it after swapping tbody.
+        function reapplySort () { try { const s = JSON.parse(localStorage.getItem(KEY)); if (s && ths[s.i]) sortBy(s.i, s.dir) } catch (e) {} }
+        window.reapplyPositionsSort = reapplySort
+        reapplySort()
 
         // 2026-10-12 (Theodore): clicking a coin name = a manual Price & Fills dropdown
         // pick. Reuses dashboardChart.js's own override (the #pf-coin 'change' handler
@@ -522,6 +525,35 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
             sel.dispatchEvent(new Event('change'))
             document.getElementById('pf-chart').scrollIntoView({ behavior: 'smooth', block: 'center' })
         })
+    })()
+    </script>
+    <script>
+    // 2026-10-12 (Theodore): in-place refresh every 60s instead of a full page reload.
+    // Fetch this page, swap the data tables' contents (Positions: just its tbody, so
+    // the sortable header + its listeners stay), then reapply the saved sort and the
+    // chart's current coin filter. Chart + rotation are never torn down. Coin links
+    // keep working because their click handler is delegated on the table element.
+    (function () {
+        const REFRESH_MS = window.DASH_REFRESH_MS || 60000
+        async function refreshTablesInPlace () {
+            try {
+                const html = await (await fetch(location.pathname, { cache: 'no-store' })).text()
+                const fresh = new DOMParser().parseFromString(html, 'text/html')
+                const oldTables = document.querySelectorAll('table'), newTables = fresh.querySelectorAll('table')
+                if (oldTables.length !== newTables.length) return   // layout changed: skip, try next time
+                oldTables.forEach((t, i) => {
+                    const n = newTables[i]
+                    if (t.id === 'positions-table') t.tBodies[0].innerHTML = n.tBodies[0].innerHTML
+                    else t.innerHTML = n.innerHTML
+                    if (n.dataset.total != null) t.dataset.total = n.dataset.total
+                })
+                if (window.reapplyPositionsSort) window.reapplyPositionsSort()
+                const sel = document.getElementById('pf-coin')
+                if (window.applyDashboardCoinFilter) window.applyDashboardCoinFilter((sel && sel.value) || null)
+                window.dispatchEvent(new CustomEvent('dash-refreshed'))
+            } catch (e) { /* keep current tables; next tick retries */ }
+        }
+        setInterval(refreshTablesInPlace, REFRESH_MS)
     })()
     </script>
 </body>
