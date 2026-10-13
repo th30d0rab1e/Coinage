@@ -38,3 +38,6 @@ COMMENT ON COLUMN public.usd_transfer.amount IS
     'USD, always positive. Direction comes from type.';
 COMMENT ON COLUMN public.usd_transfer.date IS
     'When Coinbase created the deposit/withdrawal, America/Chicago local time (same convention as date_created / created_at).';
+
+-- 2026-10-12: see db/migrations/2026-10-12_usd_transfer_cleared_notified_at.sql
+ALTER TABLE public.usd_transfer ADD COLUMN IF NOT EXISTS cleared_notified_at timestamp without time zone;

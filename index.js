@@ -30,6 +30,8 @@ var etfBuyAlerts = require('./modules/sendEtfBuyNotifications.js')
 // dividend_receipt + Pushover alert. GET-only, every 5 min, never throws.
 // See modules/dividendAlerts.js.
 var dividendAlerts = require('./modules/dividendAlerts.js')
+// 2026-10-12: Pushover when a held USD deposit becomes available to trade.
+var depositClearedAlerts = require('./modules/depositClearedAlerts.js')
 // Set each run before thee_procedure. False means no Coinbase equity
 // session (pre-market, regular, after-hours, overnight) is open: place no new ETF order and reserve no USD (resting limits are
 // still synced / expired every run). When it is true, etfAttemptsThisRun is
@@ -66,6 +68,10 @@ async function main () {
         //fetch fresh data first so thee_procedure sees current orders, fills, and balance
         const pnc = processNewCoins();
         const pnb = processNewBalance();
+        // 2026-10-12: deposit-cleared check starts BEFORE any buy so the bot
+        // can't spend the cleared cash first; not awaited until the end of
+        // main() and never throws, so it never delays or blocks trading.
+        const dca = depositClearedAlerts.run(db, ca);
         const pnf = processNewFills();
         const poo = processOpenOrders();
         const ppd = processPriceData();
@@ -203,6 +209,7 @@ async function main () {
         // config.pushover_dividend_alerts.
         await etfBuyAlerts.run(db, ca);
         await dividendAlerts.run(db, ca);
+        await dca;
 
 
     } catch (error) {
