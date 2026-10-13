@@ -201,8 +201,8 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
         return `
         <tr data-coin="${esc(r.name)}">
             <td class="buy-l"><span class="kind-buying">buying</span></td>
-            <td class="buy-m">${esc(r.name)}</td>
-            <td class="buy-m">${num(r.score, 2)}</td><td class="buy-m">${num(r.priority, 2)}</td><td class="buy-m">${esc(r.buy_counter)}</td><td class="buy-m">${esc(r.sell_counter)}</td>
+            <td class="buy-m"><a href="#" class="pos-coin" data-coin="${esc(r.name)}">${esc(r.name)}</a></td>
+            <td class="buy-m">${num(r.score, 2)}</td><td class="buy-m">${num(r.priority, 2)}</td><td class="buy-m">${esc(r.buy_counter)}</td>
             <td class="buy-m">${num(r.shares)}</td>
             <td class="buy-m dim">—</td>
             <td class="buy-m">${money(buyCost)}</td>
@@ -210,7 +210,8 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
             <td class="buy-m">${num(r.buy_stop_price)}</td>
             <td class="buy-r">${r.pct_to_trigger}%</td>
             <td>${num(r.current_price)}</td>
-            <td class="sell-l dim">—</td>
+            <td class="sell-l">${esc(r.sell_counter)}</td>
+            <td class="sell-m dim">—</td>
             <td class="sell-m dim">—</td>
             <td class="sell-m dim">—</td>
             <td class="sell-m dim">—</td>
@@ -226,8 +227,8 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
         return `
         <tr data-coin="${esc(r.name)}">
             <td class="buy-l"><span class="${kindClass}">${kind}</span></td>
-            <td class="buy-m">${esc(r.name)}</td>
-            <td class="buy-m">${num(r.score, 2)}</td><td class="buy-m">${num(r.priority, 2)}</td><td class="buy-m">${esc(r.buy_counter)}</td><td class="buy-m">${esc(r.sell_counter)}</td>
+            <td class="buy-m"><a href="#" class="pos-coin" data-coin="${esc(r.name)}">${esc(r.name)}</a></td>
+            <td class="buy-m">${num(r.score, 2)}</td><td class="buy-m">${num(r.priority, 2)}</td><td class="buy-m">${esc(r.buy_counter)}</td>
             <td class="buy-m">${num(r.shares)}</td>
             <td class="buy-m">${num(r.buy_filled_price)}</td>
             <td class="buy-m">${money(buyCost)}</td>
@@ -235,7 +236,8 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
             <td class="buy-m dim">—</td>
             <td class="buy-r dim">—</td>
             <td>${num(r.current_price)}</td>
-            <td class="sell-l">${num(r.sell_target)}</td>
+            <td class="sell-l">${esc(r.sell_counter)}</td>
+            <td class="sell-m">${num(r.sell_target)}</td>
             <td class="sell-m">${num(r.sell_stop_price)}</td>
             <td class="sell-m">${r.sell_pct_to_trigger == null ? '—' : (r.sell_pct_to_trigger + '%')}</td>
             <td class="sell-m">${r.has_live_sell ? '<span class="pos">live</span>' : '<span class="dim">none</span>'}</td>
@@ -249,8 +251,8 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
         return `
         <tr data-coin="${esc(r.name)}">
             <td class="buy-l"><span class="kind-sold">sold</span></td>
-            <td class="buy-m">${esc(r.name)}</td>
-            <td class="buy-m">${num(r.score, 2)}</td><td class="buy-m">${num(r.priority, 2)}</td><td class="buy-m">${esc(r.buy_counter)}</td><td class="buy-m">${esc(r.sell_counter)}</td>
+            <td class="buy-m"><a href="#" class="pos-coin" data-coin="${esc(r.name)}">${esc(r.name)}</a></td>
+            <td class="buy-m">${num(r.score, 2)}</td><td class="buy-m">${num(r.priority, 2)}</td><td class="buy-m">${esc(r.buy_counter)}</td>
             <td class="buy-m">${num(r.shares)}</td>
             <td class="buy-m">${num(r.buy_filled_price)}</td>
             <td class="buy-m">${money(buyCost)}</td>
@@ -258,7 +260,8 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
             <td class="buy-m dim">—</td>
             <td class="buy-r dim">—</td>
             <td class="dim">—</td>
-            <td class="sell-l">${num(r.sell_fill_price)}</td>
+            <td class="sell-l">${esc(r.sell_counter)}</td>
+            <td class="sell-m">${num(r.sell_fill_price)}</td>
             <td class="sell-m dim">—</td>
             <td class="sell-m dim">—</td>
             <td class="sell-m dim">filled</td>
@@ -332,6 +335,11 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     }
     .empty { color: #666; padding: 12px 0; }
     tr.coin-filter-empty td { color: #666; }
+    /* 2026-10-12 (Theodore): sortable Positions headers + clickable coin names */
+    #positions-table th { cursor: pointer; user-select: none; }
+    #positions-table th.sort-asc::after { content: " ▲"; }
+    #positions-table th.sort-desc::after { content: " ▼"; }
+    a.pos-coin { color: #60a5fa; text-decoration: underline; cursor: pointer; }
     .coin-filter-note { font-size: 12px; color: #888; margin: -24px 0 8px; }
     .cash-bar { display:flex; gap:24px; flex-wrap:wrap; align-items:baseline; margin: 12px 0 8px;
                 padding: 12px 16px; background:#151515; border:1px solid #2a2a2a; border-radius:8px; }
@@ -361,11 +369,11 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     ${pfChart.renderSection()}
 
     <h2 id="h-positions">Position (${positionTotal})</h2>
-    <table class="coin-filter" data-title="Position" data-total="${positionTotal}" data-colspan="16">
+    <table id="positions-table" class="coin-filter" data-title="Position" data-total="${positionTotal}" data-colspan="16">
         <tr>
-            <th class="buy-l">Kind</th><th class="buy-m">Coin</th><th class="buy-m">Score</th><th class="buy-m">Priority</th><th class="buy-m">Buy Counter</th><th class="buy-m">Sell Counter</th><th class="buy-m">Shares</th><th class="buy-m">Bought @</th><th class="buy-m">Value</th><th class="buy-m">Buy Limit</th><th class="buy-m">Buy Stop</th><th class="buy-r">Buy % to Trigger</th>
+            <th class="buy-l">Kind</th><th class="buy-m">Coin</th><th class="buy-m">Score</th><th class="buy-m">Priority</th><th class="buy-m">Buy Counter</th><th class="buy-m">Shares</th><th class="buy-m">Bought @</th><th class="buy-m">Value</th><th class="buy-m">Buy Limit</th><th class="buy-m">Buy Stop</th><th class="buy-r">Buy % to Trigger</th>
             <th>Current</th>
-            <th class="sell-l">Limit Price</th><th class="sell-m">Stop Price</th><th class="sell-m">Sell % to Trigger</th><th class="sell-m">Sell Order</th><th class="sell-m">Current Profit</th><th class="sell-r">Target Profit</th>
+            <th class="sell-l">Sell Counter</th><th class="sell-m">Limit Price</th><th class="sell-m">Stop Price</th><th class="sell-m">Sell % to Trigger</th><th class="sell-m">Sell Order</th><th class="sell-m">Current Profit</th><th class="sell-r">Target Profit</th>
             <th>Error</th>
         </tr>
         ${positionRows || '<tr class="coin-filter-empty"><td class="empty" colspan="16">No buying / bought / selling / sold rows</td></tr>'}
@@ -451,6 +459,61 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
         }
         window.applyDashboardCoinFilter = applyCoinFilter
         window.addEventListener('pf-coin-filter', e => applyCoinFilter(e.detail && e.detail.coin))
+    })()
+    </script>
+    <script>
+    // 2026-10-12 (Theodore): click a Positions header to sort (click again = flip).
+    // Numeric-aware ($, %, commas stripped); blanks / "—" always sort last.
+    // Choice saved in localStorage so the 60s meta refresh doesn't reset it.
+    (function () {
+        const table = document.getElementById('positions-table')
+        if (!table) return
+        const tbody = table.tBodies[0]
+        const ths = Array.from(table.tHead.rows[0].cells)
+        const KEY = 'positionsSort'
+        function cellVal (tr, i) {
+            const c = tr.cells[i]; if (!c) return null
+            const t = c.textContent.trim()
+            if (t === '' || t === '—') return null
+            const n = parseFloat(t.replace(/[$,%\s]/g, ''))
+            return Number.isNaN(n) ? t.toLowerCase() : n
+        }
+        function sortBy (i, dir) {
+            const rows = Array.from(tbody.rows).filter(r => !r.classList.contains('coin-filter-empty'))
+            rows.sort((a, b) => {
+                const x = cellVal(a, i), y = cellVal(b, i)
+                if (x === null && y === null) return 0
+                if (x === null) return 1          // blanks last either direction
+                if (y === null) return -1
+                const cmp = (typeof x === 'number' && typeof y === 'number') ? x - y : String(x).localeCompare(String(y))
+                return dir === 'desc' ? -cmp : cmp
+            })
+            rows.forEach(r => tbody.appendChild(r))
+            ths.forEach((th, j) => { th.classList.remove('sort-asc', 'sort-desc'); if (j === i) th.classList.add('sort-' + dir) })
+        }
+        ths.forEach((th, i) => th.addEventListener('click', () => {
+            const dir = th.classList.contains('sort-asc') ? 'desc' : 'asc'
+            sortBy(i, dir)
+            localStorage.setItem(KEY, JSON.stringify({ i, dir }))
+        }))
+        try { const s = JSON.parse(localStorage.getItem(KEY)); if (s && ths[s.i]) sortBy(s.i, s.dir) } catch (e) {}
+
+        // 2026-10-12 (Theodore): clicking a coin name = a manual Price & Fills dropdown
+        // pick. Reuses dashboardChart.js's own override (the #pf-coin 'change' handler
+        // that loads the chart + filters tables), then scrolls up to the chart.
+        table.addEventListener('click', e => {
+            const a = e.target.closest('a.pos-coin'); if (!a) return
+            e.preventDefault()
+            const coin = a.dataset.coin
+            const search = document.getElementById('pf-coin-search')
+            const sel = document.getElementById('pf-coin')
+            if (!sel) return
+            if (search && search.value) { search.value = ''; search.dispatchEvent(new Event('input')) }
+            if (!Array.from(sel.options).some(o => o.value === coin)) sel.add(new Option(coin, coin))
+            sel.value = coin
+            sel.dispatchEvent(new Event('change'))
+            document.getElementById('pf-chart').scrollIntoView({ behavior: 'smooth', block: 'center' })
+        })
     })()
     </script>
 </body>
