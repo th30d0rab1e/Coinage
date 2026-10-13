@@ -479,7 +479,8 @@ function renderSection () {
                             const base = c.dataset.label + ': $' + d.y
                             return d.size != null ? base + '  size ' + d.size + '  fee $' + Number(d.fee).toFixed(4) : base
                         } } },
-                        zoom: { pan: { enabled: true, mode: 'x' }, zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' } },
+                        // 2026-10-13 (Theodore): no scroll/pinch zoom on the chart (drag-pan kept)
+                        zoom: { pan: { enabled: true, mode: 'x' }, zoom: { wheel: { enabled: false }, pinch: { enabled: false }, mode: 'x' } },
                     },
                 },
             })
