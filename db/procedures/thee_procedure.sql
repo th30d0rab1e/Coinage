@@ -1490,7 +1490,11 @@ AND position.sell_price IS NULL
 -- Sell is still written only once when other gates pass.
 -- 2026-10-11 (Theodore, voice): only price a sell when Wilder RSI(7) is
 -- above 50 (mirror of the buy rsi < 50 gate). NULL rsi fails > 50.
-AND stock.rsi > 50
+-- 2026-10-13 (Theodore): RSI > 50 OR free USD < $1. When cash is nearly
+-- gone, price the sell regardless of RSI so bags can close and free cash.
+-- vw_balance USD available is free cash (holds excluded). NULL rsi still
+-- fails the RSI half; NULL USD row fails the cash half.
+AND (stock.rsi > 50 OR (SELECT available::numeric FROM vw_balance WHERE name = 'USD') < 1)
 -- Estimated profit, from buy_filled_price and buy_fee alone: at the
 -- fee-adjusted floor price (same CEIL(...) breakeven formula as above),
 -- proceeds after an estimated sell fee (same buy-side fee rate, falling
@@ -1552,7 +1556,11 @@ AND position.buy_filled_price IS NOT NULL
 AND position.sell_price IS NULL
 AND stock.price_rounding IS NOT NULL
 -- 2026-10-11 (Theodore, voice): same RSI > 50 gate as normal sell pricing.
-AND stock.rsi > 50
+-- 2026-10-13 (Theodore): RSI > 50 OR free USD < $1. When cash is nearly
+-- gone, price the sell regardless of RSI so bags can close and free cash.
+-- vw_balance USD available is free cash (holds excluded). NULL rsi still
+-- fails the RSI half; NULL USD row fails the cash half.
+AND (stock.rsi > 50 OR (SELECT available::numeric FROM vw_balance WHERE name = 'USD') < 1)
 -- Same profit check as the UPDATE above: at the rounded fee breakeven,
 -- proceeds after an estimated sell fee (same buy-side fee rate) must exceed
 -- total cost (buy_filled_price * shares + buy_fee).
