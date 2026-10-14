@@ -8,3 +8,4 @@ backups/
 
 # equity Ed25519 key lives in the user home; never commit a copy
 .coinage-equity-key.json
+logWatchState.json
