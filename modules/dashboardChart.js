@@ -253,23 +253,26 @@ async function chartData (coin, range) {
 
     // 2026-10-12: open (resting) orders as hollow circles. Y = stop/trigger
     // (same convention as remake X), falling back to limit. Chart-only.
+    // 2026-10-13 (Theodore): X = when the order was actually placed on
+    // Coinbase (bulk_open_orders.created_time, stored as UTC), not the buy
+    // fill / remake time. Joined on the live Coinbase order id, so only orders
+    // really resting on Coinbase are drawn (priced-but-unplaced sells have no
+    // placement time and are no longer shown as open).
     const openRes = await db.query(`
-        SELECT position_id,
-               CASE WHEN buy_filled_price IS NULL THEN 'buy' ELSE 'sell' END AS side,
-               CASE WHEN buy_filled_price IS NULL THEN COALESCE(buy_stop_price, buy_price)
-                    ELSE COALESCE(sell_stop_price, sell_price) END AS p,
-               CASE WHEN buy_filled_price IS NULL THEN COALESCE(buy_price, buy_stop_price)
-                    ELSE COALESCE(sell_price, sell_stop_price) END AS lim,
-               CASE WHEN buy_filled_price IS NULL
-                    THEN COALESCE(last_remade_at, buy_placed_at, date_created)
-                    ELSE COALESCE(last_remade_at, buy_filled_date, date_created) END AS t
-        FROM position
-        WHERE name = $1
-          AND (
-              (buy_filled_price IS NULL AND COALESCE(buy_stop_price, buy_price) IS NOT NULL)
-              OR (buy_filled_price IS NOT NULL AND sell_filled_price IS NULL
-                  AND COALESCE(sell_stop_price, sell_price) IS NOT NULL)
-          )`, [coin])
+        SELECT p.position_id,
+               CASE WHEN p.buy_filled_price IS NULL THEN 'buy' ELSE 'sell' END AS side,
+               CASE WHEN p.buy_filled_price IS NULL THEN COALESCE(p.buy_stop_price, p.buy_price)
+                    ELSE COALESCE(p.sell_stop_price, p.sell_price) END AS p,
+               CASE WHEN p.buy_filled_price IS NULL THEN COALESCE(p.buy_price, p.buy_stop_price)
+                    ELSE COALESCE(p.sell_price, p.sell_stop_price) END AS lim,
+               o.created_time AT TIME ZONE 'UTC' AS t
+        FROM position p
+        JOIN bulk_open_orders o
+          ON o.order_id = CASE WHEN p.buy_filled_price IS NULL
+                               THEN p.buy_coinbase_order_id
+                               ELSE p.sell_coinbase_order_id END
+        WHERE p.name = $1
+          AND p.sell_filled_price IS NULL`, [coin])
     const openOrders = openRes.rows.map(r => ({
         t: Math.max(new Date(r.t).getTime(), since.getTime()),
         p: Number(r.p), limit: Number(r.lim), side: r.side, position_id: r.position_id,
