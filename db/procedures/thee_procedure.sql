@@ -94,6 +94,7 @@ DECLARE
     v_fee_percent                numeric;
     v_bba_fresh                  boolean;
     v_gap                        numeric;
+    v_usd_available              numeric;  -- 2026-10-13 (Theodore): free USD, read once for the sell RSI-or-cash gate
 BEGIN
 
 -- 2026-10-07 (migrations/2026-10-07_avg_profit_config.sql): refresh
@@ -128,6 +129,9 @@ v_sell_net_cushion           := COALESCE((SELECT value::numeric FROM config WHER
 v_bba_fresh                  := EXISTS (SELECT 1 FROM bulk_best_bid_ask WHERE loaded_at > NOW() - INTERVAL '3 minutes');
 -- Read before the fee-learning step below: a newly learned fee applies next run.
 v_fee_percent                := COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20);
+-- 2026-10-13 (Theodore): free USD (holds excluded), read once at the top so
+-- both sell-pricing gates use the same value instead of a subquery each.
+v_usd_available              := (SELECT available::numeric FROM vw_balance WHERE name = 'USD');
 -- Start-of-run cash-scaled buy-stop gap, shared by all three buy statements.
 v_gap                        := (SELECT gap FROM vw_buy_stop_gap);
 -- 2026-10-08 dip-buy (see the header). The switch: a missing row means OFF.
@@ -1494,7 +1498,7 @@ AND position.sell_price IS NULL
 -- gone, price the sell regardless of RSI so bags can close and free cash.
 -- vw_balance USD available is free cash (holds excluded). NULL rsi still
 -- fails the RSI half; NULL USD row fails the cash half.
-AND (stock.rsi > 50 OR (SELECT available::numeric FROM vw_balance WHERE name = 'USD') < 1)
+AND (stock.rsi > 50 OR v_usd_available < 1)
 -- Estimated profit, from buy_filled_price and buy_fee alone: at the
 -- fee-adjusted floor price (same CEIL(...) breakeven formula as above),
 -- proceeds after an estimated sell fee (same buy-side fee rate, falling
@@ -1560,7 +1564,7 @@ AND stock.price_rounding IS NOT NULL
 -- gone, price the sell regardless of RSI so bags can close and free cash.
 -- vw_balance USD available is free cash (holds excluded). NULL rsi still
 -- fails the RSI half; NULL USD row fails the cash half.
-AND (stock.rsi > 50 OR (SELECT available::numeric FROM vw_balance WHERE name = 'USD') < 1)
+AND (stock.rsi > 50 OR v_usd_available < 1)
 -- Same profit check as the UPDATE above: at the rounded fee breakeven,
 -- proceeds after an estimated sell fee (same buy-side fee rate) must exceed
 -- total cost (buy_filled_price * shares + buy_fee).
