@@ -938,7 +938,12 @@ async function buildEtfPlan() {
         // catch-up sizing, pending/resting skips, cash/USDC funding) is
         // unchanged.
         `SELECT e.ticker, e.product_id, e.usdc_product_id,
-                e.quote_usd
+                e.quote_usd,
+                -- 2026-10-15 (Theodore): avg cost = all BUY fills on the
+                -- ETF's USD + USDC products; used to sort lowest P&L first.
+                (SELECT SUM(f.price * f.size) / NULLIF(SUM(f.size), 0)
+                 FROM fills f
+                 WHERE f.side = 'BUY' AND f.product_id IN (e.product_id, e.usdc_product_id)) AS avg_cost
          FROM etf e
          WHERE e.enabled
          ORDER BY e.ticker`
@@ -1090,6 +1095,8 @@ async function buildEtfPlan() {
             notional: Number(baseSize) * Number(limitPrice),
             basisPrice: basis.price,
             priceBasis: basis.source,
+            // 2026-10-15 (Theodore): unrealized P&L % = (bid - avg cost) / avg cost.
+            pnlPct: Number(row.avg_cost) > 0 ? (Number(basis.price) - Number(row.avg_cost)) / Number(row.avg_cost) * 100 : null,
             // Live Coinbase session the order is placed in.
             session,
             reason: `limit ${stepPct}% under ${basis.source} ${Number(basis.price).toFixed(4)}${wholeShares ? ` [${session.replace('EQUITY_TRADING_SESSION_', '')} whole shares]` : ''}`,
@@ -1107,8 +1114,11 @@ async function buildEtfPlan() {
     const usdcPot = Math.max(0, Number(book.usdcAvailable) || 0)
     if (book.usdcReason) notes.push(`ETF USDC unreadable (${book.usdcReason}); treating USDC as 0`)
     notes.push(`ETF pots: ${usdcPot.toFixed(2)} USDC (USDC-only ETFs), $${Math.max(0, book.available - sweepReserve).toFixed(2)} USD (TOPW only)`)
+    // 2026-10-15 (Theodore): buy lowest P&L first (funding walks this order);
+    // never-held ETFs (no fills) go first.
+    chosen.sort((a, b) => (a.pnlPct ?? -Infinity) - (b.pnlPct ?? -Infinity))
     const funded = etfPlan.fundAttemptsByCurrency(chosen, { usd: Math.max(0, book.available - sweepReserve), usdc: usdcPot })
-    for (const c of chosen) notes.push(`ETF plan ${c.ticker}: ${c.kind} — ${c.reason}${c.kind === 'limit' ? ` → ${c.baseSize} @ ${c.limitPrice}` : ''} [${c.usdcProductId ? 'USDC' : 'USD'}]`)
+    for (const c of chosen) notes.push(`ETF plan ${c.ticker}: ${c.kind} — ${c.reason}${c.kind === 'limit' ? ` → ${c.baseSize} @ ${c.limitPrice}` : ''} [${c.usdcProductId ? 'USDC' : 'USD'}] P&L ${c.pnlPct == null ? 'n/a' : c.pnlPct.toFixed(2) + '%'}`)
     // No USD fallback: the send step skips a USDC row if USDC is short.
     for (const a of funded.attempts) a.fallbackUsd = false
     notes.push(...funded.notes)
