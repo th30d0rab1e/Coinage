@@ -121,9 +121,13 @@ ca.gatherBalance = async function (dbOrders) {
 ca.gatherFills = async function () {
     try {
         const response = await getApiCall('GET', '/api/v3/brokerage/orders/historical/fills', '');
-        return response.data.fills;
+        return response.data.fills || [];
     } catch (error) {
-        console.log("gatherFills()", error);
+        // 2026-10-15 (Theodore): Coinbase blips (e.g. 502) just skip this run's
+        // fills with one short line, instead of dumping the error page and
+        // crashing processNewFills (which set off the emergency log alert).
+        console.log(`gatherFills() skipped: Coinbase HTTP ${error.response?.status ?? error.code ?? 'no response'}`);
+        return [];
     }
 }
 
