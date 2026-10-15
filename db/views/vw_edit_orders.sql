@@ -302,8 +302,8 @@ AND ns.new_stop >= p.sell_price::numeric
 -- FIX 1: profit gate at the NEW stop, not the old limit.
 AND pr.net_at_new_stop > 0
 AND pr.net_at_new_stop > (SELECT COALESCE(AVG(profit), 0) FROM profit_history WHERE period_type = p.period_type)
--- Only the cheapest open bag per coin (creation_hierarchy ranks by fill).
-AND p.creation_hierarchy = 1
+-- 2026-10-15 (Theodore): removed creation_hierarchy = 1; every open sell bag
+-- trails (bigger bags use the looser per-bag gap).
 -- 2026-10-08: only remake after the price has RISEN since the last sell
 -- remake. sell_remade_price = live price at the last successful sell remake
 -- (stamped by index.js processRemakeOrders()). NULL = never remade, so the
@@ -386,8 +386,8 @@ AND ns.new_stop >= p.sell_price::numeric
 AND pr.net_at_new_stop > 0
 -- period-average profit gate (2026-10-13: rule_on waiver removed)
 AND pr.net_at_new_stop > (SELECT COALESCE(AVG(profit), 0) FROM profit_history WHERE period_type = p.period_type)
--- Only the cheapest open bag per coin (creation_hierarchy ranks by fill).
-AND p.creation_hierarchy = 1
+-- 2026-10-15 (Theodore): removed creation_hierarchy = 1; every open sell bag
+-- trails (bigger bags use the looser per-bag gap).
 -- 2026-10-08: only remake after the price has RISEN since the last sell
 -- remake. sell_remade_price = live price at the last successful sell remake
 -- (stamped by index.js processRemakeOrders()). NULL = never remade, so the
