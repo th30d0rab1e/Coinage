@@ -1064,7 +1064,8 @@ AND s.historical_avg_change_percent > 0
 -- 2026-10-08 (Theodore): positive year-basis priority only. Replaces the
 -- top-50%-by-priority cut (ba3e579); s is the vw_signal year row.
 -- 2026-10-11 (Theodore): reverted NULL-as-0.1; require priority > 0 again.
-AND s.priority > 0
+-- 2026-10-14 (Theodore): raised priority floor from > 0 to > 1 (stronger coins only).
+AND s.priority > 1
 -- 2026-10-11 (Theodore, voice): oversold Wilder RSI(7) gate on stock.
 -- 2026-10-11 (Theodore, voice): raised from < 35 to < 50. NULL rsi fails
 -- the < 50 test (no buy until enough day history and RSI prints below 50).
@@ -1122,8 +1123,9 @@ AND eff.cost_usd >= COALESCE(stock.min_price, 0)
 -- highest priority wins, nothing else in the sort. (Was: bid-heavy book
 -- first, then imbalance DESC, then priority; briefly + stock_id tiebreak.)
 -- 2026-10-11 (Theodore): reverted NULL-as-0.1; NULLs sink again (NULLS LAST).
+-- 2026-10-14 (Theodore): pick the most oversold (lowest RSI) among priority > 1.
 ORDER BY
-    s.priority DESC NULLS LAST
+    stock.rsi ASC NULLS LAST
 LIMIT 1;
 
 -- Buy again if current price has dropped below the MOST RECENT
