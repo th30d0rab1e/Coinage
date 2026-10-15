@@ -50,6 +50,7 @@ AS $$
 --    initial-buy top-50% cut was replaced by WHERE s.priority > 0.)
 --   v_sell_net_cushion             sell_net_cushion           (0.015)    top
 --   v_fee_percent                  fee_percent                (1.20)     top
+--   v_sell_bag_gap_step            sell_bag_gap_step          (0.25)     top
 --     CONSEQUENCE: read BEFORE the fee-learning INSERT/UPDATE below, so a fee
 --     learned this run takes effect in next minute's run (the old inline
 --     lookups saw it in the same run).
@@ -92,6 +93,7 @@ DECLARE
     v_listing_usdc_fallback      boolean;
     v_sell_net_cushion           numeric;
     v_fee_percent                numeric;
+    v_sell_bag_gap_step          numeric;
     v_bba_fresh                  boolean;
     v_gap                        numeric;
     v_usd_available              numeric;  -- 2026-10-13 (Theodore): free USD, read once for the sell RSI-or-cash gate
@@ -129,6 +131,8 @@ v_sell_net_cushion           := COALESCE((SELECT value::numeric FROM config WHER
 v_bba_fresh                  := EXISTS (SELECT 1 FROM bulk_best_bid_ask WHERE loaded_at > NOW() - INTERVAL '3 minutes');
 -- Read before the fee-learning step below: a newly learned fee applies next run.
 v_fee_percent                := COALESCE((SELECT value::numeric FROM config WHERE key = 'fee_percent'), 1.20);
+-- 2026-10-15 (Theodore): bigger (later, cheaper) average-down bags get a wider sell gap.
+v_sell_bag_gap_step          := COALESCE((SELECT value::numeric FROM config WHERE key = 'sell_bag_gap_step'), 0.25);
 -- 2026-10-13 (Theodore): free USD (holds excluded), read once at the top so
 -- both sell-pricing gates use the same value instead of a subquery each.
 v_usd_available              := (SELECT available::numeric FROM vw_balance WHERE name = 'USD');
@@ -1465,11 +1469,12 @@ SET sell_stop_price = GREATEST(
                 * 1.01
             * POWER(10::numeric, stock.price_rounding::int)
         ) / POWER(10::numeric, stock.price_rounding::int),
-        TRUNC(stock.price::numeric * CASE position.period_type
+        -- 2026-10-15 (Theodore): gap x (1 + step x (bag $ - 1)); bag $ = ROUND(cost), $1 bag unchanged.
+        TRUNC(stock.price::numeric * (1 - (1 - CASE position.period_type
             WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
             WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
             WHEN 'year'  THEN LEAST(0.95, GREATEST(0.60, 1 - pat.std_dev::numeric / 200))
-        END, stock.price_rounding::int)
+        END) * (1 + v_sell_bag_gap_step * (GREATEST(1, ROUND(position.buy_filled_price::numeric * position.shares::numeric)) - 1))), stock.price_rounding::int)
     ),
     sell_price = GREATEST(
         CEIL(
@@ -1479,11 +1484,12 @@ SET sell_stop_price = GREATEST(
                 * (1 + v_sell_net_cushion)
             * POWER(10::numeric, stock.price_rounding::int)
         ) / POWER(10::numeric, stock.price_rounding::int),
-        TRUNC(stock.price::numeric * (CASE position.period_type
+        -- 2026-10-15 (Theodore): gap x (1 + step x (bag $ - 1)); bag $ = ROUND(cost), $1 bag unchanged.
+        TRUNC(stock.price::numeric * ((1 - (1 - CASE position.period_type
             WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
             WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
             WHEN 'year'  THEN LEAST(0.95, GREATEST(0.60, 1 - pat.std_dev::numeric / 200))
-        END - 0.01), stock.price_rounding::int)
+        END) * (1 + v_sell_bag_gap_step * (GREATEST(1, ROUND(position.buy_filled_price::numeric * position.shares::numeric)) - 1))) - 0.01), stock.price_rounding::int)
     )
 FROM stock
 JOIN price_aggregate_total pat ON stock.stock_id = pat.stock_id

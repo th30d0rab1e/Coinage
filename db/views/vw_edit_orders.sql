@@ -151,9 +151,10 @@ WITH cfg AS (
         COALESCE(MAX(value) FILTER (WHERE key = 'buy_remake_floor_pct')::numeric, 0.1) AS buy_remake_floor_pct, -- BUY: lowest stop, % over price
         COALESCE(MAX(value) FILTER (WHERE key = 'buy_remake_step_pct')::numeric, 0.5)  AS buy_remake_step_pct,  -- BUY: % taken off per remake
         COALESCE(MAX(value) FILTER (WHERE key = 'fee_percent')::numeric, 1.20)         AS fee_percent,          -- SELL: fee % when the bag's own fee is unknown
-        MAX(value) FILTER (WHERE key = 'avg_profit')::numeric                          AS avg_profit            -- SELL 2: 1% trail threshold
+        MAX(value) FILTER (WHERE key = 'avg_profit')::numeric                          AS avg_profit,           -- SELL 2: 1% trail threshold
+        COALESCE(MAX(value) FILTER (WHERE key = 'sell_bag_gap_step')::numeric, 0.25)   AS sell_bag_gap_step     -- SELL: 2026-10-15 (Theodore) wider gap per bag $
     FROM config
-    WHERE key IN ('buy_remake_floor_pct', 'buy_remake_step_pct', 'fee_percent', 'avg_profit')
+    WHERE key IN ('buy_remake_floor_pct', 'buy_remake_step_pct', 'fee_percent', 'avg_profit', 'sell_bag_gap_step')
 ),
 -- The cash-scaled buy-stop gap (db/views/vw_buy_stop_gap.sql, the ONE place
 -- it is computed). Its own CTE, joined only by the BUY branch exactly like
@@ -272,9 +273,10 @@ CROSS JOIN cfg  -- one-row "variables" (see WITH at the top)
 --      always at least 0.5% under market (never at/above -> no Coinbase
 --      "Price protection point was breached" cancel).
 -- 2026-10-13 (Theodore): removed avg-profit CASE (rule_on/stop99); sell gap scaled by stock RSI(7): RSI <=50 full gap, 75 half, 100 none. NULL rsi = 50 = unchanged gap.
+-- 2026-10-15 (Theodore): same per-bag gap factor as initial pricing (fixed by bag size, so a remake never tightens it back).
 CROSS JOIN LATERAL (
     SELECT LEAST(
-        GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (1 - 0.01 * LEAST(1, (100 - COALESCE(s.rsi, 50)) / 50) + p.sell_counter::numeric * 0.005), s.price_rounding)),
+        GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (1 - 0.01 * (1 + cfg.sell_bag_gap_step * (GREATEST(1, ROUND(p.buy_filled_price::numeric * p.shares::numeric)) - 1)) * LEAST(1, (100 - COALESCE(s.rsi, 50)) / 50) + p.sell_counter::numeric * 0.005), s.price_rounding)),
         trunc(s.price::numeric * 0.995, s.price_rounding)
     ) AS new_stop
 ) ns
@@ -357,9 +359,10 @@ CROSS JOIN LATERAL (
     END AS stop_ratio
 ) vol
 -- 2026-10-13 (Theodore): removed avg-profit CASE (rule_on/stop99); sell gap scaled by stock RSI(7): RSI <=50 full gap, 75 half, 100 none. NULL rsi = 50 = unchanged gap.
+-- 2026-10-15 (Theodore): same per-bag gap factor as initial pricing (fixed by bag size, so a remake never tightens it back).
 CROSS JOIN LATERAL (
     SELECT LEAST(
-        GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (1 - (1 - vol.stop_ratio) * LEAST(1, (100 - COALESCE(s.rsi, 50)) / 50) + p.sell_counter::numeric * 0.005), s.price_rounding)),
+        GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (1 - (1 - vol.stop_ratio) * (1 + cfg.sell_bag_gap_step * (GREATEST(1, ROUND(p.buy_filled_price::numeric * p.shares::numeric)) - 1)) * LEAST(1, (100 - COALESCE(s.rsi, 50)) / 50) + p.sell_counter::numeric * 0.005), s.price_rounding)),
         trunc(s.price::numeric * 0.995, s.price_rounding)
     ) AS new_stop
 ) ns
