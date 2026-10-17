@@ -28,6 +28,12 @@ async function listCoins () {
         FROM stock
         WHERE name IS NOT NULL
           AND name ~ '^[A-Z0-9]+-USD$'
+          -- 2026-10-16 (Theodore): only coins with an open order on Coinbase
+          -- (unfilled buy or unfilled sell).
+          AND EXISTS (SELECT 1 FROM position p
+                      WHERE p.stock_id = stock.stock_id
+                        AND ((p.buy_coinbase_order_id IS NOT NULL AND p.buy_filled_price IS NULL)
+                          OR (p.sell_coinbase_order_id IS NOT NULL AND p.sell_filled_price IS NULL)))
         ORDER BY name ASC`)
     return rows
 }
