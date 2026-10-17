@@ -1150,6 +1150,8 @@ WITH held AS (
         stock_id, period_type, buy_filled_price AS last_filled_price
     FROM position
     WHERE buy_filled_price IS NOT NULL
+    -- 2026-10-16 (Theodore): only bags still owned (sold bags no longer trigger an average-down).
+    AND sell_filled_price IS NULL
     ORDER BY stock_id, period_type, buy_filled_date DESC
 ),
 sized AS (
@@ -1253,6 +1255,8 @@ AND v_pause_buys = 'false'
 -- below the most recent fill. This is the "has price dropped below my last
 -- buy" test, not the order price -- the order is priced by plan/fin above.
 AND TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) < sized.last_filled_price
+-- 2026-10-16 (Theodore): average-downs only on stronger coins, same floor as new buys.
+AND s.priority > 1
 AND s.trading_disabled IS NOT TRUE
 -- 2026-10-07: never average down into a stablecoin (stock.is_stablecoin,
 -- price-behavior flag set near the top of this procedure).
