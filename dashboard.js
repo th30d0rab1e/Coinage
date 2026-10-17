@@ -381,13 +381,13 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
     <div class="cash-bar">
         <div>
             <span class="lbl">USD</span>
-            <span class="amt">${money(balances && balances.usd)}</span>
-            <span class="split">total · ${money(balances && balances.usd_available)} available · ${money(balances && balances.usd_hold)} held</span>
+            <span class="amt" id="bal-usd">${money(balances && balances.usd)}</span>
+            <span class="split">total · <span id="bal-usd_available">${money(balances && balances.usd_available)}</span> available · <span id="bal-usd_hold">${money(balances && balances.usd_hold)}</span> held</span>
         </div>
         <div>
             <span class="lbl">USDC</span>
-            <span class="amt">${money(balances && balances.usdc)}</span>
-            <span class="split">total · ${money(balances && balances.usdc_available)} available · ${money(balances && balances.usdc_hold)} held</span>
+            <span class="amt" id="bal-usdc">${money(balances && balances.usdc)}</span>
+            <span class="split">total · <span id="bal-usdc_available">${money(balances && balances.usdc_available)}</span> available · <span id="bal-usdc_hold">${money(balances && balances.usdc_hold)}</span> held</span>
         </div>
     </div>
 
@@ -577,6 +577,26 @@ function renderPage (balances, profitSummary, profitHistory24h, openBuyOrders, o
         setInterval(refreshTablesInPlace, REFRESH_MS)
     })()
     </script>
+<script>
+// 2026-10-16 (Theodore): refresh USD/USDC at the top from vw_balance every 30s, no page reload.
+(function () {
+    function fmt (v) {
+        var n = parseFloat(v)
+        if (v === null || v === undefined || v === '' || isNaN(n)) return '—'
+        var cls = n > 0 ? 'pos' : n < 0 ? 'neg' : ''
+        return '<span class="' + cls + '">' + (n < 0 ? '-' : '') + '$' + Math.abs(n).toFixed(4) + '</span>'
+    }
+    function tick () {
+        fetch('/api/balance', { cache: 'no-store' }).then(function (r) { return r.json() }).then(function (b) {
+            ['usd', 'usd_available', 'usd_hold', 'usdc', 'usdc_available', 'usdc_hold'].forEach(function (k) {
+                var el = document.getElementById('bal-' + k)
+                if (el && b) el.innerHTML = fmt(b[k])
+            })
+        }).catch(function () {})
+    }
+    setInterval(tick, 30000)
+})()
+</script>
 </body>
 </html>`
 }
@@ -586,6 +606,12 @@ const server = http.createServer(async (req, res) => {
         // 2026-10-11: JSON routes for the Price & Fills chart, fetched client-side
         // so the main page doesn't embed thousands of price points on every load.
         const url = new URL(req.url, 'http://localhost')
+        // 2026-10-16 (Theodore): live USD/USDC for the top bar, from vw_balance.
+        if (url.pathname === '/api/balance') {
+            const { rows } = await db.query(BALANCE_QUERY)
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+            return res.end(JSON.stringify(rows[0] || null))
+        }
         if (url.pathname === '/api/coins') {
             res.writeHead(200, { 'Content-Type': 'application/json' })
             return res.end(JSON.stringify(await pfChart.listCoins()))
