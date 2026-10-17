@@ -1294,8 +1294,9 @@ AND eff.cost_usd >= COALESCE(s.min_price, 0)
 -- 2026-10-07: priority DESC only (s = stock here). Was: bid-heavy book
 -- first, then imbalance DESC, then priority.
 -- 2026-10-11 (Theodore): reverted NULL-as-0.1; NULLs sink again (NULLS LAST).
+-- 2026-10-16 (Theodore): lowest RSI first (was priority DESC), same as new buys.
 ORDER BY
-    s.priority DESC NULLS LAST
+    s.rsi ASC NULLS LAST
 LIMIT 1;
 
 -- =====================================================================
