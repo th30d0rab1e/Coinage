@@ -990,13 +990,9 @@ LEFT JOIN bulk_best_bid_ask bba ON bba.product_id = s.name
 -- Dollar size of this clip ($1 new, $N for the Nth open day row), the same
 -- count + 1 the shares / cash-backlog expressions use; the thin-ask gate
 -- compares near-ask notional to clip_usd * book_min_ask_notional_mult.
+-- 2026-10-16 (Theodore): every buy is a flat $1 (was $N for the Nth open bag).
 CROSS JOIN LATERAL (
-    SELECT COUNT(*)::numeric + 1 AS clip_usd
-    FROM position open_sz
-    WHERE open_sz.stock_id = s.stock_id
-    AND open_sz.period_type = 'day'
-    AND open_sz.buy_order_id IS NOT NULL
-    AND open_sz.sell_filled_price IS NULL
+    SELECT 1::numeric AS clip_usd
 ) clip
 -- 2026-10-05 the order this INSERT will create: trigger = signal close x
 -- (1 + cash-scaled gap), limit = trigger x 1.01, shares = clip dollars /
@@ -1159,14 +1155,8 @@ WITH held AS (
 sized AS (
     SELECT
         h.*,
-        (
-            SELECT COUNT(*)::numeric
-            FROM position op
-            WHERE op.stock_id = h.stock_id
-            AND op.period_type = h.period_type
-            AND op.buy_order_id IS NOT NULL
-            AND op.sell_filled_price IS NULL
-        ) + 1 AS clip_usd
+        -- 2026-10-16 (Theodore): every average-down buy is a flat $1 (was $N for the Nth open bag).
+        1::numeric AS clip_usd
     FROM held h
 )
 INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
