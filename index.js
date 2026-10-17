@@ -1137,7 +1137,7 @@ async function buildEtfPlan() {
     }
     chosen.sort((a, b) => a.positionValue - b.positionValue)
     const funded = etfPlan.fundAttemptsByCurrency(chosen, { usd: Math.max(0, book.available - sweepReserve), usdc: usdcPot })
-    for (const c of chosen) notes.push(`ETF plan ${c.ticker}: ${c.kind} — ${c.reason}${c.kind === 'limit' ? ` → ${c.baseSize} @ ${c.limitPrice}` : ''} [${c.usdcProductId ? 'USDC' : 'USD'}] value ${c.positionValue.toFixed(2)}`)
+    for (const c of chosen) notes.push(`ETF plan ${c.ticker}: ${c.kind} — ${c.reason}${c.kind === 'limit' ? ` → ${c.baseSize} @ ${c.limitPrice}` : ''} [${c.usdcProductId ? 'USDC' : 'USD'}] value $${c.positionValue.toFixed(2)}`)
     // No USD fallback: the send step skips a USDC row if USDC is short.
     for (const a of funded.attempts) a.fallbackUsd = false
     notes.push(...funded.notes)
