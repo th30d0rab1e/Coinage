@@ -409,6 +409,8 @@ async function equitySnapshot() {
         const positions = (breakdown.equity_positions || []).map((pos) => ({
             cbrn: pos.cbrn || null,
             shares: amountValue(pos.total_balance_equity),
+            // 2026-10-17 (Theodore): dollar value; index.js matches ETF by fiat/shares price.
+            fiat: amountValue(pos.total_balance_fiat),
             averageEntry: amountValue(pos.average_entry_price),
             unrealizedPnl: amountValue(pos.unrealized_pnl),
         }))

@@ -938,12 +938,7 @@ async function buildEtfPlan() {
         // catch-up sizing, pending/resting skips, cash/USDC funding) is
         // unchanged.
         `SELECT e.ticker, e.product_id, e.usdc_product_id,
-                e.quote_usd,
-                -- 2026-10-15 (Theodore): avg cost = all BUY fills on the
-                -- ETF's USD + USDC products; used to sort lowest P&L first.
-                (SELECT SUM(f.price * f.size) / NULLIF(SUM(f.size), 0)
-                 FROM fills f
-                 WHERE f.side = 'BUY' AND f.product_id IN (e.product_id, e.usdc_product_id)) AS avg_cost
+                e.quote_usd
          FROM etf e
          WHERE e.enabled
          ORDER BY e.ticker`
@@ -1095,8 +1090,9 @@ async function buildEtfPlan() {
             notional: Number(baseSize) * Number(limitPrice),
             basisPrice: basis.price,
             priceBasis: basis.source,
-            // 2026-10-15 (Theodore): unrealized P&L % = (bid - avg cost) / avg cost.
-            pnlPct: Number(row.avg_cost) > 0 ? (Number(basis.price) - Number(row.avg_cost)) / Number(row.avg_cost) * 100 : null,
+            // 2026-10-17 (Theodore): position value = shares x basis price
+            // (set below from the Coinbase equity_positions; 0 = never held).
+            positionValue: 0,
             // Live Coinbase session the order is placed in.
             session,
             reason: `limit ${stepPct}% under ${basis.source} ${Number(basis.price).toFixed(4)}${wholeShares ? ` [${session.replace('EQUITY_TRADING_SESSION_', '')} whole shares]` : ''}`,
@@ -1114,11 +1110,34 @@ async function buildEtfPlan() {
     const usdcPot = Math.max(0, Number(book.usdcAvailable) || 0)
     if (book.usdcReason) notes.push(`ETF USDC unreadable (${book.usdcReason}); treating USDC as 0`)
     notes.push(`ETF pots: ${usdcPot.toFixed(2)} USDC (USDC-only ETFs), $${Math.max(0, book.available - sweepReserve).toFixed(2)} USD (TOPW only)`)
-    // 2026-10-15 (Theodore): buy lowest P&L first (funding walks this order);
-    // never-held ETFs (no fills) go first.
-    chosen.sort((a, b) => (a.pnlPct ?? -Infinity) - (b.pnlPct ?? -Infinity))
+    // 2026-10-17 (Theodore): buy lowest current position value first
+    // (funding walks this order), replacing lowest P&L first (avg cost was
+    // skewed by the old dollars-saved-as-shares buys). Value = Coinbase
+    // equity_positions shares x the same basis price. Coinbase lists
+    // positions by hashed cbrn with no ticker, so each ETF is matched to the
+    // position whose total_balance_fiat / shares is closest to its basis
+    // price (within 10%; closest pairs claimed first, one position per ETF).
+    // No match = never held = $0, goes first.
+    const pairs = []
+    for (const p of book.positions || []) {
+        if (!(Number(p.shares) > 0 && Number(p.fiat) > 0)) continue
+        for (const c of chosen) {
+            const gap = Math.abs(p.fiat / p.shares / Number(c.basisPrice) - 1)
+            if (gap < 0.10) pairs.push({ p, c, gap })
+        }
+    }
+    pairs.sort((x, y) => x.gap - y.gap)
+    const usedPos = new Set()
+    const valued = new Set()
+    for (const { p, c } of pairs) {
+        if (usedPos.has(p) || valued.has(c)) continue
+        usedPos.add(p)
+        valued.add(c)
+        c.positionValue = Number(p.shares) * Number(c.basisPrice)
+    }
+    chosen.sort((a, b) => a.positionValue - b.positionValue)
     const funded = etfPlan.fundAttemptsByCurrency(chosen, { usd: Math.max(0, book.available - sweepReserve), usdc: usdcPot })
-    for (const c of chosen) notes.push(`ETF plan ${c.ticker}: ${c.kind} — ${c.reason}${c.kind === 'limit' ? ` → ${c.baseSize} @ ${c.limitPrice}` : ''} [${c.usdcProductId ? 'USDC' : 'USD'}] P&L ${c.pnlPct == null ? 'n/a' : c.pnlPct.toFixed(2) + '%'}`)
+    for (const c of chosen) notes.push(`ETF plan ${c.ticker}: ${c.kind} — ${c.reason}${c.kind === 'limit' ? ` → ${c.baseSize} @ ${c.limitPrice}` : ''} [${c.usdcProductId ? 'USDC' : 'USD'}] value ${c.positionValue.toFixed(2)}`)
     // No USD fallback: the send step skips a USDC row if USDC is short.
     for (const a of funded.attempts) a.fallbackUsd = false
     notes.push(...funded.notes)
