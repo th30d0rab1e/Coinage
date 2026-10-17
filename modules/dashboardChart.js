@@ -28,23 +28,32 @@ async function listCoins () {
         FROM stock
         WHERE name IS NOT NULL
           AND name ~ '^[A-Z0-9]+-USD$'
-          -- 2026-10-16 (Theodore): only coins with an open order on Coinbase
-          -- (unfilled buy or unfilled sell).
-          AND EXISTS (SELECT 1 FROM position p
-                      WHERE p.stock_id = stock.stock_id
-                        AND ((p.buy_coinbase_order_id IS NOT NULL AND p.buy_filled_price IS NULL)
-                          OR (p.sell_coinbase_order_id IS NOT NULL AND p.sell_filled_price IS NULL)))
+          -- 2026-10-17 (Theodore): open-order filter (b5e5414) removed — the
+          -- dropdown/search lists ANY coin again. Auto-follow/cycling uses
+          -- OPEN_ORDER_COINS_SQL instead.
         ORDER BY name ASC`)
     return rows
 }
 
+// 2026-10-17 (Theodore): coins with an open order on Coinbase (unfilled buy or
+// unfilled sell). Auto-follow and cycling only ever jump to these.
+const OPEN_ORDER_COINS_SQL = `
+    SELECT s.name FROM position p JOIN stock s ON s.stock_id = p.stock_id
+     WHERE (p.buy_coinbase_order_id IS NOT NULL AND p.buy_filled_price IS NULL)
+        OR (p.sell_coinbase_order_id IS NOT NULL AND p.sell_filled_price IS NULL)`
+async function openOrderCoins () {
+    const { rows } = await db.query(`SELECT DISTINCT name FROM (${OPEN_ORDER_COINS_SQL}) o WHERE name IS NOT NULL ORDER BY name`)
+    return rows.map(r => r.name)
+}
+
 // 2026-10-11: cheapest poll for the auto-follow chart — newest SELL row only.
-async function latestSell () {
+async function latestSell (openOnly) {
     const { rows } = await db.query(`
         SELECT product_id AS coin, trade_time AS t, price AS p, size, fee, order_id, side
         FROM fills
         WHERE side = 'SELL'
           AND product_id ~ '^[A-Z0-9]+-USD$'
+          ${openOnly ? `AND product_id IN (${OPEN_ORDER_COINS_SQL})` : ''} -- 2026-10-17 (Theodore)
         ORDER BY trade_time DESC
         LIMIT 1`)
     const r = rows[0]
@@ -61,12 +70,13 @@ async function latestSell () {
 }
 
 // 2026-10-11: newest BUY fill (auto-follow buys too).
-async function latestBuy () {
+async function latestBuy (openOnly) {
     const { rows } = await db.query(`
         SELECT product_id AS coin, trade_time AS t, price AS p, size, fee, order_id, side
         FROM fills
         WHERE side = 'BUY'
           AND product_id ~ '^[A-Z0-9]+-USD$'
+          ${openOnly ? `AND product_id IN (${OPEN_ORDER_COINS_SQL})` : ''} -- 2026-10-17 (Theodore)
         ORDER BY trade_time DESC
         LIMIT 1`)
     const r = rows[0]
@@ -77,7 +87,7 @@ async function latestBuy () {
 // 2026-10-11: newest order remake from position_audit (buy_remade_price /
 // sell_remade_price UPDATE). p = new stop/trigger from the same audit moment
 // (matches the chart X), market = remade market price.
-async function latestRemake () {
+async function latestRemake (openOnly) {
     const { rows } = await db.query(`
         SELECT pa.audit_id, pa.position_id, pa.changed_at AS t, pa.column_name,
                pa.new_value AS market,
@@ -100,6 +110,7 @@ async function latestRemake () {
         WHERE pa.column_name IN ('buy_remade_price', 'sell_remade_price')
           AND pa.operation = 'UPDATE'
           AND pa.new_value ~ '^[0-9.]+$'
+          ${openOnly ? `AND p.name IN (${OPEN_ORDER_COINS_SQL})` : ''} -- 2026-10-17 (Theodore)
         ORDER BY pa.changed_at DESC, pa.audit_id DESC
         LIMIT 1`)
     const r = rows[0]
@@ -120,7 +131,9 @@ async function latestRemake () {
 // target for chart auto-follow. kind = 'sell' | 'buy' | 'remake'; key is a
 // stable id the client compares to detect a new event.
 async function latestEvent () {
-    const [sell, buy, remake] = await Promise.all([latestSell(), latestBuy(), latestRemake()])
+    // 2026-10-17 (Theodore): only events on coins that still have an open
+    // buy/sell order — never follow a coin with nothing open.
+    const [sell, buy, remake] = await Promise.all([latestSell(true), latestBuy(true), latestRemake(true)])
     const ev = []
     if (sell) ev.push({ ...sell, kind: 'sell', key: 'sell|' + sell.order_id + '|' + sell.t })
     if (buy) ev.push({ ...buy, kind: 'buy', key: 'buy|' + buy.order_id + '|' + buy.t })
@@ -616,6 +629,15 @@ function renderSection () {
         const ROTATE_MS = window.PF_ROTATE_MS || 20000
         const resumeBtn = document.getElementById('pf-resume')
         let rotateTimer = null, paused = false, lastRotCoin = null
+        // 2026-10-17 (Theodore): cycle only coins with an open buy/sell order
+        // (refreshed from /api/open-order-coins each poll).
+        let openCoins = null
+        function refreshOpenCoins () {
+            return fetch('/api/open-order-coins', { cache: 'no-store' }).then(r => r.json())
+                .then(l => { if (Array.isArray(l)) openCoins = l }).catch(() => {})
+        }
+        refreshOpenCoins()
+        setInterval(refreshOpenCoins, POLL_MS)
         function rotationCoins () {
             const out = []
             document.querySelectorAll('#positions-table tbody tr[data-coin]').forEach(tr => {
@@ -623,7 +645,11 @@ function renderSection () {
                 const c = tr.getAttribute('data-coin')
                 if (c && !out.includes(c)) out.push(c)
             })
-            return out
+            if (!openCoins) return out
+            // Positions-table order first, then any other open-order coins.
+            const list = out.filter(c => openCoins.includes(c))
+            openCoins.forEach(c => { if (!list.includes(c)) list.push(c) })
+            return list
         }
         function scheduleRotate (ms) {
             clearTimeout(rotateTimer)
@@ -657,4 +683,4 @@ function renderSection () {
     </script>`
 }
 
-module.exports = { listCoins, latestSell, latestBuy, latestRemake, latestEvent, chartData, renderSection, RANGES }
+module.exports = { listCoins, openOrderCoins, latestSell, latestBuy, latestRemake, latestEvent, chartData, renderSection, RANGES }

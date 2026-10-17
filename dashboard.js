@@ -616,6 +616,11 @@ const server = http.createServer(async (req, res) => {
             res.writeHead(200, { 'Content-Type': 'application/json' })
             return res.end(JSON.stringify(await pfChart.listCoins()))
         }
+        // 2026-10-17 (Theodore): coins with an open order — chart cycling list.
+        if (url.pathname === '/api/open-order-coins') {
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            return res.end(JSON.stringify(await pfChart.openOrderCoins()))
+        }
         // 2026-10-11: poll target for auto-follow — newest SELL in fills.
         if (url.pathname === '/api/latest-sell') {
             res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
