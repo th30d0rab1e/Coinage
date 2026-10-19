@@ -1153,13 +1153,17 @@ async function buildEtfPlan() {
         if (usedPos.has(p) || valued.has(c)) continue
         usedPos.add(p)
         valued.add(c)
-        c.positionValue = Number(p.shares) * Number(c.basisPrice)
         p.ticker = c.ticker
     }
     // 2026-10-19 (Theodore): save each ETF holding to bulk_currency (runs after
     // processNewBalance truncated it this minute; latest snapshot only).
     // Unmatched position = labeled by its cbrn.
     await db.insertEtfHoldings(book.positions || [], new Date())
+    // 2026-10-19 (Theodore): position value = bulk_currency.value_usd just written
+    // (Coinbase dollar value), replacing shares x basis price. No row = $0.
+    const vals = await db.executeQuery("SELECT currency, value_usd FROM bulk_currency WHERE run_at IS NOT NULL")
+    const valueOf = new Map((vals || []).map(r => [r.currency, Number(r.value_usd) || 0]))
+    for (const c of chosen) c.positionValue = valueOf.get(c.ticker) || 0
     chosen.sort((a, b) => a.positionValue - b.positionValue)
     const funded = etfPlan.fundAttemptsByCurrency(chosen, { usd: Math.max(0, book.available - sweepReserve), usdc: usdcPot })
     for (const c of chosen) notes.push(`ETF plan ${c.ticker}: ${c.kind} — ${c.reason}${c.kind === 'limit' ? ` → ${c.baseSize} @ ${c.limitPrice}` : ''} [${c.usdcProductId ? 'USDC' : 'USD'}] value $${c.positionValue.toFixed(2)}`)
