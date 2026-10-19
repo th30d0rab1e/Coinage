@@ -1086,16 +1086,13 @@ AND (
         AND existing.buy_filled_price IS NOT NULL
         AND existing.sell_filled_price IS NULL
     )
-    -- 2026-10-18 (Theodore): buy again only when price is 1% below the previous (most recent) buy fill.
-    OR s.close <= (
-        SELECT existing.buy_filled_price * 0.99
+    OR s.close < (
+        SELECT MIN(existing.buy_filled_price)
         FROM position existing
         WHERE existing.stock_id = s.stock_id
         AND existing.period_type = 'day'
         AND existing.buy_filled_price IS NOT NULL
         AND existing.sell_filled_price IS NULL
-        ORDER BY existing.buy_filled_date DESC
-        LIMIT 1
     )
 )
 -- Book gates (2026-10-05, were index.js placement-time checks):
