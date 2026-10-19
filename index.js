@@ -1006,6 +1006,15 @@ async function buildEtfPlan() {
          ORDER BY ticker, COALESCE(closed_at, created_at::timestamptz) DESC`
     )
     const recentByTicker = new Map((recentFilled?.rows || []).map((r) => [r.ticker, r]))
+    // 2026-10-19 (Theodore): an ETF Coinbase REJECTED (not a closed-market
+    // reject) in this same equity session is not retried until the session changes.
+    const rejectedEarlier = await db.query(
+        `SELECT DISTINCT ticker FROM etf_buy
+         WHERE status = 'REJECTED' AND closed_session IS NOT TRUE
+           AND equity_session = $1 AND created_at > NOW() - INTERVAL '12 hours'`,
+        [session]
+    )
+    const rejectedThisSession = new Set((rejectedEarlier?.rows || []).map((r) => r.ticker))
 
     const chosen = []
     for (const row of rows) {
@@ -1030,6 +1039,11 @@ async function buildEtfPlan() {
         }
         if (limitOpen.has(t)) {
             notes.push(`ETF hold ${t}: a limit is already resting`)
+            continue
+        }
+        // 2026-10-19 (Theodore): skip for the rest of a session that rejected it.
+        if (rejectedThisSession.has(t)) {
+            notes.push(`ETF skip ${t}: rejected earlier this ${session.replace('EQUITY_TRADING_SESSION_', '')} session`)
             continue
         }
         const recent = recentByTicker.get(t)
@@ -1205,7 +1219,12 @@ async function placeEtfLimit(row, today, ttlHours) {
         return { placed: true }
     }
     const closed = equity.isClosedMarket(response)
-    const message = response?.error_response?.message || 'unknown'
+    // 2026-10-19 (Theodore): save Coinbase's full rejection reason, not just 'HTTP 200'.
+    const er = response?.error_response || {}
+    const reasons = [er.error, er.message, er.error_details, er.preview_failure_reason, er.new_order_failure_reason, response?.failure_reason]
+        .filter((v) => v !== undefined && v !== null && v !== '')
+        .map((v) => (typeof v === 'string' ? v : JSON.stringify(v)))
+    const message = reasons.length ? reasons.join(' | ') : (JSON.stringify(response) || 'unknown')
     await db.query(
         `UPDATE etf_buy SET status = 'REJECTED', closed_session = $2, error_message = $3, closed_at = NOW()
          WHERE etf_buy_id = $1`,

@@ -306,7 +306,10 @@ async function createLimitBuy(productId, baseSize, limitPrice, clientOrderId, se
             error: data?.error_response?.error || data?.error,
             preview_failure_reason: data?.error_response?.preview_failure_reason,
             error_details: data?.error_response?.error_details,
+            // 2026-10-19 (Theodore): pass through the other reason fields too.
+            new_order_failure_reason: data?.error_response?.new_order_failure_reason,
         },
+        failure_reason: data?.failure_reason || data?.success_response?.failure_reason,
     }
 }
 
