@@ -1475,7 +1475,8 @@ SET sell_stop_price = GREATEST(
             WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
             WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
             WHEN 'year'  THEN LEAST(0.95, GREATEST(0.60, 1 - pat.std_dev::numeric / 200))
-        END) * (1 + v_sell_bag_gap_step * (GREATEST(1, ROUND(position.buy_filled_price::numeric * position.shares::numeric)) - 1))), stock.price_rounding::int)
+        -- 2026-10-19 (Theodore): sell gap by bag rank within coin (highest-priced bag = base gap, cheapest = widest), replaces dollar-size factor from 2026-10-15.
+        END) * (1 + v_sell_bag_gap_step * (((SELECT COUNT(*) FROM position o WHERE o.stock_id = position.stock_id AND o.buy_filled_price IS NOT NULL AND o.sell_filled_price IS NULL AND (o.buy_filled_price > position.buy_filled_price OR (o.buy_filled_price = position.buy_filled_price AND o.position_id < position.position_id))) + 1) - 1))), stock.price_rounding::int)
     ),
     sell_price = GREATEST(
         CEIL(
@@ -1490,7 +1491,8 @@ SET sell_stop_price = GREATEST(
             WHEN 'day'   THEN LEAST(0.99, GREATEST(0.90, 1 - pat.std_dev::numeric / 200))
             WHEN 'month' THEN LEAST(0.97, GREATEST(0.75, 1 - pat.std_dev::numeric / 200))
             WHEN 'year'  THEN LEAST(0.95, GREATEST(0.60, 1 - pat.std_dev::numeric / 200))
-        END) * (1 + v_sell_bag_gap_step * (GREATEST(1, ROUND(position.buy_filled_price::numeric * position.shares::numeric)) - 1))) - 0.01), stock.price_rounding::int)
+        -- 2026-10-19 (Theodore): sell gap by bag rank within coin (highest-priced bag = base gap, cheapest = widest), replaces dollar-size factor from 2026-10-15.
+        END) * (1 + v_sell_bag_gap_step * (((SELECT COUNT(*) FROM position o WHERE o.stock_id = position.stock_id AND o.buy_filled_price IS NOT NULL AND o.sell_filled_price IS NULL AND (o.buy_filled_price > position.buy_filled_price OR (o.buy_filled_price = position.buy_filled_price AND o.position_id < position.position_id))) + 1) - 1))) - 0.01), stock.price_rounding::int)
     )
 FROM stock
 JOIN price_aggregate_total pat ON stock.stock_id = pat.stock_id

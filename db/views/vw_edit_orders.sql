@@ -276,7 +276,8 @@ CROSS JOIN cfg  -- one-row "variables" (see WITH at the top)
 -- 2026-10-15 (Theodore): same per-bag gap factor as initial pricing (fixed by bag size, so a remake never tightens it back).
 CROSS JOIN LATERAL (
     SELECT LEAST(
-        GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (1 - 0.01 * (1 + cfg.sell_bag_gap_step * (GREATEST(1, ROUND(p.buy_filled_price::numeric * p.shares::numeric)) - 1)) * LEAST(1, (100 - COALESCE(s.rsi, 50)) / 50) + p.sell_counter::numeric * 0.005), s.price_rounding)),
+        -- 2026-10-19 (Theodore): sell gap by bag rank within coin (highest-priced bag = base gap, cheapest = widest), replaces dollar-size factor from 2026-10-15.
+        GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (1 - 0.01 * (1 + cfg.sell_bag_gap_step * (((SELECT COUNT(*) FROM position o WHERE o.stock_id = p.stock_id AND o.buy_filled_price IS NOT NULL AND o.sell_filled_price IS NULL AND (o.buy_filled_price > p.buy_filled_price OR (o.buy_filled_price = p.buy_filled_price AND o.position_id < p.position_id))) + 1) - 1)) * LEAST(1, (100 - COALESCE(s.rsi, 50)) / 50) + p.sell_counter::numeric * 0.005), s.price_rounding)),
         trunc(s.price::numeric * 0.995, s.price_rounding)
     ) AS new_stop
 ) ns
@@ -362,7 +363,8 @@ CROSS JOIN LATERAL (
 -- 2026-10-15 (Theodore): same per-bag gap factor as initial pricing (fixed by bag size, so a remake never tightens it back).
 CROSS JOIN LATERAL (
     SELECT LEAST(
-        GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (1 - (1 - vol.stop_ratio) * (1 + cfg.sell_bag_gap_step * (GREATEST(1, ROUND(p.buy_filled_price::numeric * p.shares::numeric)) - 1)) * LEAST(1, (100 - COALESCE(s.rsi, 50)) / 50) + p.sell_counter::numeric * 0.005), s.price_rounding)),
+        -- 2026-10-19 (Theodore): sell gap by bag rank within coin (highest-priced bag = base gap, cheapest = widest), replaces dollar-size factor from 2026-10-15.
+        GREATEST(p.sell_price::numeric, trunc(s.price::numeric * (1 - (1 - vol.stop_ratio) * (1 + cfg.sell_bag_gap_step * (((SELECT COUNT(*) FROM position o WHERE o.stock_id = p.stock_id AND o.buy_filled_price IS NOT NULL AND o.sell_filled_price IS NULL AND (o.buy_filled_price > p.buy_filled_price OR (o.buy_filled_price = p.buy_filled_price AND o.position_id < p.position_id))) + 1) - 1)) * LEAST(1, (100 - COALESCE(s.rsi, 50)) / 50) + p.sell_counter::numeric * 0.005), s.price_rounding)),
         trunc(s.price::numeric * 0.995, s.price_rounding)
     ) AS new_stop
 ) ns
