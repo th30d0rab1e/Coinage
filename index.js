@@ -1138,11 +1138,15 @@ async function buildEtfPlan() {
     // position whose total_balance_fiat / shares is closest to its basis
     // price (within 10%; closest pairs claimed first, one position per ETF).
     // No match = never held = $0, goes first.
+    // 2026-10-19 (Theodore): match EVERY etf row (enabled or not, e.g. SPCX)
+    // by stock.price every minute, not only ETFs getting an order, so every
+    // bulk_currency ETF row gets its ticker. Order placement is unchanged.
+    const known = await db.executeQuery("SELECT e.ticker, s.price FROM etf e JOIN stock s ON s.name = e.ticker WHERE s.price > 0")
     const pairs = []
     for (const p of book.positions || []) {
         if (!(Number(p.shares) > 0 && Number(p.fiat) > 0)) continue
-        for (const c of chosen) {
-            const gap = Math.abs(p.fiat / p.shares / Number(c.basisPrice) - 1)
+        for (const c of known || []) {
+            const gap = Math.abs(p.fiat / p.shares / Number(c.price) - 1)
             if (gap < 0.10) pairs.push({ p, c, gap })
         }
     }
@@ -1150,9 +1154,9 @@ async function buildEtfPlan() {
     const usedPos = new Set()
     const valued = new Set()
     for (const { p, c } of pairs) {
-        if (usedPos.has(p) || valued.has(c)) continue
+        if (usedPos.has(p) || valued.has(c.ticker)) continue
         usedPos.add(p)
-        valued.add(c)
+        valued.add(c.ticker)
         p.ticker = c.ticker
     }
     // 2026-10-19 (Theodore): save each ETF holding to bulk_currency (runs after
