@@ -153,7 +153,9 @@ async function upsertStockPrice(db, ticker, price) {
 // Adding a new etf row with enabled=true is enough; no code list to edit.
 async function syncEnabledEtfStockPrices(db) {
     const listed = await db.query(
-        `SELECT ticker FROM etf WHERE enabled ORDER BY ticker`
+        // 2026-10-19 (Theodore): sync ALL etf rows incl. disabled (SPCX) so
+        // holdings still match by price; buying still filters etf.enabled.
+        `SELECT ticker FROM etf ORDER BY ticker`
     )
     const tickers = (listed?.rows || []).map((r) => String(r.ticker).toUpperCase())
     if (tickers.length === 0) {
