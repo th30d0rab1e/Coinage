@@ -413,16 +413,6 @@ async function checkUnmatchedFills () {
 async function processNewBalance () {
     try {
         let results = await ca.gatherBalance();
-        // 2026-10-19 (Theodore): gatherBalance() returns undefined when the
-        // Coinbase request fails (e.g. the 401 at 10:22 AM CT). Keep the last
-        // good bulk_currency snapshot instead of wiping it, and skip the rest
-        // cleanly. An empty array from a successful call is not a failure
-        // (it still goes through insertCurrency) but is logged as a note.
-        if (!Array.isArray(results)) {
-            console.log("Balance fetch failed -- keeping last good balance")
-            return
-        }
-        if (results.length === 0) console.log("Balance note: Coinbase returned 0 accounts (successful call)")
         await db.insertCurrency(results);
         // 2026-10-07 (Theodore): also log USDC available + hold. USDC is
         // already downloaded every minute (gatherBalance returns every
