@@ -97,6 +97,13 @@ con.insertCurrency = async function (data) {
       // moment between insert and thee_procedure()'s own truncate -- needed
       // so vw_position_order_balance_audit can actually be queried anytime,
       // not just mid-cycle.
+      // 2026-10-19 (Theodore): only wipe the snapshot when we actually have
+      // an array to replace it with; a failed fetch (undefined) keeps the
+      // last good balances.
+      if (!Array.isArray(data)) {
+          console.log("insertCurrency: no balance array -- keeping last good balance")
+          return
+      }
       await con.query('TRUNCATE TABLE bulk_currency;')
       if(data.length > 0) {
           const id = data.map(obj => obj.uuid)
