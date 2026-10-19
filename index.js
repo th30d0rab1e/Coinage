@@ -963,6 +963,12 @@ async function buildEtfPlan() {
     const session = equitySessionInfo?.currentSession || 'EQUITY_TRADING_SESSION_NORMAL'
     const wholeShares = !(equitySessionInfo?.fractional === true)
     notes.push(`ETF plan session ${session}${wholeShares ? ' (whole-share limits only, no market buy)' : ''}`)
+    // 2026-10-19 (Theodore): INTENTIONAL REVERSAL of the 2026-10-11 whole-share
+    // limits outside NORMAL. ETFs are bought only in NORMAL, as the $1 fractional limit.
+    if (session !== 'EQUITY_TRADING_SESSION_NORMAL') {
+        notes.push(`ETF skip all: ${session.replace('EQUITY_TRADING_SESSION_', '')} session, buying only in NORMAL ($1)`)
+        return { attempts: [], reserve: 0, notes }
+    }
     // Today's market rows: filled = the daily buy is done; an unfilled one
     // that might still fill blocks a second market send.
     const market = await db.query(
