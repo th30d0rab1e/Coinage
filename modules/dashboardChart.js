@@ -484,6 +484,16 @@ function renderSection () {
                 { label: 'Sell remake', data: toXY(data.sell_remakes || (data.remakes || []).filter(r => r.side === 'sell_remake')), type: 'scatter', yAxisID: 'y', backgroundColor: '#ef4444', borderColor: '#fecaca', pointBackgroundColor: '#ef4444', pointBorderColor: '#fca5a5', pointStyle: 'crossRot', radius: 8, hoverRadius: 11, borderWidth: 2, order: 10 },
                 { label: 'Open buy', data: toXY(data.open_buys || []), type: 'scatter', yAxisID: 'y', pointStyle: 'circle', backgroundColor: 'rgba(0,0,0,0)', pointBackgroundColor: 'rgba(0,0,0,0)', borderColor: '#22c55e', pointBorderColor: '#22c55e', pointBorderWidth: 2, borderWidth: 2, radius: 6, hoverRadius: 9, order: 9 },
                 { label: 'Open sell', data: toXY(data.open_sells || []), type: 'scatter', yAxisID: 'y', pointStyle: 'circle', backgroundColor: 'rgba(0,0,0,0)', pointBackgroundColor: 'rgba(0,0,0,0)', borderColor: '#ef4444', pointBorderColor: '#ef4444', pointBorderWidth: 2, borderWidth: 2, radius: 6, hoverRadius: 9, order: 9 },
+                // 2026-10-19 (Theodore): open stop orders also get a small dash at the
+                // LIMIT price, same color, joined to the stop circle by a thin line.
+                // Only where limit differs from stop (ETF open buys are plain limits).
+                ...[['buy', data.open_buys, '#22c55e'], ['sell', data.open_sells, '#ef4444']].flatMap(([side, list, color]) => {
+                    const st = (list || []).filter(o => Number.isFinite(Number(o.limit)) && Number(o.limit) > 0 && Number(o.limit) !== Number(o.p))
+                    return [
+                        { label: 'Open ' + side + ' limit', data: st.map(o => ({ x: Number(o.t), y: Number(o.limit) })), type: 'scatter', yAxisID: 'y', pointStyle: 'line', borderColor: color, pointBorderColor: color, pointBorderWidth: 2, radius: 6, hoverRadius: 8, order: 9 },
+                        { label: 'Open ' + side + ' stop-limit link', data: st.flatMap(o => [{ x: Number(o.t), y: Number(o.p) }, { x: Number(o.t), y: Number(o.limit) }, { x: Number(o.t), y: NaN }]), type: 'line', yAxisID: 'y', spanGaps: false, borderColor: color, borderWidth: 1, pointRadius: 0, pointHoverRadius: 0, order: 10 },
+                    ]
+                }),
             ]
             // 2026-10-13 (Theodore): dotted gray line from each buy fill to its paired
             // sell (filled sell dot, or resting sell = hollow red circle). Drawn by a
