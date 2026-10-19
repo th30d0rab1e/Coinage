@@ -31,6 +31,9 @@ async function listCoins () {
           -- 2026-10-17 (Theodore): open-order filter (b5e5414) removed — the
           -- dropdown/search lists ANY coin again. Auto-follow/cycling uses
           -- OPEN_ORDER_COINS_SQL instead.
+        -- 2026-10-19 (Theodore): plus every etf ticker (ETFs on the chart).
+        UNION
+        SELECT ticker, 0::int, NULL::timestamptz FROM etf
         ORDER BY name ASC`)
     return rows
 }
@@ -41,8 +44,11 @@ const OPEN_ORDER_COINS_SQL = `
     SELECT s.name FROM position p JOIN stock s ON s.stock_id = p.stock_id
      WHERE (p.buy_coinbase_order_id IS NOT NULL AND p.buy_filled_price IS NULL)
         OR (p.sell_coinbase_order_id IS NOT NULL AND p.sell_filled_price IS NULL)`
+// 2026-10-19 (Theodore): ETFs with a resting etf_buy also join the cycle
+// (kept out of OPEN_ORDER_COINS_SQL, which the fills/remake follow filters use).
+const OPEN_ETF_SQL = `SELECT ticker AS name FROM etf_buy WHERE status = 'OPEN'`
 async function openOrderCoins () {
-    const { rows } = await db.query(`SELECT DISTINCT name FROM (${OPEN_ORDER_COINS_SQL}) o WHERE name IS NOT NULL ORDER BY name`)
+    const { rows } = await db.query(`SELECT DISTINCT name FROM (${OPEN_ORDER_COINS_SQL} UNION ${OPEN_ETF_SQL}) o WHERE name IS NOT NULL ORDER BY name`)
     return rows.map(r => r.name)
 }
 
@@ -173,6 +179,33 @@ async function chartData (coin, range) {
     const since = new Date((nowSec - back) * 1000)
     let prices = []
     let source = ''
+
+    // 2026-10-19 (Theodore): ETF = price_history line (any range; no Coinbase
+    // candles for equities), green dots for FILLED etf_buy, hollow green for
+    // OPEN etf_buy at limit_price. No sells, remakes, pairs or RSI.
+    const etf = await db.query('SELECT 1 FROM etf WHERE ticker = $1', [coin])
+    if (etf.rows.length) {
+        const ph = await db.query(`
+            SELECT ph.date_created AS t, ph.price AS p
+            FROM price_history ph JOIN stock s ON s.stock_id = ph.stock_id
+            WHERE s.name = $1 AND ph.date_created >= $2
+            ORDER BY ph.date_created`, [coin, since])
+        const eb = await db.query(`
+            SELECT status, COALESCE(closed_at, created_at) AS t, fill_price, limit_price, base_size, coinbase_order_id
+            FROM etf_buy
+            WHERE ticker = $1 AND status IN ('FILLED', 'OPEN')
+              AND (status = 'OPEN' OR COALESCE(closed_at, created_at) >= $2)
+            ORDER BY 2`, [coin, since])
+        const ok = d => Number.isFinite(d.t) && Number.isFinite(d.p) && d.p > 0
+        return {
+            coin, range, source: 'price_history (1-min, bot DB) — ETF', pairs: [],
+            prices: ph.rows.map(r => ({ t: new Date(r.t).getTime(), p: Number(r.p) })),
+            buys: eb.rows.filter(r => r.status === 'FILLED').map(r => ({ t: new Date(r.t).getTime(), p: Number(r.fill_price), size: Number(r.base_size), fee: 0, order_id: r.coinbase_order_id })).filter(ok),
+            sells: [], remakes: [], buy_remakes: [], sell_remakes: [], rsiSeries: [],
+            open_buys: eb.rows.filter(r => r.status === 'OPEN').map(r => ({ t: Math.max(new Date(r.t).getTime(), since.getTime()), p: Number(r.limit_price), limit: Number(r.limit_price), side: 'buy' })).filter(ok),
+            open_sells: [],
+        }
+    }
 
     if (!gran) {
         const { rows } = await db.query(`
