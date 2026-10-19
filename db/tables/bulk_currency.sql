@@ -6,5 +6,7 @@ CREATE TABLE IF NOT EXISTS public.bulk_currency (
     hold             double precision,
     available        double precision,
     profile_id       text,
-    trading_enabled  text
+    trading_enabled  text,
+    value_usd        double precision,          -- 2026-10-19 (Theodore): ETF dollar value
+    run_at           timestamp with time zone   -- 2026-10-19 (Theodore): ETF row run time (NULL = crypto/cash)
 );

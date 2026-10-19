@@ -65,6 +65,7 @@ SELECT
 FROM bulk_currency bc
 WHERE bc.currency NOT IN ('USD', 'USDC')
 AND bc.balance > 0
+AND bc.run_at IS NULL -- 2026-10-19 (Theodore): skip ETF rows (equity, not coins)
 AND NOT EXISTS (
     SELECT 1 FROM position p
     WHERE p.name = bc.currency || '-USD'

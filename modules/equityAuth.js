@@ -414,6 +414,8 @@ async function equitySnapshot() {
             shares: amountValue(pos.total_balance_equity),
             // 2026-10-17 (Theodore): dollar value; index.js matches ETF by fiat/shares price.
             fiat: amountValue(pos.total_balance_fiat),
+            // 2026-10-19 (Theodore): available shares, saved to bulk_currency.
+            available: amountValue(pos.available_to_trade_equity),
             averageEntry: amountValue(pos.average_entry_price),
             unrealizedPnl: amountValue(pos.unrealized_pnl),
         }))

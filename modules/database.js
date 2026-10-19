@@ -131,6 +131,22 @@ con.insertCurrency = async function (data) {
   }
 }
 
+// 2026-10-19 (Theodore): ETF holdings into bulk_currency (currency = ticker,
+// balance = shares, available = available shares, value_usd = dollar value,
+// run_at = run time). run_at IS NOT NULL marks an ETF row. Old ETF rows are
+// cleared first so a second call in the same minute cannot double them.
+con.insertEtfHoldings = async function (positions, runAt) {
+  try {
+      await con.query("DELETE FROM bulk_currency WHERE run_at IS NOT NULL")
+      for (const p of positions) {
+          await con.query("INSERT INTO bulk_currency (currency, balance, available, value_usd, run_at) VALUES ($1, $2, $3, $4, $5)",
+              [p.ticker || p.cbrn, p.shares, p.available, p.fiat, runAt])
+      }
+  } catch (error) {
+      console.log("insertEtfHoldings", error)
+  }
+}
+
 con.insertOpenOrders = async function (data) {
     try {
         // See insertCurrency() -- truncate here instead of at the end of

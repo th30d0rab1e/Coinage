@@ -1154,7 +1154,12 @@ async function buildEtfPlan() {
         usedPos.add(p)
         valued.add(c)
         c.positionValue = Number(p.shares) * Number(c.basisPrice)
+        p.ticker = c.ticker
     }
+    // 2026-10-19 (Theodore): save each ETF holding to bulk_currency (runs after
+    // processNewBalance truncated it this minute; latest snapshot only).
+    // Unmatched position = labeled by its cbrn.
+    await db.insertEtfHoldings(book.positions || [], new Date())
     chosen.sort((a, b) => a.positionValue - b.positionValue)
     const funded = etfPlan.fundAttemptsByCurrency(chosen, { usd: Math.max(0, book.available - sweepReserve), usdc: usdcPot })
     for (const c of chosen) notes.push(`ETF plan ${c.ticker}: ${c.kind} — ${c.reason}${c.kind === 'limit' ? ` → ${c.baseSize} @ ${c.limitPrice}` : ''} [${c.usdcProductId ? 'USDC' : 'USD'}] value $${c.positionValue.toFixed(2)}`)
