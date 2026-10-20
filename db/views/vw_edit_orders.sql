@@ -181,12 +181,12 @@ gap AS (
 -- clamp can produce one when price sits just under the lowest paid).
 SELECT p.name,
     p.period_type,
-    bp.limit_price AS order_price,
+    bp2.limit_price AS order_price,
     s.price AS price_now,
     p.buy_order_id,
     p.buy_coinbase_order_id AS coinbase_order_id,
     p.shares,
-    bp.stop_price AS new_stop_price,
+    bp2.stop_price AS new_stop_price,
     'buy'::text AS order_type,
     trunc(1.0 - s.price::numeric / NULLIF((
         SELECT min(pa.low)::numeric FROM price_aggregate pa
@@ -194,7 +194,7 @@ SELECT p.name,
     ), 0::numeric), 4) AS estimated_profit,
     p.last_remade_at,
     p.buy_counter AS counter,
-    ABS(bp.stop_price - p.buy_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
+    ABS(bp2.stop_price - p.buy_stop_price::numeric) / NULLIF(s.price::numeric, 0) AS price_diff
 FROM position p
 JOIN stock s ON p.stock_id = s.stock_id
 CROSS JOIN gap g
@@ -222,6 +222,16 @@ CROSS JOIN LATERAL fn_buy_below_paid(
     paid.min_paid,
     s.price_rounding
 ) bp
+-- 2026-10-19 (Theodore): a capped order can still step down: new stop =
+-- lower of the capped trail and the current stop minus one remake step;
+-- limit = stop x 1.01 (truncated). Only ever lower, so it stays under the cheapest bag.
+CROSS JOIN LATERAL (
+    SELECT LEAST(bp.stop_price,
+                 trunc(p.buy_stop_price::numeric * (1 - cfg.buy_remake_step_pct / 100), s.price_rounding)) AS stop_price
+) st
+CROSS JOIN LATERAL (
+    SELECT st.stop_price, trunc(st.stop_price * 1.01, s.price_rounding) AS limit_price
+) bp2
 WHERE p.buy_coinbase_order_id IS NOT NULL
 AND p.buy_filled_price IS NULL
 -- 2026-10-07: never remake (cancel + re-create as a stop-limit) a listing
@@ -235,10 +245,10 @@ AND p.period_type IS DISTINCT FROM 'listing'
 -- index.js processDipBuys().
 AND p.buy_source IS DISTINCT FROM 'dip_buy'
 -- only-lower ratchet (both stop and limit must drop)
-AND p.buy_stop_price > bp.stop_price::double precision
-AND p.buy_price > bp.limit_price::double precision
+AND p.buy_stop_price > bp2.stop_price::double precision  -- 2026-10-19 (Theodore): bp2
+AND p.buy_price > bp2.limit_price::double precision
 -- the new stop must sit above the live price (see header)
-AND bp.stop_price > s.price::numeric
+AND bp2.stop_price > s.price::numeric
 -- 2026-10-08: only remake after the price has DROPPED since the last buy
 -- remake. buy_remade_price = live price at the last successful buy remake
 -- (stamped by index.js processRemakeOrders()). NULL = never remade, so the
