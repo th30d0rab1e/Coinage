@@ -1218,6 +1218,9 @@ async function buildEtfPlan() {
     const valueOf = new Map((vals || []).map(r => [r.currency, Number(r.value_usd) || 0]))
     for (const c of chosen) c.positionValue = valueOf.get(c.ticker) || 0
     chosen.sort((a, b) => a.positionValue - b.positionValue)
+    // 2026-10-20 (Theodore): ONE ETF buy per minute total: the smallest position
+    // that passed every skip above (wait-for-fill, REJECTED, untracked order).
+    chosen.splice(1)
     const funded = etfPlan.fundAttemptsByCurrency(chosen, { usd: Math.max(0, book.available - sweepReserve), usdc: usdcPot })
     for (const c of chosen) notes.push(`ETF plan ${c.ticker}: ${c.kind} — ${c.reason}${c.kind === 'limit' ? ` → ${c.baseSize} @ ${c.limitPrice}` : ''} [${c.usdcProductId ? 'USDC' : 'USD'}] value $${c.positionValue.toFixed(2)}`)
     // No USD fallback: the send step skips a USDC row if USDC is short.
