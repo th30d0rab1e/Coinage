@@ -327,6 +327,8 @@ async function readOrder(orderId) {
         filledSize: parseFloat(order.filled_size || 0) || 0,
         filledValue: parseFloat(order.filled_value || 0) || 0,
         avgFilledPrice: parseFloat(order.average_filled_price || 0) || null,
+        // 2026-10-19 (Theodore): which balance Coinbase charged (USD-first waterfall).
+        fundingSource: order.funding_source || null,
     }
 }
 

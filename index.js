@@ -630,16 +630,41 @@ function mightStillFill(errorMessage) {
 
 // Market rows only: fills is the source of truth for whether the daily
 // market buy filled (readFill often still says OPEN right after place).
+// 2026-10-20 (Theodore): USDC-only guard. Reads the order; funding_source other
+// than FUNDING_SOURCE_USDC_ONLY = disable every ETF, alert, mark the row.
+// Pending order with no/UNSPECIFIED funding yet = 'pending' (rechecked next run).
+async function etfFundingGuard(ticker, orderId) {
+    const o = await equity.readOrder(orderId)
+    const pending = !o.ok || ['OPEN', 'PENDING', 'QUEUED'].includes(o.status)
+    if (o.fundingSource === 'FUNDING_SOURCE_USDC_ONLY') return 'ok'
+    if (pending && (!o.fundingSource || o.fundingSource === 'FUNDING_SOURCE_UNSPECIFIED')) {
+        console.log(`ETF funding check pending: ${ticker} ${orderId} (${o.ok ? o.status : o.reason})`)
+        return 'pending'
+    }
+    const msg = `ETF buy funded from USD: ${ticker} ${orderId}; ETF buying disabled`
+    console.log(`${msg} (funding_source ${o.fundingSource})`)
+    await db.query(`UPDATE etf SET enabled = false WHERE enabled`)
+    await db.query(`UPDATE etf_buy SET error_message = $2 WHERE coinbase_order_id = $1`, [orderId, `${msg} (${o.fundingSource})`])
+    try {
+        const p = await profitAlerts.loadPushover(db, 'pushover_etf_buy_alerts')
+        if (p) await profitAlerts.pushSendAll(p, 'ETF USD guard', msg)
+    } catch (e) { console.log(`ETF USD guard Pushover not sent ${e?.message || e}`) }
+    equitySessionOpen = false // stop this run's ETF loop
+    return 'tripped'
+}
+
 async function reconcileEtfBuysFromFills(chicagoDate) {
     const result = await db.query(
         `UPDATE etf_buy AS e
          SET filled = true,
              fill_price = f.avg_price,
+             base_size = COALESCE(e.base_size, f.shares), -- 2026-10-20 (Theodore)
              error_message = NULL,
              status = 'FILLED'
          FROM (
              SELECT order_id,
-                    AVG(price)::numeric AS avg_price
+                    AVG(price)::numeric AS avg_price,
+                    SUM(size / NULLIF(price, 0))::numeric AS shares -- quote-sized market fills
              FROM fills
              WHERE order_id IS NOT NULL
                AND price IS NOT NULL
@@ -651,6 +676,7 @@ async function reconcileEtfBuysFromFills(chicagoDate) {
            AND (
                e.filled IS NOT TRUE
                OR e.fill_price IS NULL
+               OR e.base_size IS NULL
                OR e.error_message IS NOT NULL
                OR e.status IS DISTINCT FROM 'FILLED'
            )
@@ -693,10 +719,11 @@ async function probeOpenEtfBuys(chicagoDate) {
             `UPDATE etf_buy
              SET filled = true,
                  fill_price = COALESCE($2::numeric, fill_price),
+                 base_size = COALESCE(base_size, $3::numeric), -- 2026-10-20 (Theodore)
                  error_message = NULL,
                  status = 'FILLED'
              WHERE etf_buy_id = $1`,
-            [row.etf_buy_id, fillPrice]
+            [row.etf_buy_id, fillPrice, fill.filledSize > 0 ? fill.filledSize : null]
         )
         updated += 1
         console.log(`ETF probe readFill (market): ${row.ticker} fill_price=${fillPrice}`)
@@ -925,6 +952,12 @@ async function buildEtfPlan() {
     const notes = []
     await reconcileEtfBuysFromFills(today)
     await probeOpenEtfBuys(today)
+    // 2026-10-20 (Theodore): recheck funding of the last 10 minutes of ETF orders
+    // (ones still pending when placed). A USD-funded one disables all ETFs.
+    const recent = await db.query(`SELECT ticker, coinbase_order_id FROM etf_buy WHERE coinbase_order_id IS NOT NULL AND created_at > NOW() - INTERVAL '10 minutes'`)
+    for (const r of recent?.rows || []) {
+        if ((await etfFundingGuard(r.ticker, r.coinbase_order_id)) === 'tripped') break
+    }
     const listed = await db.query(
         // usdc_product_id (2026-10-07): set = buy on the USDC product with
         // USDC; NULL (TOPW) = USD only.
@@ -1323,7 +1356,7 @@ async function placeEtfMarket(row, today) {
         fillPrice: filled ? fillPrice : null, baseSize, status: filled ? 'FILLED' : 'OPEN',
         quoteCurrency: currency, productId })
     console.log(filled ? `ETF buy filled: ${row.ticker} ${quote.toFixed(2)} ${currency} market` : `ETF market buy accepted, fill not confirmed yet: ${row.ticker} (${currency}) status ${fillStatus}`)
-    return { filled }
+    return { filled, orderId }
 }
 
 // Send the orders reserved at the start of this run (no re-pick, no
@@ -1399,10 +1432,20 @@ async function processEquityEtfBuys() {
                 console.log(`ETF market skipped: ${row.ticker} session is ${equitySessionInfo?.currentSession || 'closed'} (market is NORMAL only)`)
                 continue
             }
+            // 2026-10-20 (Theodore): USDC-only gate. Coinbase spends USD first, so an
+            // ETF order goes out only while LIVE USD available is under its cost.
+            const live = await equity.defaultUsdAvailable()
+            if (!live.ok || !(live.available < cost)) {
+                console.log(`ETF USD gate: live USD available ${live.ok ? '$' + Number(live.available).toFixed(2) : 'unreadable (' + live.reason + ')'} >= $${cost.toFixed(2)}; skipping all ETF buys`)
+                break
+            }
+            console.log(`ETF USD gate: live USD available $${Number(live.available).toFixed(2)} < $${cost.toFixed(2)}, USDC ${Number(live.usdcAvailable).toFixed(2)}; placing ${row.ticker}`)
             const result = row.kind === 'market'
                 ? await placeEtfMarket(row, today)
                 : await placeEtfLimit(row, today, ttlHours)
             if (result.closed) break
+            // 2026-10-20 (Theodore): verify the debited currency right away.
+            if (result.orderId && (await etfFundingGuard(row.ticker, result.orderId)) === 'tripped') break
             if (result.filled || result.placed) {
                 if (row.quoteCurrency === 'USDC') usdcCash -= cost
                 else cash -= cost
