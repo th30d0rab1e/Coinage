@@ -514,8 +514,8 @@ async function recordEtfAttempt(row) {
     await db.query(
         `INSERT INTO etf_buy
             (ticker, chicago_date, quote_usd, filled, closed_session, coinbase_order_id, client_order_id, error_message, dip_price, fill_price,
-             order_type, status, quote_currency, product_id, equity_session)
-         VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10, 'market', $11, $12, $13, $14)`,
+             order_type, status, quote_currency, product_id, equity_session, base_size)
+         VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10, 'market', $11, $12, $13, $14, $15)`,
         [
             row.ticker,
             row.chicagoDate,
@@ -538,6 +538,8 @@ async function recordEtfAttempt(row) {
             // 2026-10-11: session shown on the Pushover ETF buy alert.
             // Market orders only go out in NORMAL.
             equitySessionInfo?.currentSession || 'EQUITY_TRADING_SESSION_NORMAL',
+            // 2026-10-19 (Theodore): shares bought (was never saved for market buys).
+            row.baseSize == null ? null : row.baseSize,
         ]
     )
 }
@@ -730,7 +732,9 @@ async function orderFillVwap(orderId, sizeIsQuote) {
                 CASE WHEN $2::boolean
                      THEN SUM(size) / NULLIF(SUM(size / price), 0)
                      ELSE SUM(price * size) / NULLIF(SUM(size), 0)
-                END AS vwap
+                END AS vwap,
+                -- 2026-10-19 (Theodore): shares bought (quote-sized fills: size is $).
+                CASE WHEN $2::boolean THEN SUM(size / price) ELSE SUM(size) END AS shares
          FROM (
              SELECT DISTINCT ON (trade_id) trade_id, price, size
              FROM (
@@ -745,7 +749,7 @@ async function orderFillVwap(orderId, sizeIsQuote) {
     )
     const row = result?.rows?.[0] || {}
     const vwap = row.vwap == null ? null : Number(row.vwap)
-    return { vwap: Number.isFinite(vwap) ? vwap : null, count: Number(row.n) || 0 }
+    return { vwap: Number.isFinite(vwap) ? vwap : null, count: Number(row.n) || 0, shares: row.shares == null ? null : Number(row.shares) }
 }
 
 // VWAP of the most recent BUY order for a product (by its latest fill
@@ -1043,6 +1047,18 @@ async function buildEtfPlan() {
             chosen.push({ kind: 'market', ticker: t, product_id: row.product_id, usdcProductId: row.usdc_product_id || null, notional: Number(row.quote_usd), reason: `daily $${Number(row.quote_usd).toFixed(2)} market buy (first of the Chicago day)` })
             continue
         }
+        // 2026-10-19 (Theodore): ETF buys are $1 MARKET orders every minute in NORMAL
+        // (was 1%-under-bid limit). Limit code below is left in place, unused.
+        if (!rejectedThisSession.has(t)) {
+            const recentM = recentByTicker.get(t)
+            if (recentM && (await orderFillVwap(recentM.coinbase_order_id, recentM.order_type === 'market')).count === 0) {
+                notes.push(`ETF wait ${t}: fill of ${recentM.coinbase_order_id} not in fills yet`)
+                continue
+            }
+            chosen.push({ kind: 'market', ticker: t, product_id: row.product_id, usdcProductId: row.usdc_product_id || null,
+                          notional: Number(row.quote_usd), positionValue: 0, session, reason: `${Number(row.quote_usd).toFixed(2)} market` })
+            continue
+        }
         if (limitOpen.has(t)) {
             notes.push(`ETF hold ${t}: a limit is already resting`)
             continue
@@ -1289,19 +1305,22 @@ async function placeEtfMarket(row, today) {
     let filled = false
     let fillPrice = null
     let fillStatus = null
+    let baseSize = null
     if (fromFills.vwap != null) {
         filled = true
         fillPrice = fromFills.vwap
+        baseSize = fromFills.shares // 2026-10-19 (Theodore)
     } else {
         const fill = await equity.readFill(orderId)
         filled = fill.unknown || fill.filledSize > 0 || fill.filledQuote > 0
         fillPrice = fill.filledSize > 0 && fill.filledQuote > 0 ? fill.filledQuote / fill.filledSize : null
         fillStatus = fill.status
+        baseSize = fill.filledSize > 0 ? fill.filledSize : null // 2026-10-19 (Theodore)
     }
     await recordEtfAttempt({ ticker: row.ticker, chicagoDate: today, quoteUsd: quote, filled,
         closedSession: false, coinbaseOrderId: orderId, clientOrderId,
         errorMessage: filled ? null : `not filled (status ${fillStatus || 'unknown'})`,
-        fillPrice: filled ? fillPrice : null, status: filled ? 'FILLED' : 'OPEN',
+        fillPrice: filled ? fillPrice : null, baseSize, status: filled ? 'FILLED' : 'OPEN',
         quoteCurrency: currency, productId })
     console.log(filled ? `ETF buy filled: ${row.ticker} ${quote.toFixed(2)} ${currency} market` : `ETF market buy accepted, fill not confirmed yet: ${row.ticker} (${currency}) status ${fillStatus}`)
     return { filled }
