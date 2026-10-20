@@ -1151,159 +1151,160 @@ LIMIT 1;
 -- 2026-10-07 (Theodore): sorted by priority DESC ONLY -- the order book no
 -- longer ranks candidates here (its gates below still filter).
 -- 2026-10-18 (Theodore): average-down buy commented out; repeat buys now come only from the initial buy (1% below previous buy).
--- WITH held AS (
---     SELECT DISTINCT ON (stock_id, period_type)
---         stock_id, period_type, buy_filled_price AS last_filled_price
---     FROM position
---     WHERE buy_filled_price IS NOT NULL
---     -- 2026-10-16 (Theodore): only bags still owned (sold bags no longer trigger an average-down).
---     AND sell_filled_price IS NULL
---     ORDER BY stock_id, period_type, buy_filled_date DESC
--- ),
--- sized AS (
---     SELECT
---         h.*,
---         -- 2026-10-16 (Theodore): every average-down buy is a flat $1 (was $N for the Nth open bag).
---         1::numeric AS clip_usd
---     FROM held h
--- )
--- INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
--- SELECT
---     s.stock_id,
---     s.name,
---     -- 2026-10-05: from the "plan" lateral below.
---     -- 2026-10-07: FINAL stop/limit after the below-lowest-paid rule.
---     fin.limit_price AS buy_price,
---     fin.stop_price  AS buy_stop_price,
---     plan.shares,
---     NOW() AS date_created,
---     gen_random_uuid(),
---     sized.period_type
--- FROM sized
--- JOIN stock s ON s.stock_id = sized.stock_id
--- CROSS JOIN vw_balance b
--- -- 2026-10-05 book gates (moved here from index.js processBuyOrders(); see
--- -- the clean-up delete near the top for the full rationale and fail-open
--- -- rules). Latest L2 snapshot from the last 3 minutes only -- before this,
--- -- any age was used, and coins past the old 40-coin alphabetical snapshot
--- -- cap were judged on hours-old books. NULL = no fresh snapshot = allow.
--- LEFT JOIN LATERAL (
---     SELECT bs.imbalance, bs.near_ask_usd
---     FROM book_snapshot bs
---     WHERE bs.name = s.name
---     AND bs.date_created > NOW() - INTERVAL '3 minutes'
---     ORDER BY bs.date_created DESC
---     LIMIT 1
--- ) book ON TRUE
--- -- This run's top-of-book for the coin (spread gate).
--- LEFT JOIN bulk_best_bid_ask bba ON bba.product_id = s.name
--- -- Thresholds from config (defaults = the old index.js constants) and
--- -- whether bulk_best_bid_ask is fresh enough to judge spread at all:
--- -- 2026-10-07 now v_book_* / v_bba_fresh (header), was the bookcfg lateral.
--- -- 2026-10-07 cash-scaled gap from the ONE shared place (vw_buy_stop_gap).
--- -- Theodore: cash scaling on EVERY buy, so the average-down add now uses it
--- -- too (was a flat trigger 1% / limit 1.1% above price). The below-lowest-
--- -- paid rule then normally pins it, since this coin is always held.
--- -- (gap: v_gap, assigned once at the top of the run)
--- -- The order this INSERT will create: trigger = price x (1 + gap), limit =
--- -- trigger x 1.01, shares = clip dollars / price.
--- CROSS JOIN LATERAL (
---     SELECT
---         TRUNC(s.price::numeric * (1 + v_gap) * 1.01, s.price_rounding::integer)  AS buy_price,
---         TRUNC(s.price::numeric * (1 + v_gap),        s.price_rounding::integer)  AS buy_stop_price,
---         TRUNC((sized.clip_usd / s.price::numeric), s.share_rounding::integer)    AS shares
--- ) plan
--- -- 2026-10-07 below-lowest-paid rule (replaces the add_buy_cap_ratio 0.99
--- -- cap preview): final stop/limit the row is written with.
--- CROSS JOIN LATERAL (
---     SELECT MIN(f.buy_filled_price)::numeric AS min_paid
---     FROM position f
---     WHERE f.stock_id = s.stock_id
---     AND f.buy_filled_price IS NOT NULL
---     AND f.sell_filled_price IS NULL
--- ) paid
--- CROSS JOIN LATERAL fn_buy_below_paid(plan.buy_stop_price, plan.buy_price, paid.min_paid, s.price_rounding::integer) fin
--- -- Dollar cost of the REAL order: shares x the final limit, plain and with
--- -- the ~1.2% taker-fee pad (1.012).
--- CROSS JOIN LATERAL (
---     SELECT
---         plan.shares * fin.limit_price         AS cost_usd,
---         plan.shares * fin.limit_price * 1.012 AS cost_with_fee
--- ) eff
--- -- 2026-10-07: crypto buys stay USD ONLY on purpose. USDC (vw_balance
--- -- name = 'USDC') is never cash here: it is profit parked by the USDC sweep
--- -- and the pot USDC-capable ETFs buy with (index.js fundAttemptsByCurrency).
--- -- vw_etf_cash_reserve holds only USD-funded ETF attempts.
--- WHERE b.name = 'USD'
--- -- 2026-09-25 cash-backlog gate (same as the new-position insert above):
--- -- don't add another planned buy the free cash can't cover once the
--- -- existing no-order planned rows are funded.
--- -- 2026-10-04: index.js writes config.etf_usd_reserve before this procedure
--- -- and vw_etf_cash_reserve exposes it. Subtract that from free USD so a new
--- -- crypto plan cannot spend dollars this run's ETF attempts still need.
--- -- The reserve is only those attempts (open NORMAL session, dip rules
--- -- passed, not already filled, and not skipped for lack of cash). A closed
--- -- session stores 0. ETF orders are placed after this procedure, same minute.
--- -- pause_buys still gates only these crypto inserts, not the ETF buys.
--- AND b.available
---     - COALESCE((SELECT reserve_usd FROM vw_etf_cash_reserve), 0)
---     -- 2026-10-07: realized profit queued for the USDC sweep is reserved too.
---     - COALESCE((SELECT reserve_usd FROM vw_usdc_sweep_reserve), 0)
---     - COALESCE((SELECT SUM(pb.shares * pb.buy_price * 1.012)::numeric  -- 2026-10-05: + fee pad
---                 FROM position pb JOIN stock sb ON sb.stock_id = pb.stock_id
---                 WHERE pb.buy_coinbase_order_id IS NULL
---                 AND pb.buy_filled_price IS NULL
---                 AND sb.trading_disabled IS NOT TRUE), 0)
--- -- 2026-10-05 (#2): real cost of this order incl. fee pad (was clip dollars).
---   >= eff.cost_with_fee
--- AND v_pause_buys = 'false'
--- -- Average-down TRIGGER (unchanged on purpose, 2026-10-07): price x 1.011
--- -- below the most recent fill. This is the "has price dropped below my last
--- -- buy" test, not the order price -- the order is priced by plan/fin above.
--- AND TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) < sized.last_filled_price
--- -- 2026-10-16 (Theodore): average-downs only on stronger coins, same floor as new buys.
--- AND s.priority > 1
--- AND s.trading_disabled IS NOT TRUE
--- -- 2026-10-07: never average down into a stablecoin (stock.is_stablecoin,
--- -- price-behavior flag set near the top of this procedure).
--- AND s.is_stablecoin IS NOT TRUE
--- AND NOT EXISTS (
---     SELECT 1 FROM position existing
---     WHERE existing.stock_id = sized.stock_id
---     AND existing.period_type = sized.period_type
---     AND existing.buy_order_id IS NOT NULL
---     AND existing.buy_filled_price IS NULL
--- )
--- -- Book gates (2026-10-05, were index.js placement-time checks):
--- --   spread:    only judged when bulk_best_bid_ask is fresh; then a missing
--- --              coin / one-sided quote (spread_pct NULL) fails the <= test.
--- --   imbalance: fresh snapshot not ask-heavy (>= threshold; was > -0.4 here
--- --              and >= -0.4 in index.js -- now one rule). NULL = allow.
--- --   thin ask:  near-ask notional >= order cost (eff.cost_usd, i.e. shares x
--- --              limit, same notional index.js used) * multiple. NULL = allow.
--- -- 2026-10-07: these are filters only. The bid-heavy +0.2 preference and
--- -- imbalance DESC were removed from the ORDER BY below (priority only).
--- AND (NOT v_bba_fresh OR bba.spread_pct <= v_book_max_spread_pct)
--- AND (book.imbalance IS NULL OR book.imbalance >= v_book_skip_imbalance)
--- AND (book.near_ask_usd IS NULL OR book.near_ask_usd >= eff.cost_usd * v_book_min_ask_notional_mult)
--- -- 2026-10-05 (#3) trigger must already be above price: only create the
--- -- row when price is under the final stop (2026-10-07: fin.stop_price after
--- -- the below-lowest-paid rule; was addcap.cap_stop). Not held = no limit.
--- AND s.price::numeric < CASE WHEN paid.min_paid IS NOT NULL THEN fin.stop_price
---                             ELSE 'Infinity'::numeric END
--- -- 2026-10-05 (#11) Coinbase minimum order size: base size >= base_min_size
--- -- (stock.min_shares) and quote size (shares x effective limit) >=
--- -- quote_min_size (stock.min_price). NULL minimum = no limit.
--- AND plan.shares > 0
--- AND plan.shares >= COALESCE(s.min_shares, 0)
--- AND eff.cost_usd >= COALESCE(s.min_price, 0)
--- -- 2026-10-07: priority DESC only (s = stock here). Was: bid-heavy book
--- -- first, then imbalance DESC, then priority.
--- -- 2026-10-11 (Theodore): reverted NULL-as-0.1; NULLs sink again (NULLS LAST).
--- -- 2026-10-16 (Theodore): lowest RSI first (was priority DESC), same as new buys.
--- ORDER BY
---     s.rsi ASC NULLS LAST
--- LIMIT 1;
+-- (Theodore) 2026-10-19 restored: average-down buy uncommented, exactly as before 1db1caf.
+WITH held AS (
+    SELECT DISTINCT ON (stock_id, period_type)
+        stock_id, period_type, buy_filled_price AS last_filled_price
+    FROM position
+    WHERE buy_filled_price IS NOT NULL
+    -- 2026-10-16 (Theodore): only bags still owned (sold bags no longer trigger an average-down).
+    AND sell_filled_price IS NULL
+    ORDER BY stock_id, period_type, buy_filled_date DESC
+),
+sized AS (
+    SELECT
+        h.*,
+        -- 2026-10-16 (Theodore): every average-down buy is a flat $1 (was $N for the Nth open bag).
+        1::numeric AS clip_usd
+    FROM held h
+)
+INSERT INTO position (stock_id, name, buy_price, buy_stop_price, shares, date_created, buy_order_id, period_type)
+SELECT
+    s.stock_id,
+    s.name,
+    -- 2026-10-05: from the "plan" lateral below.
+    -- 2026-10-07: FINAL stop/limit after the below-lowest-paid rule.
+    fin.limit_price AS buy_price,
+    fin.stop_price  AS buy_stop_price,
+    plan.shares,
+    NOW() AS date_created,
+    gen_random_uuid(),
+    sized.period_type
+FROM sized
+JOIN stock s ON s.stock_id = sized.stock_id
+CROSS JOIN vw_balance b
+-- 2026-10-05 book gates (moved here from index.js processBuyOrders(); see
+-- the clean-up delete near the top for the full rationale and fail-open
+-- rules). Latest L2 snapshot from the last 3 minutes only -- before this,
+-- any age was used, and coins past the old 40-coin alphabetical snapshot
+-- cap were judged on hours-old books. NULL = no fresh snapshot = allow.
+LEFT JOIN LATERAL (
+    SELECT bs.imbalance, bs.near_ask_usd
+    FROM book_snapshot bs
+    WHERE bs.name = s.name
+    AND bs.date_created > NOW() - INTERVAL '3 minutes'
+    ORDER BY bs.date_created DESC
+    LIMIT 1
+) book ON TRUE
+-- This run's top-of-book for the coin (spread gate).
+LEFT JOIN bulk_best_bid_ask bba ON bba.product_id = s.name
+-- Thresholds from config (defaults = the old index.js constants) and
+-- whether bulk_best_bid_ask is fresh enough to judge spread at all:
+-- 2026-10-07 now v_book_* / v_bba_fresh (header), was the bookcfg lateral.
+-- 2026-10-07 cash-scaled gap from the ONE shared place (vw_buy_stop_gap).
+-- Theodore: cash scaling on EVERY buy, so the average-down add now uses it
+-- too (was a flat trigger 1% / limit 1.1% above price). The below-lowest-
+-- paid rule then normally pins it, since this coin is always held.
+-- (gap: v_gap, assigned once at the top of the run)
+-- The order this INSERT will create: trigger = price x (1 + gap), limit =
+-- trigger x 1.01, shares = clip dollars / price.
+CROSS JOIN LATERAL (
+    SELECT
+        TRUNC(s.price::numeric * (1 + v_gap) * 1.01, s.price_rounding::integer)  AS buy_price,
+        TRUNC(s.price::numeric * (1 + v_gap),        s.price_rounding::integer)  AS buy_stop_price,
+        TRUNC((sized.clip_usd / s.price::numeric), s.share_rounding::integer)    AS shares
+) plan
+-- 2026-10-07 below-lowest-paid rule (replaces the add_buy_cap_ratio 0.99
+-- cap preview): final stop/limit the row is written with.
+CROSS JOIN LATERAL (
+    SELECT MIN(f.buy_filled_price)::numeric AS min_paid
+    FROM position f
+    WHERE f.stock_id = s.stock_id
+    AND f.buy_filled_price IS NOT NULL
+    AND f.sell_filled_price IS NULL
+) paid
+CROSS JOIN LATERAL fn_buy_below_paid(plan.buy_stop_price, plan.buy_price, paid.min_paid, s.price_rounding::integer) fin
+-- Dollar cost of the REAL order: shares x the final limit, plain and with
+-- the ~1.2% taker-fee pad (1.012).
+CROSS JOIN LATERAL (
+    SELECT
+        plan.shares * fin.limit_price         AS cost_usd,
+        plan.shares * fin.limit_price * 1.012 AS cost_with_fee
+) eff
+-- 2026-10-07: crypto buys stay USD ONLY on purpose. USDC (vw_balance
+-- name = 'USDC') is never cash here: it is profit parked by the USDC sweep
+-- and the pot USDC-capable ETFs buy with (index.js fundAttemptsByCurrency).
+-- vw_etf_cash_reserve holds only USD-funded ETF attempts.
+WHERE b.name = 'USD'
+-- 2026-09-25 cash-backlog gate (same as the new-position insert above):
+-- don't add another planned buy the free cash can't cover once the
+-- existing no-order planned rows are funded.
+-- 2026-10-04: index.js writes config.etf_usd_reserve before this procedure
+-- and vw_etf_cash_reserve exposes it. Subtract that from free USD so a new
+-- crypto plan cannot spend dollars this run's ETF attempts still need.
+-- The reserve is only those attempts (open NORMAL session, dip rules
+-- passed, not already filled, and not skipped for lack of cash). A closed
+-- session stores 0. ETF orders are placed after this procedure, same minute.
+-- pause_buys still gates only these crypto inserts, not the ETF buys.
+AND b.available
+    - COALESCE((SELECT reserve_usd FROM vw_etf_cash_reserve), 0)
+    -- 2026-10-07: realized profit queued for the USDC sweep is reserved too.
+    - COALESCE((SELECT reserve_usd FROM vw_usdc_sweep_reserve), 0)
+    - COALESCE((SELECT SUM(pb.shares * pb.buy_price * 1.012)::numeric  -- 2026-10-05: + fee pad
+                FROM position pb JOIN stock sb ON sb.stock_id = pb.stock_id
+                WHERE pb.buy_coinbase_order_id IS NULL
+                AND pb.buy_filled_price IS NULL
+                AND sb.trading_disabled IS NOT TRUE), 0)
+-- 2026-10-05 (#2): real cost of this order incl. fee pad (was clip dollars).
+  >= eff.cost_with_fee
+AND v_pause_buys = 'false'
+-- Average-down TRIGGER (unchanged on purpose, 2026-10-07): price x 1.011
+-- below the most recent fill. This is the "has price dropped below my last
+-- buy" test, not the order price -- the order is priced by plan/fin above.
+AND TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) < sized.last_filled_price
+-- 2026-10-16 (Theodore): average-downs only on stronger coins, same floor as new buys.
+AND s.priority > 1
+AND s.trading_disabled IS NOT TRUE
+-- 2026-10-07: never average down into a stablecoin (stock.is_stablecoin,
+-- price-behavior flag set near the top of this procedure).
+AND s.is_stablecoin IS NOT TRUE
+AND NOT EXISTS (
+    SELECT 1 FROM position existing
+    WHERE existing.stock_id = sized.stock_id
+    AND existing.period_type = sized.period_type
+    AND existing.buy_order_id IS NOT NULL
+    AND existing.buy_filled_price IS NULL
+)
+-- Book gates (2026-10-05, were index.js placement-time checks):
+--   spread:    only judged when bulk_best_bid_ask is fresh; then a missing
+--              coin / one-sided quote (spread_pct NULL) fails the <= test.
+--   imbalance: fresh snapshot not ask-heavy (>= threshold; was > -0.4 here
+--              and >= -0.4 in index.js -- now one rule). NULL = allow.
+--   thin ask:  near-ask notional >= order cost (eff.cost_usd, i.e. shares x
+--              limit, same notional index.js used) * multiple. NULL = allow.
+-- 2026-10-07: these are filters only. The bid-heavy +0.2 preference and
+-- imbalance DESC were removed from the ORDER BY below (priority only).
+AND (NOT v_bba_fresh OR bba.spread_pct <= v_book_max_spread_pct)
+AND (book.imbalance IS NULL OR book.imbalance >= v_book_skip_imbalance)
+AND (book.near_ask_usd IS NULL OR book.near_ask_usd >= eff.cost_usd * v_book_min_ask_notional_mult)
+-- 2026-10-05 (#3) trigger must already be above price: only create the
+-- row when price is under the final stop (2026-10-07: fin.stop_price after
+-- the below-lowest-paid rule; was addcap.cap_stop). Not held = no limit.
+AND s.price::numeric < CASE WHEN paid.min_paid IS NOT NULL THEN fin.stop_price
+                            ELSE 'Infinity'::numeric END
+-- 2026-10-05 (#11) Coinbase minimum order size: base size >= base_min_size
+-- (stock.min_shares) and quote size (shares x effective limit) >=
+-- quote_min_size (stock.min_price). NULL minimum = no limit.
+AND plan.shares > 0
+AND plan.shares >= COALESCE(s.min_shares, 0)
+AND eff.cost_usd >= COALESCE(s.min_price, 0)
+-- 2026-10-07: priority DESC only (s = stock here). Was: bid-heavy book
+-- first, then imbalance DESC, then priority.
+-- 2026-10-11 (Theodore): reverted NULL-as-0.1; NULLs sink again (NULLS LAST).
+-- 2026-10-16 (Theodore): lowest RSI first (was priority DESC), same as new buys.
+ORDER BY
+    s.rsi ASC NULLS LAST
+LIMIT 1;
 
 -- =====================================================================
 -- 2026-10-08 DIP-BUY (Theodore, approved on a voice call 2026-10-08;
