@@ -1263,7 +1263,7 @@ AND v_pause_buys = 'false'
 -- buy" test, not the order price -- the order is priced by plan/fin above.
 AND TRUNC(s.price::numeric * 1.011, s.price_rounding::integer) < sized.last_filled_price
 -- 2026-10-16 (Theodore): average-downs only on stronger coins, same floor as new buys.
-AND s.priority > 1
+-- 2026-10-20 (Theodore): removed priority filter (was AND s.priority > 1); priority now only ranks.
 AND s.trading_disabled IS NOT TRUE
 -- 2026-10-07: never average down into a stablecoin (stock.is_stablecoin,
 -- price-behavior flag set near the top of this procedure).
@@ -1302,7 +1302,9 @@ AND eff.cost_usd >= COALESCE(s.min_price, 0)
 -- first, then imbalance DESC, then priority.
 -- 2026-10-11 (Theodore): reverted NULL-as-0.1; NULLs sink again (NULLS LAST).
 -- 2026-10-16 (Theodore): lowest RSI first (was priority DESC), same as new buys.
+-- 2026-10-20 (Theodore): removed priority filter; order by priority DESC, rsi.
 ORDER BY
+    s.priority DESC NULLS LAST,
     s.rsi ASC NULLS LAST
 LIMIT 1;
 
