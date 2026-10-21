@@ -97,7 +97,7 @@ function fundAttempts(chosen, available) {
 // Same walk as fundAttempts, two separate pots, NO cross-currency fallback:
 //   - row.usdcProductId set (etf.usdc_product_id) -> USDC pot, USDC product.
 //     USDC short -> skip this minute (never USD).
-//   - row.usdcProductId NULL (TOPW) -> USD pot, USD product id.
+//   - row.usdcProductId NULL (TOPW) -> skipped + flagged (2026-10-20, no USD path).
 // reserve is USD ONLY (TOPW) -> config.etf_usd_reserve / vw_etf_cash_reserve,
 // so USDC-funded ETFs never hold back crypto USD. usdcPlanned = USDC total.
 function fundAttemptsByCurrency(chosen, pots) {
@@ -123,12 +123,9 @@ function fundAttemptsByCurrency(chosen, pots) {
             notes.push(`ETF skip ${row.ticker}: needs ${costText} USDC, have ${usdc.toFixed(2)} USDC (USDC only, not reserved)`)
             continue
         }
-        if (usd >= cost) {
-            attempts.push({ ...row, quoteCurrency: 'USD', orderProductId: row.product_id })
-            usd -= cost
-            continue
-        }
-        notes.push(`ETF skip ${row.ticker}: limit needs $${costText} Default USD, have $${usd.toFixed(2)} (not reserved)`)
+        // 2026-10-20 (Theodore): removed the USD path. ETFs never buy with USD;
+        // an ETF with no usdc_product_id is skipped and flagged instead.
+        notes.push(`ETF FLAG ${row.ticker}: no USDC product (etf.usdc_product_id is empty); skipped, USD is never used for ETFs`)
     }
     const sum = (cur) => attempts
         .filter((row) => row.quoteCurrency === cur)
