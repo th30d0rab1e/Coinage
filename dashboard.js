@@ -4,6 +4,21 @@ const db = require('./modules/database.js')
 const pfChart = require('./modules/dashboardChart.js')
 
 const PORT = 3000
+// 2026-10-21 (Theodore): total equity readout. Coins = vw_balance value (balance x stock.price),
+// excluding USD/USDC. ETFs = live Coinbase portfolio equity_positions total_balance_fiat (read-only GET,
+// works outside market hours, unlike the bulk_currency ETF rows). Cached 60s.
+const equity = require('./modules/equityAuth.js')
+let etfCache = { at: 0, value: null }
+async function totalEquity () {
+    if (Date.now() - etfCache.at > 55000) {
+        const snap = await equity.equitySnapshot()
+        if (snap.ok) etfCache = { at: Date.now(), value: snap.positions.reduce((a, p) => a + (Number(p.fiat) || 0), 0) }
+    }
+    const { rows } = await db.query(`SELECT COALESCE(SUM(value) FILTER (WHERE name NOT IN ('USD','USDC')), 0) AS coins,
+        COALESCE(SUM(value) FILTER (WHERE name IN ('USD','USDC')), 0) AS cash FROM vw_balance`)
+    const coins = Number(rows[0].coins), etfs = etfCache.value
+    return { coins, etfs, etfs_ok: etfs != null, total: coins + (etfs || 0), cash: Number(rows[0].cash) }
+}
 
 // 2026-10-11: live cash above the chart (vw_balance totals = available + hold).
 // profit_history.usd_balance/usdc_balance are snapshots at close only — not for this.
@@ -611,6 +626,10 @@ const server = http.createServer(async (req, res) => {
             const { rows } = await db.query(BALANCE_QUERY)
             res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
             return res.end(JSON.stringify(rows[0] || null))
+        }
+        if (url.pathname === '/api/equity') {
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+            return res.end(JSON.stringify(await totalEquity()))
         }
         if (url.pathname === '/api/coins') {
             res.writeHead(200, { 'Content-Type': 'application/json' })

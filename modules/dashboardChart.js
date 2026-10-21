@@ -388,6 +388,21 @@ function renderSection () {
     // a newer event jumps the chart again.
     return `
     <h2>Price &amp; Fills Chart</h2>
+    <!-- 2026-10-21 (Theodore): total equity = coins + ETFs (cash shown apart, not added). /api/equity, refreshed every 60s. -->
+    <div id="pf-equity" style="font-size:15px;margin-bottom:8px">Total equity: …</div>
+    <script>
+    (function () {
+        function m (v) { var n = Number(v); return isFinite(n) ? '$' + n.toFixed(2) : '—' }
+        function tick () {
+            fetch('/api/equity', { cache: 'no-store' }).then(function (r) { return r.json() }).then(function (e) {
+                document.getElementById('pf-equity').innerHTML = '<b>Total equity: ' + m(e.total) + '</b> (coins ' + m(e.coins) + ' + ETFs ' + m(e.etfs) + ')' +
+                    (e.etfs_ok ? '' : ' <span class="dim">ETFs unavailable</span>') +
+                    ' <span class="dim" style="font-size:12px">· cash ' + m(e.cash) + ' not included</span>'
+            }).catch(function () {})
+        }
+        tick(); setInterval(tick, 60000)
+    })()
+    </script>
     <div id="pf-controls" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;font-size:13px">
         <label for="pf-coin-search" class="dim">Search</label>
         <input id="pf-coin-search" type="search" placeholder="Type to filter…" autocomplete="off"
