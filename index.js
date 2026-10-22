@@ -645,10 +645,7 @@ async function etfFundingGuard(ticker, orderId) {
     console.log(`${msg} (funding_source ${o.fundingSource})`)
     await db.query(`UPDATE etf SET enabled = false WHERE enabled`)
     await db.query(`UPDATE etf_buy SET error_message = $2 WHERE coinbase_order_id = $1`, [orderId, `${msg} (${o.fundingSource})`])
-    try {
-        const p = await profitAlerts.loadPushover(db, 'pushover_etf_buy_alerts')
-        if (p) await profitAlerts.pushSendAll(p, 'ETF USD guard', msg)
-    } catch (e) { console.log(`ETF USD guard Pushover not sent ${e?.message || e}`) }
+    // 2026-10-22 (Theodore): no Pushover alert for the USD guard; it only logs and disables ETFs.
     equitySessionOpen = false // stop this run's ETF loop
     return 'tripped'
 }
