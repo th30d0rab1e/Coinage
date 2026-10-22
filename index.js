@@ -637,6 +637,9 @@ async function etfFundingGuard(ticker, orderId) {
     const o = await equity.readOrder(orderId)
     const pending = !o.ok || ['OPEN', 'PENDING', 'QUEUED'].includes(o.status)
     if (o.fundingSource === 'FUNDING_SOURCE_USDC_ONLY') return 'ok'
+    // 2026-10-22 (Theodore): mixed USD+USDC is ok. The USD gate already caps any USD use
+    // to the last few cents of free USD (under the order cost); keep buying until USDC runs out.
+    if (o.fundingSource === 'FUNDING_SOURCE_COMBINED') return 'ok'
     if (pending && (!o.fundingSource || o.fundingSource === 'FUNDING_SOURCE_UNSPECIFIED')) {
         console.log(`ETF funding check pending: ${ticker} ${orderId} (${o.ok ? o.status : o.reason})`)
         return 'pending'
