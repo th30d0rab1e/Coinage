@@ -952,12 +952,7 @@ async function buildEtfPlan() {
     const notes = []
     await reconcileEtfBuysFromFills(today)
     await probeOpenEtfBuys(today)
-    // 2026-10-20 (Theodore): recheck funding of the last 10 minutes of ETF orders
-    // (ones still pending when placed). A USD-funded one disables all ETFs.
-    const recent = await db.query(`SELECT ticker, coinbase_order_id FROM etf_buy WHERE coinbase_order_id IS NOT NULL AND created_at > NOW() - INTERVAL '10 minutes'`)
-    for (const r of recent?.rows || []) {
-        if ((await etfFundingGuard(r.ticker, r.coinbase_order_id)) === 'tripped') break
-    }
+    // 2026-10-22 (Theodore): funding guard removed. Rule: USD < $1 and USDC >= $1 -> buy $1.
     const listed = await db.query(
         // usdc_product_id (2026-10-07): set = buy on the USDC product with
         // USDC; NULL (TOPW) = USD only.
@@ -1438,6 +1433,11 @@ async function processEquityEtfBuys() {
             // 2026-10-20 (Theodore): USDC-only gate. Coinbase spends USD first, so an
             // ETF order goes out only while LIVE USD available is under its cost.
             const live = await equity.defaultUsdAvailable()
+            // 2026-10-22 (Theodore): also need USDC >= cost.
+            if (live.ok && !(Number(live.usdcAvailable) >= cost)) {
+                console.log(`ETF USDC gate: USDC ${Number(live.usdcAvailable).toFixed(2)} < ${cost.toFixed(2)}; skipping all ETF buys`)
+                break
+            }
             if (!live.ok || !(live.available < cost)) {
                 console.log(`ETF USD gate: live USD available ${live.ok ? '$' + Number(live.available).toFixed(2) : 'unreadable (' + live.reason + ')'} >= $${cost.toFixed(2)}; skipping all ETF buys`)
                 break
@@ -1447,8 +1447,6 @@ async function processEquityEtfBuys() {
                 ? await placeEtfMarket(row, today)
                 : await placeEtfLimit(row, today, ttlHours)
             if (result.closed) break
-            // 2026-10-20 (Theodore): verify the debited currency right away.
-            if (result.orderId && (await etfFundingGuard(row.ticker, result.orderId)) === 'tripped') break
             if (result.filled || result.placed) {
                 if (row.quoteCurrency === 'USDC') usdcCash -= cost
                 else cash -= cost
