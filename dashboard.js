@@ -635,6 +635,11 @@ const server = http.createServer(async (req, res) => {
             res.writeHead(200, { 'Content-Type': 'application/json' })
             return res.end(JSON.stringify(await pfChart.listCoins()))
         }
+        // 2026-10-24 (Theodore): ranked coins — chart cycling list.
+        if (url.pathname === "/api/rank-coins") {
+            res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" })
+            return res.end(JSON.stringify(await pfChart.rankCoins()))
+        }
         // 2026-10-17 (Theodore): coins with an open order — chart cycling list.
         if (url.pathname === '/api/open-order-coins') {
             res.writeHead(200, { 'Content-Type': 'application/json' })

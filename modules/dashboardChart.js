@@ -47,6 +47,12 @@ const OPEN_ORDER_COINS_SQL = `
 // 2026-10-19 (Theodore): ETFs with a resting etf_buy also join the cycle
 // (kept out of OPEN_ORDER_COINS_SQL, which the fills/remake follow filters use).
 const OPEN_ETF_SQL = `SELECT ticker AS name FROM etf_buy WHERE status = 'OPEN'`
+// 2026-10-24 (Theodore): chart cycle list = ranked coins, priority DESC then name (NULL excluded).
+async function rankCoins () {
+    const { rows } = await db.query("SELECT name FROM stock WHERE priority IS NOT NULL ORDER BY priority DESC, name")
+    return rows.map(r => r.name)
+}
+
 async function openOrderCoins () {
     const { rows } = await db.query(`SELECT DISTINCT name FROM (${OPEN_ORDER_COINS_SQL} UNION ${OPEN_ETF_SQL}) o WHERE name IS NOT NULL ORDER BY name`)
     return rows.map(r => r.name)
@@ -659,13 +665,14 @@ function renderSection () {
         // 2026-10-12: only real user picks (and coin-link clicks, which dispatch
         // 'change') land here — rotation calls load() directly and setting
         // coinSel.value in code never fires 'change' — so this = manual pause.
-        coinSel.addEventListener('change', () => {
-            pauseRotation()
+        coinSel.addEventListener("change", () => {
+            // 2026-10-24 (Theodore): manual pick no longer pauses; next tick continues from this coin rank.
+            if (coinSel.value) { lastRotCoin = coinSel.value; scheduleRotate(ROTATE_MS) }
             if (!coinSel.value) showAll('Manual')
             else load(coinSel.value, 'Manual')
         })
         rangeSel.addEventListener('change', () => { if (current) load(current) })
-        autoFollow.addEventListener('change', () => { if (autoFollow.checked) pollLatestEvent() })
+        // 2026-10-24 (Theodore): auto-follow checkbox no longer jumps to latest event.
         document.getElementById('pf-reset').addEventListener('click', () => chart && chart.resetZoom())
 
         const searchBox = document.getElementById('pf-coin-search')
@@ -699,10 +706,8 @@ function renderSection () {
             allCoins = list || []
             renderCoinOptions('')
             // Start on the newest buy/sell/remake.
-            pollLatestEvent().then(() => {
-                if (!current && allCoins[0]) load(allCoins[0].name)
-                else if (!current) emitFilter(null)
-            })
+            // 2026-10-24 (Theodore): start at rank #1.
+            refreshRankCoins().then(() => { if (!current) rotateStep() })
         }).catch(e => { coinSel.innerHTML = '<option value="">All</option>'; status.textContent = 'Error: ' + e.message })
 
         // 2026-10-12 (Theodore): rotate through the Positions coins every 20s.
@@ -720,7 +725,16 @@ function renderSection () {
         }
         refreshOpenCoins()
         setInterval(refreshOpenCoins, POLL_MS)
+        // 2026-10-24 (Theodore): cycle by rank #1 -> last, then wrap.
+        let rankList = []
+        function refreshRankCoins () {
+            return fetch("/api/rank-coins", { cache: "no-store" }).then(r => r.json())
+                .then(l => { if (Array.isArray(l)) rankList = l }).catch(() => {})
+        }
+        refreshRankCoins()
+        setInterval(refreshRankCoins, POLL_MS)
         function rotationCoins () {
+            return rankList // 2026-10-24 (Theodore): old open-order list below is unused
             const out = []
             document.querySelectorAll('#positions-table tbody tr[data-coin]').forEach(tr => {
                 if (tr.querySelector('.kind-sold')) return
@@ -743,7 +757,7 @@ function renderSection () {
                 // Continue after the last coin rotation showed (wraps around).
                 const next = list[(list.indexOf(lastRotCoin) + 1) % list.length]
                 lastRotCoin = next
-                load(next, 'Cycling ' + (list.indexOf(next) + 1) + '/' + list.length)
+                load(next, "Rank #" + (list.indexOf(next) + 1) + "/" + list.length)
             }
             scheduleRotate(ROTATE_MS)
         }
@@ -759,10 +773,9 @@ function renderSection () {
         })
         scheduleRotate(ROTATE_MS)
 
-        setInterval(pollLatestEvent, POLL_MS)
-        document.addEventListener('visibilitychange', () => { if (!document.hidden) pollLatestEvent() })
+        // 2026-10-24 (Theodore): latest sell/buy/remake auto-follow replaced by rank cycling.
     })()
     </script>`
 }
 
-module.exports = { listCoins, openOrderCoins, latestSell, latestBuy, latestRemake, latestEvent, chartData, renderSection, RANGES }
+module.exports = { rankCoins, listCoins, openOrderCoins, latestSell, latestBuy, latestRemake, latestEvent, chartData, renderSection, RANGES }
