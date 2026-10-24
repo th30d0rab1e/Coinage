@@ -173,7 +173,25 @@ async function coinbaseCandles (coin, startSec, endSec, gran) {
 }
 
 
+// 2026-10-23 (Theodore): coin rank by stock.priority DESC (same order the buy query uses).
+// NULL priority excluded, ties share a rank — same as the table Rank column.
+async function coinRank (coin) {
+    const r = await db.query(`
+        SELECT s.name, rk.rank, (SELECT count(*) FROM stock WHERE priority IS NOT NULL) AS total, s.priority, s.rsi
+        FROM stock s
+        LEFT JOIN (SELECT stock_id, RANK() OVER (ORDER BY priority DESC) AS rank FROM stock WHERE priority IS NOT NULL) rk ON rk.stock_id = s.stock_id
+        WHERE s.name = $1`, [coin])
+    const x = r.rows[0]
+    return x ? { rank: x.rank == null ? null : Number(x.rank), total: Number(x.total), priority: x.priority == null ? null : Number(x.priority), rsi: x.rsi == null ? null : Number(x.rsi) } : null
+}
+
 async function chartData (coin, range) {
+    const data = await chartDataInner(coin, range)
+    data.rank = await coinRank(coin) // 2026-10-23 (Theodore)
+    return data
+}
+
+async function chartDataInner (coin, range) {
     const [back, gran] = RANGES[range] || RANGES['7d']
     const nowSec = Math.floor(Date.now() / 1000)
     const since = new Date((nowSec - back) * 1000)
@@ -421,6 +439,8 @@ function renderSection () {
         <button id="pf-resume" style="display:none;background:#2563eb;color:#fff;border:0;border-radius:6px;padding:6px 10px">Resume cycling</button>
         <span id="pf-status" class="dim"></span>
     </div>
+    <!-- 2026-10-23 (Theodore): selected coin rank / priority / RSI -->
+    <div id="pf-rank" style="font-size:15px;font-weight:600;margin-bottom:6px"></div>
     <div style="position:relative;height:420px;background:#151515;border-radius:8px;padding:8px"><canvas id="pf-chart"></canvas></div>
     <div class="dim" style="font-size:12px;margin-top:4px">
         Polls buys, sells and remakes every 1 minute while this tab is open. Leave the browser window open on this machine to keep watching.
@@ -592,6 +612,9 @@ function renderSection () {
                 const data = await r.json()
                 if (data.error) throw new Error(data.error)
                 draw(data)
+                // 2026-10-23 (Theodore): rank line near the coin name
+                const rk = data.rank, f2 = v => v == null ? "—" : Number(v).toFixed(2)
+                document.getElementById("pf-rank").textContent = coin + " · " + (rk ? (rk.rank == null ? "Rank — (no priority)" : "Rank #" + rk.rank + " of " + rk.total) + " · priority " + f2(rk.priority) + " · RSI " + (rk.rsi == null ? "—" : Math.round(rk.rsi)) : "no stock row")
                 const nBuyRem = (data.buy_remakes && data.buy_remakes.length) || ((data.remakes || []).filter(r => r.side === 'buy_remake').length)
                 const nSellRem = (data.sell_remakes && data.sell_remakes.length) || ((data.remakes || []).filter(r => r.side === 'sell_remake').length)
                 const nRsi = (data.rsiSeries && data.rsiSeries.length) || 0
@@ -605,6 +628,7 @@ function renderSection () {
             coinSel.value = ''
             if (chart) { chart.destroy(); chart = null }
             emitFilter(null)
+            document.getElementById('pf-rank').textContent = '' // 2026-10-23 (Theodore)
             status.textContent = (note ? note + ' · ' : '') + 'All coins — tables unfiltered'
         }
 
